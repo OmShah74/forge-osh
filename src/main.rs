@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     // Handle subcommands
     if let Some(cmd) = cli.command.clone() {
         let mut app = App::new(&cli).await?;
-        return Ok(app.run_subcommand(cmd).await?);
+        return app.run_subcommand(cmd).await;
     }
 
     // Check if we have any provider configured

@@ -44,12 +44,13 @@ pub struct CostTracker {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CostEntry {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub input_cost_per_million: f64,
-    pub output_cost_per_million: f64,
-    pub cost_usd: f64,
+    input_tokens: u32,
+    output_tokens: u32,
+    input_cost_per_million: f64,
+    output_cost_per_million: f64,
+    cost_usd: f64,
 }
 
 impl CostTracker {

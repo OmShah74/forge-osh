@@ -1,9 +1,8 @@
 pub mod keyring;
 pub mod models;
 
-use crate::error::{ForgeError, Result};
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Name used for directories and display
@@ -49,6 +48,7 @@ pub fn sessions_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -62,17 +62,6 @@ pub struct Config {
     pub ui: UiConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            providers: ProvidersConfig::default(),
-            agent: AgentConfig::default(),
-            tools: ToolsConfig::default(),
-            ui: UiConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {

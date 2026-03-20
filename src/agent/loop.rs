@@ -2,16 +2,14 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::config::Config;
-use crate::error::{ForgeError, Result};
+use crate::error::Result;
 use crate::provider::router::ProviderRouter;
-use crate::provider::Provider;
 use crate::session::Session;
 use crate::tools::executor::ToolExecutor;
 use crate::tools::ToolRegistry;
 use crate::types::*;
 
 use super::context::{ContextManager, ContextStatus};
-use super::planner::Planner;
 use super::system_prompt;
 
 /// Events emitted by the agent loop to the TUI
@@ -128,11 +126,8 @@ impl AgentLoop {
             // (In practice these were already sent during streaming above,
             //  but we collect any remaining)
             while let Ok(event) = stream_rx.try_recv() {
-                match &event {
-                    StreamEvent::Token(t) => {
-                        let _ = self.event_tx.send(AgentEvent::Token(t.clone()));
-                    }
-                    _ => {}
+                if let StreamEvent::Token(t) = &event {
+                    let _ = self.event_tx.send(AgentEvent::Token(t.clone()));
                 }
             }
             drop(router);
@@ -198,7 +193,7 @@ impl AgentLoop {
                 let perm_tx = self.permission_tx.clone();
                 let trust_mode = self.config.general.trust_mode;
 
-                let tool_name = tc.name.clone();
+                let _tool_name = tc.name.clone();
                 let output = executor
                     .execute(
                         tc,

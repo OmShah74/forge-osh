@@ -1,10 +1,11 @@
-use crate::error::{ForgeError, Result};
+use crate::error::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Manages API key storage. Keys are stored in a simple encrypted-at-rest file
 /// under the config directory. For simplicity we store them as a JSON map.
 /// In production, you might use the OS keyring crate.
+#[derive(Clone)]
 pub struct KeyStore {
     keys_path: PathBuf,
     cache: HashMap<String, String>,

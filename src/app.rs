@@ -3,7 +3,6 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::cli::*;
 use crate::config::{self, keyring::KeyStore, Config};
-use crate::error::Result;
 use crate::provider::router::ProviderRouter;
 use crate::session::{checkpoint::Checkpoint, Session};
 use crate::tools::ToolRegistry;
@@ -120,6 +119,7 @@ impl App {
             self.provider_router.clone(),
             self.tools.clone(),
             self.session.clone(),
+            Arc::new(Mutex::new(self.key_store.clone())),
         )
         .await
     }
@@ -243,8 +243,8 @@ impl App {
                     println!("No saved sessions.");
                 } else {
                     println!(
-                        "{:<36} {:<15} {:<8} {:<20} {}",
-                        "ID", "Name", "Msgs", "Updated", "Model"
+                        "{:<36} {:<15} {:<8} {:<20} Model",
+                        "ID", "Name", "Msgs", "Updated"
                     );
                     println!("{}", "-".repeat(90));
                     for s in &sessions {
@@ -277,7 +277,7 @@ impl App {
                     println!("No providers configured.");
                     println!("Set an API key: forge-osh config keys set anthropic <your-key>");
                 } else {
-                    println!("{:<15} {:<20} {}", "ID", "Name", "Status");
+                    println!("{:<15} {:<20} Status", "ID", "Name");
                     println!("{}", "-".repeat(50));
                     for (id, name) in &providers {
                         let active = if *id == router.active_provider_id() {
@@ -312,8 +312,8 @@ impl App {
                 };
 
                 println!(
-                    "{:<15} {:<40} {:<10} {:<8} {}",
-                    "Provider", "Model", "Context", "Tools", "Cost (in/out per 1M)"
+                    "{:<15} {:<40} {:<10} {:<8} Cost (in/out per 1M)",
+                    "Provider", "Model", "Context", "Tools"
                 );
                 println!("{}", "-".repeat(100));
                 for m in &models {

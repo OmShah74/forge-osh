@@ -175,9 +175,7 @@ impl ProviderRouter {
             .get(&self.active_provider)
             .map(|p| p.as_ref())
             .ok_or_else(|| {
-                ForgeError::Provider(format!(
-                    "No active provider. Configure at least one provider with an API key."
-                ))
+                ForgeError::Provider("No active provider. Configure at least one provider with an API key.".to_string())
             })
     }
 

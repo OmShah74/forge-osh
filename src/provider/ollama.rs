@@ -58,7 +58,7 @@ impl OllamaProvider {
                 arr.iter()
                     .map(|m| {
                         let name = m["name"].as_str().unwrap_or("unknown").to_string();
-                        let size = m["size"].as_u64().unwrap_or(0);
+                        let _size = m["size"].as_u64().unwrap_or(0);
                         // Rough context window estimation based on model
                         let ctx = if name.contains("llama") {
                             131_072
@@ -207,7 +207,7 @@ impl Provider for OllamaProvider {
             let mut stream = response.bytes_stream();
             let mut full_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut usage = Usage::default();
+            let usage = Usage::default();
             let mut stop_reason = CompletionReason::EndTurn;
             let mut buffer = String::new();
             let mut tc_map: std::collections::HashMap<u32, (String, String, String)> =
@@ -331,7 +331,7 @@ impl Provider for OllamaProvider {
             let mut stream = response.bytes_stream();
             let mut full_text = String::new();
             let mut usage = Usage::default();
-            let mut stop_reason = CompletionReason::EndTurn;
+            let stop_reason = CompletionReason::EndTurn;
             let mut buffer = String::new();
 
             while let Some(chunk) = stream.next().await {

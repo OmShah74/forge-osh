@@ -34,6 +34,7 @@ pub enum Action {
     // Modals
     OpenModelPicker,
     OpenProviderPicker,
+    OpenKeyManager,
     ToggleTrustMode,
     SaveSession,
     NewSession,
@@ -69,6 +70,12 @@ pub struct InputState {
     pub history: Vec<String>,
     pub history_index: Option<usize>,
     pub multiline: bool,
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InputState {
@@ -170,8 +177,8 @@ impl InputState {
             return;
         }
         let idx = match self.history_index {
-            Some(i) if i > 0 => i - 1,
             Some(0) => return,
+            Some(i) => i - 1,
             None => self.history.len() - 1,
         };
         self.history_index = Some(idx);
@@ -200,14 +207,26 @@ impl InputState {
     }
 }
 
-/// Map a key event to an action, depending on the current UI mode
+/// Map a key event to an action, depending on the current UI mode.
+///
+/// IMPORTANT: On Windows, Ctrl+M and Enter are the same byte (0x0D).
+/// We must NEVER map Ctrl+M to anything other than Submit, because
+/// crossterm may report Enter as Ctrl+Char('m') on some Windows terminals.
+/// Similarly, Ctrl+I = Tab, Ctrl+H = Backspace on Windows.
+///
+/// Safe Ctrl combos on Windows: Ctrl+A-G, Ctrl+K, Ctrl+L, Ctrl+N-Z (except M, I, H, J)
+/// We use F-keys for model/provider/keys to avoid ALL ambiguity.
 pub fn map_key_normal(key: KeyEvent) -> Action {
     match (key.modifiers, key.code) {
-        // Submit
+        // ---- Submit: Enter key in ALL forms ----
+        // Plain Enter
         (KeyModifiers::NONE, KeyCode::Enter) => Action::Submit,
+        // Ctrl+M = Enter on Windows — MUST also be Submit
+        (KeyModifiers::CONTROL, KeyCode::Char('m')) => Action::Submit,
+        // Shift+Enter = new line
         (KeyModifiers::SHIFT, KeyCode::Enter) => Action::NewLine,
 
-        // Editing
+        // ---- Editing ----
         (KeyModifiers::NONE, KeyCode::Backspace) => Action::Backspace,
         (KeyModifiers::NONE, KeyCode::Delete) => Action::Delete,
         (KeyModifiers::NONE, KeyCode::Left) => Action::CursorLeft,
@@ -219,35 +238,41 @@ pub fn map_key_normal(key: KeyEvent) -> Action {
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => Action::DeleteToStart,
         (KeyModifiers::CONTROL, KeyCode::Char('w')) => Action::DeleteWord,
 
-        // History
-        (KeyModifiers::NONE, KeyCode::Up) => Action::HistoryUp,
-        (KeyModifiers::NONE, KeyCode::Down) => Action::HistoryDown,
-
-        // Scrolling
+        // ---- Scrolling ----
+        (KeyModifiers::SHIFT, KeyCode::Up) => Action::ScrollUp,
+        (KeyModifiers::SHIFT, KeyCode::Down) => Action::ScrollDown,
         (KeyModifiers::NONE, KeyCode::PageUp) => Action::PageUp,
         (KeyModifiers::NONE, KeyCode::PageDown) => Action::PageDown,
         (KeyModifiers::CONTROL, KeyCode::Home) => Action::ScrollTop,
         (KeyModifiers::CONTROL, KeyCode::End) => Action::ScrollBottom,
 
-        // Global
+        // ---- History ----
+        (KeyModifiers::NONE, KeyCode::Up) => Action::HistoryUp,
+        (KeyModifiers::NONE, KeyCode::Down) => Action::HistoryDown,
+
+        // ---- Global ----
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Cancel,
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => Action::Quit,
         (KeyModifiers::CONTROL, KeyCode::Char('l')) => Action::ClearScreen,
 
-        // Agent/Session
-        (KeyModifiers::CONTROL, KeyCode::Char('m')) => Action::OpenModelPicker,
-        (KeyModifiers::CONTROL, KeyCode::Char('p')) => Action::OpenProviderPicker,
+        // ---- Modals: use F-keys (no Windows conflicts) ----
+        (KeyModifiers::NONE, KeyCode::F(2)) => Action::OpenModelPicker,
+        (KeyModifiers::NONE, KeyCode::F(3)) => Action::OpenProviderPicker,
+        (KeyModifiers::NONE, KeyCode::F(4)) => Action::OpenKeyManager,
+        // Also keep safe Ctrl combos as alternatives
+        (KeyModifiers::CONTROL, KeyCode::Char('k')) => Action::OpenKeyManager,
+
+        // ---- Session ----
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => Action::ToggleTrustMode,
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => Action::SaveSession,
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => Action::NewSession,
         (KeyModifiers::CONTROL, KeyCode::Char('x')) => Action::ExportSession,
-        (KeyModifiers::CONTROL, KeyCode::Char('i')) => Action::ShowTokenInfo,
         (KeyModifiers::CONTROL, KeyCode::Char('g')) => Action::ShowGitStatus,
 
-        // Char input
+        // ---- Char input ----
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => Action::InsertChar(c),
 
-        // Help
+        // ---- Help ----
         (KeyModifiers::NONE, KeyCode::F(1)) => Action::ShowHelp,
 
         _ => Action::None,
@@ -259,6 +284,8 @@ pub fn map_key_confirm(key: KeyEvent) -> Action {
     match (key.modifiers, key.code) {
         (_, KeyCode::Char('y') | KeyCode::Char('Y')) => Action::Confirm,
         (KeyModifiers::NONE, KeyCode::Enter) => Action::Confirm,
+        // Ctrl+M = Enter on Windows
+        (KeyModifiers::CONTROL, KeyCode::Char('m')) => Action::Confirm,
         (_, KeyCode::Char('n') | KeyCode::Char('N')) => Action::Deny,
         (KeyModifiers::NONE, KeyCode::Esc) => Action::Deny,
         (_, KeyCode::Char('a') | KeyCode::Char('A')) => Action::AlwaysAllow,
@@ -269,12 +296,18 @@ pub fn map_key_confirm(key: KeyEvent) -> Action {
 
 /// Map keys in picker modal
 pub fn map_key_picker(key: KeyEvent, filtering: bool) -> Action {
+    // Ctrl+C always cancels the picker regardless of state
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+        return Action::Cancel;
+    }
+
     if filtering {
-        return match key.code {
-            KeyCode::Esc => Action::PickerCancel,
-            KeyCode::Enter => Action::PickerSelect,
-            KeyCode::Backspace => Action::PickerFilterBackspace,
-            KeyCode::Char(c) => Action::PickerFilterChar(c),
+        return match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Esc) => Action::PickerCancel,
+            (KeyModifiers::NONE, KeyCode::Enter) => Action::PickerSelect,
+            (KeyModifiers::CONTROL, KeyCode::Char('m')) => Action::PickerSelect, // Ctrl+M = Enter
+            (KeyModifiers::NONE, KeyCode::Backspace) => Action::PickerFilterBackspace,
+            (KeyModifiers::NONE, KeyCode::Char(c)) => Action::PickerFilterChar(c),
             _ => Action::None,
         };
     }
@@ -283,7 +316,9 @@ pub fn map_key_picker(key: KeyEvent, filtering: bool) -> Action {
         (KeyModifiers::NONE, KeyCode::Up) => Action::PickerUp,
         (KeyModifiers::NONE, KeyCode::Down) => Action::PickerDown,
         (KeyModifiers::NONE, KeyCode::Enter) => Action::PickerSelect,
+        (KeyModifiers::CONTROL, KeyCode::Char('m')) => Action::PickerSelect, // Ctrl+M = Enter
         (KeyModifiers::NONE, KeyCode::Esc) => Action::PickerCancel,
+        (KeyModifiers::NONE, KeyCode::Char('q')) => Action::PickerCancel,
         (KeyModifiers::NONE, KeyCode::Char('/')) => Action::PickerFilter,
         _ => Action::None,
     }
@@ -292,6 +327,16 @@ pub fn map_key_picker(key: KeyEvent, filtering: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyEventState;
+
+    fn make_key(modifiers: KeyModifiers, code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
 
     #[test]
     fn test_input_state() {
@@ -320,5 +365,111 @@ mod tests {
         assert_eq!(input.text, "first");
         input.history_down();
         assert_eq!(input.text, "second");
+    }
+
+    #[test]
+    fn test_enter_key_never_opens_model_picker() {
+        // Plain Enter must always Submit
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::Enter)),
+            Action::Submit,
+        );
+        // Ctrl+M (= Enter on Windows) must also Submit, NOT open model picker
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('m'))),
+            Action::Submit,
+        );
+    }
+
+    #[test]
+    fn test_f_keys_open_modals() {
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::F(2))),
+            Action::OpenModelPicker,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::F(3))),
+            Action::OpenProviderPicker,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::F(4))),
+            Action::OpenKeyManager,
+        );
+    }
+
+    #[test]
+    fn test_ctrl_k_maps_to_key_manager() {
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('k'))),
+            Action::OpenKeyManager,
+        );
+    }
+
+    #[test]
+    fn test_scroll_keybindings() {
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::SHIFT, KeyCode::Up)),
+            Action::ScrollUp,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::SHIFT, KeyCode::Down)),
+            Action::ScrollDown,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::PageUp)),
+            Action::PageUp,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::PageDown)),
+            Action::PageDown,
+        );
+        // Plain Up = history, NOT scroll
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::Up)),
+            Action::HistoryUp,
+        );
+    }
+
+    #[test]
+    fn test_picker_enter_always_selects() {
+        // Plain Enter in picker
+        assert_eq!(
+            map_key_picker(make_key(KeyModifiers::NONE, KeyCode::Enter), false),
+            Action::PickerSelect,
+        );
+        // Ctrl+M in picker (= Enter on Windows)
+        assert_eq!(
+            map_key_picker(make_key(KeyModifiers::CONTROL, KeyCode::Char('m')), false),
+            Action::PickerSelect,
+        );
+        // During filtering too
+        assert_eq!(
+            map_key_picker(make_key(KeyModifiers::CONTROL, KeyCode::Char('m')), true),
+            Action::PickerSelect,
+        );
+    }
+
+    #[test]
+    fn test_confirm_dialog_enter() {
+        // Plain Enter confirms
+        assert_eq!(
+            map_key_confirm(make_key(KeyModifiers::NONE, KeyCode::Enter)),
+            Action::Confirm,
+        );
+        // Ctrl+M (= Enter on Windows) also confirms
+        assert_eq!(
+            map_key_confirm(make_key(KeyModifiers::CONTROL, KeyCode::Char('m'))),
+            Action::Confirm,
+        );
+    }
+
+    #[test]
+    fn test_delete_word() {
+        let mut input = InputState::new();
+        input.text = "hello world".to_string();
+        input.cursor = 11;
+        input.delete_word();
+        assert_eq!(input.text, "hello ");
+        assert_eq!(input.cursor, 6);
     }
 }

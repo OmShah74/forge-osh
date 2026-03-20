@@ -7,6 +7,12 @@ pub struct SpinnerState {
     pub message: String,
 }
 
+impl Default for SpinnerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpinnerState {
     pub fn new() -> Self {
         Self {

@@ -29,7 +29,7 @@ impl Tool for WebFetchTool {
 
     fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
 
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let url = match input["url"].as_str() {
             Some(u) => u,
             None => return ToolOutput::error("Missing 'url' parameter"),
@@ -68,7 +68,6 @@ impl Tool for WebFetchTool {
                         let text = if content_type.contains("text/html") {
                             // Convert HTML to plain text
                             html2text::from_read(body.as_bytes(), 80)
-                                .unwrap_or(body)
                         } else {
                             body
                         };
@@ -119,7 +118,7 @@ impl Tool for WebSearchTool {
 
     fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
 
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let query = match input["query"].as_str() {
             Some(q) => q,
             None => return ToolOutput::error("Missing 'query' parameter"),
@@ -168,7 +167,7 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<String> {
         if results.len() >= max_results {
             break;
         }
-        if results.len() == 0 && !segment.contains("href=") {
+        if results.is_empty() && !segment.contains("href=") {
             // First split is before any result
             continue;
         }
@@ -185,7 +184,7 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<String> {
             .split('>')
             .nth(1)
             .and_then(|s| s.split("</a>").next())
-            .map(|t| html_entities_decode(t))
+            .map(html_entities_decode)
             .unwrap_or_else(|| "(no title)".to_string());
 
         // Extract snippet
@@ -194,7 +193,7 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<String> {
             .nth(1)
             .and_then(|s| s.split('>').nth(1))
             .and_then(|s| s.split("</").next())
-            .map(|t| html_entities_decode(t))
+            .map(html_entities_decode)
             .unwrap_or_default();
 
         // Clean up the DDG redirect URL

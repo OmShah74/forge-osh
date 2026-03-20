@@ -2,7 +2,7 @@ use crate::config;
 use crate::error::Result;
 
 use super::Session;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Manages session persistence to disk
 pub struct Checkpoint;

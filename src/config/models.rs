@@ -122,27 +122,28 @@ pub fn gemini_models() -> Vec<ModelInfo> {
 }
 
 pub fn groq_models() -> Vec<ModelInfo> {
+    // Groq provides free API access — all costs are $0
     vec![
         m("qwen/qwen3-32b", "Qwen3 32B", 32_768, true, false, 0.0, 0.0, "groq"),
-        m("llama-3.1-8b-instant", "Llama 3.1 8B Instant", 131_072, true, false, 0.05, 0.08, "groq"),
-        m("llama-3.3-70b-versatile", "Llama 3.3 70B Versatile", 128_000, true, false, 0.59, 0.79, "groq"),
+        m("llama-3.1-8b-instant", "Llama 3.1 8B Instant", 131_072, true, false, 0.0, 0.0, "groq"),
+        m("llama-3.3-70b-versatile", "Llama 3.3 70B Versatile", 128_000, true, false, 0.0, 0.0, "groq"),
         m("openai/gpt-oss-120b", "GPT-OSS 120B", 32_768, true, false, 0.0, 0.0, "groq"),
         m("whisper-large-v3-turbo", "Whisper Large v3 Turbo", 0, false, false, 0.0, 0.0, "groq"),
-        m("meta-llama/llama-guard-4-12b", "Llama Guard 4 12B", 32_768, false, false, 0.20, 0.20, "groq"),
-        m("qwen-qwq-32b", "QwQ 32B", 131_072, true, false, 0.29, 0.39, "groq"),
-        m("deepseek-r1-distill-llama-70b", "DeepSeek R1 Distill 70B", 131_072, true, false, 0.75, 0.99, "groq"),
-        m("llama-3.2-90b-vision-preview", "Llama 3.2 90B Vision", 8_192, true, true, 0.90, 0.90, "groq"),
-        m("llama-3.2-11b-vision-preview", "Llama 3.2 11B Vision", 8_192, true, true, 0.18, 0.18, "groq"),
-        m("llama-3.2-3b-preview", "Llama 3.2 3B", 8_192, true, false, 0.06, 0.06, "groq"),
-        m("llama-3.2-1b-preview", "Llama 3.2 1B", 8_192, true, false, 0.04, 0.04, "groq"),
-        m("gemma2-9b-it", "Gemma2 9B IT", 8_192, true, false, 0.20, 0.20, "groq"),
-        m("llama3-70b-8192", "Llama3 70B", 8_192, true, false, 0.59, 0.79, "groq"),
-        m("llama3-8b-8192", "Llama3 8B", 8_192, true, false, 0.05, 0.08, "groq"),
-        m("mixtral-8x7b-32768", "Mixtral 8x7B", 32_768, true, false, 0.24, 0.24, "groq"),
-        m("mistral-saba-24b", "Mistral Saba 24B", 32_768, true, false, 0.20, 0.20, "groq"),
-        m("qwen-2.5-coder-32b", "Qwen 2.5 Coder 32B", 32_768, true, false, 0.29, 0.39, "groq"),
-        m("qwen-2.5-32b", "Qwen 2.5 32B", 32_768, true, false, 0.29, 0.39, "groq"),
-        m("deepseek-r1-distill-qwen-32b", "DeepSeek R1 Distill Qwen 32B", 131_072, true, false, 0.29, 0.39, "groq"),
+        m("meta-llama/llama-guard-4-12b", "Llama Guard 4 12B", 32_768, false, false, 0.0, 0.0, "groq"),
+        m("qwen-qwq-32b", "QwQ 32B", 131_072, true, false, 0.0, 0.0, "groq"),
+        m("deepseek-r1-distill-llama-70b", "DeepSeek R1 Distill 70B", 131_072, true, false, 0.0, 0.0, "groq"),
+        m("llama-3.2-90b-vision-preview", "Llama 3.2 90B Vision", 8_192, true, true, 0.0, 0.0, "groq"),
+        m("llama-3.2-11b-vision-preview", "Llama 3.2 11B Vision", 8_192, true, true, 0.0, 0.0, "groq"),
+        m("llama-3.2-3b-preview", "Llama 3.2 3B", 8_192, true, false, 0.0, 0.0, "groq"),
+        m("llama-3.2-1b-preview", "Llama 3.2 1B", 8_192, true, false, 0.0, 0.0, "groq"),
+        m("gemma2-9b-it", "Gemma2 9B IT", 8_192, true, false, 0.0, 0.0, "groq"),
+        m("llama3-70b-8192", "Llama3 70B", 8_192, true, false, 0.0, 0.0, "groq"),
+        m("llama3-8b-8192", "Llama3 8B", 8_192, true, false, 0.0, 0.0, "groq"),
+        m("mixtral-8x7b-32768", "Mixtral 8x7B", 32_768, true, false, 0.0, 0.0, "groq"),
+        m("mistral-saba-24b", "Mistral Saba 24B", 32_768, true, false, 0.0, 0.0, "groq"),
+        m("qwen-2.5-coder-32b", "Qwen 2.5 Coder 32B", 32_768, true, false, 0.0, 0.0, "groq"),
+        m("qwen-2.5-32b", "Qwen 2.5 32B", 32_768, true, false, 0.0, 0.0, "groq"),
+        m("deepseek-r1-distill-qwen-32b", "DeepSeek R1 Distill Qwen 32B", 131_072, true, false, 0.0, 0.0, "groq"),
     ]
 }
 

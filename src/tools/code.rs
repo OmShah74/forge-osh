@@ -138,7 +138,7 @@ impl Tool for RunLinterTool {
                     } else {
                         vec!["clippy", "--", "-W", "clippy::all"]
                     };
-                    return run_command("cargo", &args.iter().map(|s| *s).collect::<Vec<_>>(), &ctx.working_dir).await;
+                    return run_command("cargo", &args.iter().copied().collect::<Vec<_>>(), &ctx.working_dir).await;
                 }
                 ProjectType::Node => {
                     let cmd = if fix { "npx eslint . --fix" } else { "npx eslint ." };
