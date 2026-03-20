@@ -1,2 +1,8 @@
 .env
 target/
+dist/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

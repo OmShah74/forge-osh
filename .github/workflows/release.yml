@@ -1,0 +1,48 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: forge-osh-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: forge-osh-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: forge-osh-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: forge-osh-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/forge-osh*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            forge-osh-linux-x86_64/forge-osh
+            forge-osh-macos-x86_64/forge-osh
+            forge-osh-macos-arm64/forge-osh
+            forge-osh-windows-x86_64.exe/forge-osh.exe
