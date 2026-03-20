@@ -18,10 +18,11 @@ SCROLLING
   Ctrl+End       Bottom (auto-scroll)
 
 AGENT & SESSION
-  Ctrl+M    Model picker               Ctrl+P    Provider picker
-  Ctrl+K    API key manager            Ctrl+T    Toggle trust mode
+  Ctrl+O    Model picker               Ctrl+P    Provider picker
+  Ctrl+K    API key manager            Ctrl+B    Token/cost info
+  Ctrl+R    Cycle theme                Ctrl+T    Toggle trust mode
   Ctrl+S    Save session               Ctrl+N    New session
-  Ctrl+I    Token/cost info            Ctrl+X    Export session
+  Ctrl+X    Export session
 
 CONFIRMATION DIALOGS
   Y/Enter   Confirm                    N/Esc     Decline

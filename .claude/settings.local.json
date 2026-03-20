@@ -15,7 +15,8 @@
       "Bash(export PATH=\"/c/msys64/mingw64/bin:/c/Users/OM SHAH/.cargo/bin:$PATH\")",
       "Bash(export CARGO_TARGET_DIR=\"C:/forge-build\")",
       "Bash(export PATH=\"/c/msys64/mingw64/bin:$PATH\")",
-      "Bash(CARGO_TARGET_DIR=C:/forge-build cargo build --release)"
+      "Bash(CARGO_TARGET_DIR=C:/forge-build cargo build --release)",
+      "Bash(export PATH=\"/c/Users/OM SHAH/.cargo/bin:/c/msys64/mingw64/bin:$PATH\")"
     ]
   }
 }

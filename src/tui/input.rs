@@ -36,6 +36,7 @@ pub enum Action {
     OpenProviderPicker,
     OpenKeyManager,
     ToggleTrustMode,
+    CycleTheme,
     SaveSession,
     NewSession,
     ExportSession,
@@ -215,11 +216,10 @@ impl InputState {
 /// Similarly, Ctrl+I = Tab, Ctrl+H = Backspace on Windows.
 ///
 /// Safe Ctrl combos on Windows: Ctrl+A-G, Ctrl+K, Ctrl+L, Ctrl+N-Z (except M, I, H, J)
-/// We use F-keys for model/provider/keys to avoid ALL ambiguity.
+/// All modal shortcuts use Ctrl key combos that are safe on Windows.
 pub fn map_key_normal(key: KeyEvent) -> Action {
     match (key.modifiers, key.code) {
         // ---- Submit: Enter key in ALL forms ----
-        // Plain Enter
         (KeyModifiers::NONE, KeyCode::Enter) => Action::Submit,
         // Ctrl+M = Enter on Windows — MUST also be Submit
         (KeyModifiers::CONTROL, KeyCode::Char('m')) => Action::Submit,
@@ -255,12 +255,13 @@ pub fn map_key_normal(key: KeyEvent) -> Action {
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => Action::Quit,
         (KeyModifiers::CONTROL, KeyCode::Char('l')) => Action::ClearScreen,
 
-        // ---- Modals: use F-keys (no Windows conflicts) ----
-        (KeyModifiers::NONE, KeyCode::F(2)) => Action::OpenModelPicker,
-        (KeyModifiers::NONE, KeyCode::F(3)) => Action::OpenProviderPicker,
-        (KeyModifiers::NONE, KeyCode::F(4)) => Action::OpenKeyManager,
-        // Also keep safe Ctrl combos as alternatives
+        // ---- Modals: all Ctrl key combos (safe on Windows) ----
+        (KeyModifiers::CONTROL, KeyCode::Char('q')) => Action::ShowHelp,
+        (KeyModifiers::CONTROL, KeyCode::Char('o')) => Action::OpenModelPicker,
+        (KeyModifiers::CONTROL, KeyCode::Char('p')) => Action::OpenProviderPicker,
         (KeyModifiers::CONTROL, KeyCode::Char('k')) => Action::OpenKeyManager,
+        (KeyModifiers::CONTROL, KeyCode::Char('b')) => Action::ShowTokenInfo,
+        (KeyModifiers::CONTROL, KeyCode::Char('r')) => Action::CycleTheme,
 
         // ---- Session ----
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => Action::ToggleTrustMode,
@@ -270,10 +271,13 @@ pub fn map_key_normal(key: KeyEvent) -> Action {
         (KeyModifiers::CONTROL, KeyCode::Char('g')) => Action::ShowGitStatus,
 
         // ---- Char input ----
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => Action::InsertChar(c),
-
-        // ---- Help ----
-        (KeyModifiers::NONE, KeyCode::F(1)) => Action::ShowHelp,
+        // Accept chars unless CONTROL modifier is set.
+        // This handles SHIFT, CAPS_LOCK, NUM_LOCK, and other flags
+        // that some Windows terminals inject. Without this, keys get
+        // silently dropped when e.g. Caps Lock is on.
+        (modifiers, KeyCode::Char(c)) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            Action::InsertChar(c)
+        }
 
         _ => Action::None,
     }
@@ -382,26 +386,30 @@ mod tests {
     }
 
     #[test]
-    fn test_f_keys_open_modals() {
+    fn test_ctrl_keys_open_modals() {
         assert_eq!(
-            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::F(2))),
+            map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('o'))),
             Action::OpenModelPicker,
         );
         assert_eq!(
-            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::F(3))),
+            map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('p'))),
             Action::OpenProviderPicker,
         );
         assert_eq!(
-            map_key_normal(make_key(KeyModifiers::NONE, KeyCode::F(4))),
-            Action::OpenKeyManager,
-        );
-    }
-
-    #[test]
-    fn test_ctrl_k_maps_to_key_manager() {
-        assert_eq!(
             map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('k'))),
             Action::OpenKeyManager,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('b'))),
+            Action::ShowTokenInfo,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('r'))),
+            Action::CycleTheme,
+        );
+        assert_eq!(
+            map_key_normal(make_key(KeyModifiers::CONTROL, KeyCode::Char('q'))),
+            Action::ShowHelp,
         );
     }
 

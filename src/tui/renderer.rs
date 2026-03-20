@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
 
@@ -11,7 +11,7 @@ use super::{AppState, KeyManagerState, Modal, MessageRole};
 
 /// Render the entire TUI
 pub fn render(frame: &mut Frame, state: &mut AppState) {
-    let theme = &state.theme.clone();
+    let theme = state.theme.clone();
 
     // Main layout: header | conversation | input | status
     let chunks = Layout::default()
@@ -24,36 +24,39 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         ])
         .split(frame.area());
 
-    render_header(frame, chunks[0], state, theme);
-    render_conversation(frame, chunks[1], state, theme);
-    render_input(frame, chunks[2], state, theme);
-    render_status_bar(frame, chunks[3], state, theme);
+    render_header(frame, chunks[0], state, &theme);
+    render_conversation(frame, chunks[1], state, &theme);
+    render_input(frame, chunks[2], state, &theme);
+    render_status_bar(frame, chunks[3], state, &theme);
 
     // Render modal overlays
     if let Some(modal) = &state.modal {
         match modal {
             Modal::Confirmation { tool_name, description, .. } => {
-                render_confirmation(frame, tool_name, description, theme);
+                render_confirmation(frame, tool_name, description, &theme);
             }
             Modal::Help => {
-                render_help(frame, theme);
+                render_help(frame, &theme);
             }
             Modal::Picker(picker) => {
-                render_picker(frame, picker, theme);
+                render_picker(frame, picker, &theme);
             }
             Modal::TokenInfo => {
-                render_token_info(frame, state, theme);
+                render_token_info(frame, state, &theme);
             }
             Modal::KeyManager(km) => {
-                render_key_manager(frame, km, theme);
+                render_key_manager(frame, km, &theme);
             }
         }
     }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let trust_indicator = if state.trust_mode { " ✦TRUST" } else { "" };
+    let theme_label = format!(" [{}]", state.theme_name);
+
     let header_text = format!(
-        " forge-osh | {} ({}) | {} | {} | {}",
+        " ✦ forge-osh │ {} ({}) │ {} │ {} │ {}{trust_indicator}{theme_label}",
         state.model_name,
         state.provider_name,
         state.session_name,
@@ -61,9 +64,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         state.format_cost,
     );
 
-    let trust_indicator = if state.trust_mode { " [TRUST]" } else { "" };
-
-    let header = Paragraph::new(format!("{header_text}{trust_indicator}"))
+    let header = Paragraph::new(header_text)
         .style(Style::default().fg(theme.header_fg).bg(theme.header_bg));
 
     frame.render_widget(header, area);
@@ -299,7 +300,7 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
 
 fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let input_text = if state.input.text.is_empty() {
-        "Type your message... (Ctrl+D to exit, F1 for help)"
+        "Type your message... (^D exit, ^Q help)"
     } else {
         &state.input.text
     };
@@ -316,7 +317,7 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) 
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border_fg))
-                .title(Span::styled(" > ", Style::default().fg(theme.prompt_fg))),
+                .title(Span::styled(" ❯ ", Style::default().fg(theme.prompt_fg).add_modifier(Modifier::BOLD))),
         )
         .wrap(Wrap { trim: false });
 
@@ -330,7 +331,7 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) 
 
 fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let trust = if state.trust_mode { "ON" } else { "OFF" };
-    let busy = if state.agent_busy { " Working..." } else { "" };
+    let busy = if state.agent_busy { " ● Working" } else { "" };
 
     let scroll_info = if state.total_lines > state.visible_height {
         let pct = if state.max_scroll() > 0 {
@@ -344,7 +345,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
     };
 
     let status = format!(
-        " ^C Cancel | ^M Model | ^P Provider | ^K Keys | ^T Trust [{trust}]{busy}{scroll_info} | F1 Help"
+        " ^C Cancel │ ^O Model │ ^P Provider │ ^K Keys │ ^B Info │ ^R Theme │ ^T Trust [{trust}]{busy}{scroll_info} │ ^Q Help"
     );
 
     let bar = Paragraph::new(status)
@@ -395,26 +396,16 @@ fn render_picker(frame: &mut Frame, picker: &super::picker::PickerState, theme: 
     let area = centered_rect(70, 70, frame.area());
     frame.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = picker
-        .filtered_items()
+    let filtered = picker.filtered_items();
+    let items: Vec<ListItem> = filtered
         .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let style = if i == picker.selected {
-                Style::default()
-                    .fg(theme.fg)
-                    .bg(theme.highlight_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.fg)
-            };
-
+        .map(|item| {
             let connected = if item.connected { "*" } else { " " };
             let text = format!(
                 " {connected} {:<20} {:<30} {}",
                 item.provider_name, item.model_name, item.cost_display
             );
-            ListItem::new(text).style(style)
+            ListItem::new(text).style(Style::default().fg(theme.fg))
         })
         .collect();
 
@@ -424,14 +415,22 @@ fn render_picker(frame: &mut Frame, picker: &super::picker::PickerState, theme: 
         " Models (/ filter, Enter select, Esc close) ".to_string()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border_fg))
-            .title(title),
-    );
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border_fg))
+                .title(title),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        );
 
-    frame.render_widget(list, area);
+    let mut list_state = ListState::default().with_selected(Some(picker.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
 fn render_token_info(frame: &mut Frame, state: &AppState, theme: &Theme) {

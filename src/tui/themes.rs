@@ -24,6 +24,9 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// All available theme names in cycle order
+    pub const THEME_NAMES: &'static [&'static str] = &["dark", "light", "dracula", "nord", "solarized"];
+
     pub fn from_name(name: &str) -> Self {
         match name {
             "light" => Self::light(),
@@ -32,6 +35,12 @@ impl Theme {
             "nord" => Self::nord(),
             _ => Self::dark(),
         }
+    }
+
+    /// Return the next theme name in the cycle
+    pub fn next_theme_name(current: &str) -> &'static str {
+        let idx = Self::THEME_NAMES.iter().position(|&n| n == current).unwrap_or(0);
+        Self::THEME_NAMES[(idx + 1) % Self::THEME_NAMES.len()]
     }
 
     pub fn dark() -> Self {

@@ -123,11 +123,11 @@ impl AgentLoop {
             let chat_result = provider.chat(request, stream_tx).await;
 
             // Forward stream events to TUI
-            // (In practice these were already sent during streaming above,
-            //  but we collect any remaining)
+            let mut tokens_forwarded = 0usize;
             while let Ok(event) = stream_rx.try_recv() {
                 if let StreamEvent::Token(t) = &event {
                     let _ = self.event_tx.send(AgentEvent::Token(t.clone()));
+                    tokens_forwarded += 1;
                 }
             }
             drop(router);
@@ -153,7 +153,16 @@ impl AgentLoop {
                 }
             }
 
-            // 8. Add assistant response to history
+            // 8. If no tokens were streamed, send the full response text to TUI
+            if tokens_forwarded == 0 {
+                if let Some(text) = response.content.text() {
+                    if !text.is_empty() {
+                        let _ = self.event_tx.send(AgentEvent::Token(text.to_string()));
+                    }
+                }
+            }
+
+            // 9. Add assistant response to history
             {
                 let mut session = self.session.lock().await;
                 session.history.add_assistant(response.content.clone());

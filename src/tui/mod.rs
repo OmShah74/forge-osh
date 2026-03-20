@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -105,17 +105,21 @@ pub struct AppState {
     pub total_lines: usize,      // computed during render
     pub visible_height: usize,   // computed during render
     pub streaming_text: String,
-    pub provider_name: String,
-    pub model_name: String,
+    pub provider_id: String,        // e.g. "openai", "groq"
+    pub provider_name: String,      // display name e.g. "OpenAI", "Groq"
+    pub model_id: String,           // e.g. "gpt-4o", "qwen3-32b"
+    pub model_name: String,         // display name e.g. "GPT-4o", "Qwen3 32B"
     pub session_name: String,
     pub format_tokens: String,
     pub format_cost: String,
     pub trust_mode: bool,
     pub theme: Theme,
+    pub theme_name: String,
     pub running: bool,
     pub agent_busy: bool,
     pub key_save_pending: Option<(String, String)>,
     pub key_delete_pending: Option<String>,
+    pub model_switch_pending: Option<(String, String)>, // (provider_id, model_id)
 }
 
 impl AppState {
@@ -130,17 +134,21 @@ impl AppState {
             total_lines: 0,
             visible_height: 0,
             streaming_text: String::new(),
+            provider_id: session.provider_id.clone(),
             provider_name: session.provider_id.clone(),
+            model_id: session.model_id.clone(),
             model_name: session.model_id.clone(),
             session_name: session.name.clone(),
             format_tokens: "0 tokens".to_string(),
             format_cost: "Free".to_string(),
             trust_mode: config.general.trust_mode,
             theme: Theme::from_name(&config.general.theme),
+            theme_name: config.general.theme.clone(),
             running: true,
             agent_busy: false,
             key_save_pending: None,
             key_delete_pending: None,
+            model_switch_pending: None,
         }
     }
 
@@ -183,10 +191,10 @@ pub async fn run_tui(
     session: Arc<Mutex<Session>>,
     key_store: Arc<Mutex<KeyStore>>,
 ) -> anyhow::Result<()> {
-    // Set up terminal (no mouse capture — it causes input lag on Windows)
+    // Set up terminal with mouse capture for scroll support
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -200,6 +208,29 @@ pub async fn run_tui(
         let sess = session.lock().await;
         AppState::new(&config, &sess)
     };
+
+    // Set display names from router
+    {
+        let router = provider_router.read().await;
+        let pid = router.active_provider_id();
+        state.provider_id = pid.to_string();
+        state.model_id = router.active_model_id().to_string();
+        // Look up display name from provider
+        for (id, name) in router.available_providers() {
+            if id == pid {
+                state.provider_name = name.to_string();
+                break;
+            }
+        }
+        // Look up model display name from catalog
+        let models = crate::config::models::models_for_provider(pid);
+        for m in &models {
+            if m.id == state.model_id {
+                state.model_name = m.name.clone();
+                break;
+            }
+        }
+    }
 
     // Welcome message
     state.messages.push(RenderedMessage {
@@ -232,9 +263,9 @@ pub async fn run_tui(
 
         // Poll for events with a short timeout for animation
         let timeout = if state.spinner.active || state.agent_busy {
-            Duration::from_millis(80)
+            Duration::from_millis(50)
         } else {
-            Duration::from_millis(100)
+            Duration::from_millis(80)
         };
 
         // Handle agent events (non-blocking)
@@ -350,171 +381,231 @@ pub async fn run_tui(
             }
         }
 
+        // Handle pending model/provider switch
+        if let Some((pid, mid)) = state.model_switch_pending.take() {
+            let mut router = provider_router.write().await;
+            if let Err(e) = router.set_active(&pid, &mid) {
+                state.messages.push(RenderedMessage {
+                    role: MessageRole::System,
+                    content: format!("Failed to switch: {e}"),
+                });
+            }
+        }
+
         // Handle terminal events — drain ALL pending events before redrawing
         if event::poll(timeout)? {
             // Batch: read all available events, process them, then redraw once
             loop {
                 let ev = event::read()?;
-                if let Event::Key(key) = ev {
-                    // On Windows, crossterm sends Press and Release events.
-                    if key.kind != KeyEventKind::Press {
-                        // Skip Release/Repeat, check for more events
-                        if !event::poll(Duration::ZERO)? { break; }
-                        continue;
-                    }
 
-                    // Handle modal-specific input
-                    if state.modal.is_some() {
-                        handle_modal_input(&mut state, key);
-                        if !event::poll(Duration::ZERO)? { break; }
-                        continue;
-                    }
+                match ev {
+                    Event::Key(key) => {
+                        // On Windows, crossterm sends Press and Release events.
+                        if key.kind != KeyEventKind::Press {
+                            // Skip Release/Repeat, check for more events
+                            if !event::poll(Duration::ZERO)? { break; }
+                            continue;
+                        }
 
-                    let action = input::map_key_normal(key);
-                    match action {
-                        Action::Submit => {
-                            if !state.input.is_empty() && !state.agent_busy {
-                                let text = state.input.submit();
-                                state.messages.push(RenderedMessage {
-                                    role: MessageRole::User,
-                                    content: text.clone(),
-                                });
-                                state.agent_busy = true;
+                        // Handle modal-specific input
+                        if state.modal.is_some() {
+                            handle_modal_input(&mut state, key);
+                            if !event::poll(Duration::ZERO)? { break; }
+                            continue;
+                        }
+
+                        let action = input::map_key_normal(key);
+                        match action {
+                            Action::Submit => {
+                                if !state.input.is_empty() && !state.agent_busy {
+                                    let text = state.input.submit();
+                                    state.messages.push(RenderedMessage {
+                                        role: MessageRole::User,
+                                        content: text.clone(),
+                                    });
+                                    state.agent_busy = true;
+                                    state.auto_scroll = true;
+
+                                    let loop_clone = agent_loop.clone();
+                                    tokio::spawn(async move {
+                                        let _ = loop_clone.run(text).await;
+                                    });
+                                }
+                            }
+                            Action::InsertChar(c) => state.input.insert_char(c),
+                            Action::Backspace => state.input.backspace(),
+                            Action::Delete => state.input.delete(),
+                            Action::CursorLeft => state.input.cursor_left(),
+                            Action::CursorRight => state.input.cursor_right(),
+                            Action::CursorHome => state.input.cursor_home(),
+                            Action::CursorEnd => state.input.cursor_end(),
+                            Action::DeleteToStart => state.input.delete_to_start(),
+                            Action::DeleteWord => state.input.delete_word(),
+                            Action::HistoryUp => state.input.history_up(),
+                            Action::HistoryDown => state.input.history_down(),
+
+                            // Scrolling
+                            Action::ScrollUp => state.scroll_up(3),
+                            Action::ScrollDown => state.scroll_down(3),
+                            Action::PageUp => state.scroll_up(10),
+                            Action::PageDown => state.scroll_down(10),
+                            Action::ScrollTop => {
+                                state.scroll_offset = 0;
+                                state.auto_scroll = false;
+                            }
+                            Action::ScrollBottom => {
                                 state.auto_scroll = true;
-
-                                let loop_clone = agent_loop.clone();
-                                tokio::spawn(async move {
-                                    let _ = loop_clone.run(text).await;
-                                });
                             }
-                        }
-                        Action::InsertChar(c) => state.input.insert_char(c),
-                        Action::Backspace => state.input.backspace(),
-                        Action::Delete => state.input.delete(),
-                        Action::CursorLeft => state.input.cursor_left(),
-                        Action::CursorRight => state.input.cursor_right(),
-                        Action::CursorHome => state.input.cursor_home(),
-                        Action::CursorEnd => state.input.cursor_end(),
-                        Action::DeleteToStart => state.input.delete_to_start(),
-                        Action::DeleteWord => state.input.delete_word(),
-                        Action::HistoryUp => state.input.history_up(),
-                        Action::HistoryDown => state.input.history_down(),
 
-                        // Scrolling
-                        Action::ScrollUp => state.scroll_up(3),
-                        Action::ScrollDown => state.scroll_down(3),
-                        Action::PageUp => state.scroll_up(10),
-                        Action::PageDown => state.scroll_down(10),
-                        Action::ScrollTop => {
-                            state.scroll_offset = 0;
-                            state.auto_scroll = false;
-                        }
-                        Action::ScrollBottom => {
-                            state.auto_scroll = true;
-                        }
-
-                        Action::Quit => {
-                            if state.input.is_empty() {
-                                state.running = false;
+                            Action::Quit => {
+                                if state.input.is_empty() {
+                                    state.running = false;
+                                }
                             }
-                        }
-                        Action::Cancel => {
-                            if state.agent_busy {
-                                state.spinner.stop();
-                                state.agent_busy = false;
+                            Action::Cancel => {
+                                if state.agent_busy {
+                                    state.spinner.stop();
+                                    state.agent_busy = false;
+                                    state.messages.push(RenderedMessage {
+                                        role: MessageRole::System,
+                                        content: "Interrupted.".to_string(),
+                                    });
+                                }
+                            }
+                            Action::ClearScreen => {
+                                state.messages.clear();
+                                state.scroll_offset = 0;
+                            }
+                            Action::ToggleTrustMode => {
+                                state.trust_mode = !state.trust_mode;
                                 state.messages.push(RenderedMessage {
                                     role: MessageRole::System,
-                                    content: "Interrupted.".to_string(),
+                                    content: format!(
+                                        "Trust mode: {}",
+                                        if state.trust_mode { "ON" } else { "OFF" }
+                                    ),
                                 });
                             }
-                        }
-                        Action::ClearScreen => {
-                            state.messages.clear();
-                            state.scroll_offset = 0;
-                        }
-                        Action::ToggleTrustMode => {
-                            state.trust_mode = !state.trust_mode;
-                            state.messages.push(RenderedMessage {
-                                role: MessageRole::System,
-                                content: format!(
-                                    "Trust mode: {}",
-                                    if state.trust_mode { "ON" } else { "OFF" }
-                                ),
-                            });
-                        }
-                        Action::ShowHelp => {
-                            state.modal = Some(Modal::Help);
-                        }
-                        Action::ShowTokenInfo => {
-                            state.modal = Some(Modal::TokenInfo);
-                        }
-                        Action::OpenModelPicker => {
-                            let router = provider_router.read().await;
-                            let mut items = Vec::new();
-                            for (pid, pname) in router.available_providers() {
-                                let models = crate::config::models::models_for_provider(pid);
-                                for m in models {
-                                    items.push(picker::PickerItem::from_model_info(
-                                        &m,
-                                        true,
-                                        pname,
-                                    ));
-                                }
+                            Action::CycleTheme => {
+                                let next = Theme::next_theme_name(&state.theme_name);
+                                state.theme = Theme::from_name(next);
+                                state.theme_name = next.to_string();
+                                state.messages.push(RenderedMessage {
+                                    role: MessageRole::System,
+                                    content: format!("Theme: {next}"),
+                                });
                             }
-                            state.modal = Some(Modal::Picker(PickerState::new(items)));
-                        }
-                        Action::OpenKeyManager => {
-                            let ks = key_store.lock().await;
-                            let mut entries = Vec::new();
-                            for pid in config::cloud_provider_ids() {
-                                let env_var = crate::config::keyring::provider_env_var(pid);
-                                let has_env = std::env::var(&env_var).is_ok();
-                                let has_stored = ks.list_providers().contains(&pid.to_string());
-                                let has_key = has_env || has_stored;
-                                let source = if has_env && has_stored {
-                                    "env+stored".to_string()
-                                } else if has_env {
-                                    "env".to_string()
-                                } else if has_stored {
-                                    "stored".to_string()
+                            Action::ShowHelp => {
+                                state.modal = Some(Modal::Help);
+                            }
+                            Action::ShowTokenInfo => {
+                                state.modal = Some(Modal::TokenInfo);
+                            }
+                            Action::OpenModelPicker => {
+                                // Show models for the CURRENT provider only (using provider ID)
+                                let pid = state.provider_id.clone();
+                                let pname = state.provider_name.clone();
+                                let models = crate::config::models::models_for_provider(&pid);
+                                let items: Vec<picker::PickerItem> = models
+                                    .iter()
+                                    .map(|m| picker::PickerItem::from_model_info(m, true, &pname))
+                                    .collect();
+                                if items.is_empty() {
+                                    state.messages.push(RenderedMessage {
+                                        role: MessageRole::System,
+                                        content: format!("No models found for provider '{pname}' (id: {pid})."),
+                                    });
                                 } else {
-                                    "none".to_string()
-                                };
-                                entries.push(KeyManagerEntry {
-                                    provider_id: pid.to_string(),
-                                    provider_name: pid.to_string(),
-                                    has_key,
-                                    key_source: source,
-                                });
-                            }
-                            state.modal = Some(Modal::KeyManager(KeyManagerState {
-                                providers: entries,
-                                selected: 0,
-                                editing: false,
-                                input_buffer: String::new(),
-                            }));
-                        }
-                        Action::SaveSession => {
-                            let sess = session.lock().await;
-                            match sess.save() {
-                                Ok(_) => {
-                                    state.messages.push(RenderedMessage {
-                                        role: MessageRole::System,
-                                        content: "Session saved.".to_string(),
-                                    });
-                                }
-                                Err(e) => {
-                                    state.messages.push(RenderedMessage {
-                                        role: MessageRole::System,
-                                        content: format!("Failed to save: {e}"),
-                                    });
+                                    state.modal = Some(Modal::Picker(PickerState::new(items)));
                                 }
                             }
+                            Action::OpenProviderPicker => {
+                                // Show one entry per available provider
+                                let router = provider_router.read().await;
+                                let mut items = Vec::new();
+                                for (pid, pname) in router.available_providers() {
+                                    let models = crate::config::models::models_for_provider(pid);
+                                    let first_model = models.first();
+                                    let item = if let Some(m) = first_model {
+                                        picker::PickerItem::from_model_info(m, true, pname)
+                                    } else {
+                                        picker::PickerItem {
+                                            provider_id: pid.to_string(),
+                                            provider_name: pname.to_string(),
+                                            model_id: String::new(),
+                                            model_name: "(default)".to_string(),
+                                            context_window: 0,
+                                            cost_display: String::new(),
+                                            connected: true,
+                                        }
+                                    };
+                                    items.push(item);
+                                }
+                                state.modal = Some(Modal::Picker(PickerState::new(items)));
+                            }
+                            Action::OpenKeyManager => {
+                                let ks = key_store.lock().await;
+                                let mut entries = Vec::new();
+                                for pid in config::cloud_provider_ids() {
+                                    let env_var = crate::config::keyring::provider_env_var(pid);
+                                    let has_env = std::env::var(&env_var).is_ok();
+                                    let has_stored = ks.list_providers().contains(&pid.to_string());
+                                    let has_key = has_env || has_stored;
+                                    let source = if has_env && has_stored {
+                                        "env+stored".to_string()
+                                    } else if has_env {
+                                        "env".to_string()
+                                    } else if has_stored {
+                                        "stored".to_string()
+                                    } else {
+                                        "none".to_string()
+                                    };
+                                    entries.push(KeyManagerEntry {
+                                        provider_id: pid.to_string(),
+                                        provider_name: pid.to_string(),
+                                        has_key,
+                                        key_source: source,
+                                    });
+                                }
+                                state.modal = Some(Modal::KeyManager(KeyManagerState {
+                                    providers: entries,
+                                    selected: 0,
+                                    editing: false,
+                                    input_buffer: String::new(),
+                                }));
+                            }
+                            Action::SaveSession => {
+                                let sess = session.lock().await;
+                                match sess.save() {
+                                    Ok(_) => {
+                                        state.messages.push(RenderedMessage {
+                                            role: MessageRole::System,
+                                            content: "Session saved.".to_string(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        state.messages.push(RenderedMessage {
+                                            role: MessageRole::System,
+                                            content: format!("Failed to save: {e}"),
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    // Mouse scroll events
+                    Event::Mouse(mouse) => {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => state.scroll_up(3),
+                            MouseEventKind::ScrollDown => state.scroll_down(3),
+                            _ => {} // Ignore other mouse events (clicks, moves, etc.)
+                        }
+                    }
+                    // Resize and other events — just continue to redraw
+                    _ => {}
                 }
-                // Non-key events (resize, etc) — just continue
+
                 // Check if more events are queued
                 if !event::poll(Duration::ZERO)? { break; }
             }
@@ -525,7 +616,8 @@ pub async fn run_tui(
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen
+        LeaveAlternateScreen,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -592,8 +684,14 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 }
                 Action::PickerSelect => {
                     if let Some(item) = picker.selected_item() {
+                        state.provider_id = item.provider_id.clone();
                         state.provider_name = item.provider_name.clone();
+                        state.model_id = item.model_id.clone();
                         state.model_name = item.model_name.clone();
+                        state.model_switch_pending = Some((
+                            item.provider_id.clone(),
+                            item.model_id.clone(),
+                        ));
                         state.messages.push(RenderedMessage {
                             role: MessageRole::System,
                             content: format!(
@@ -676,32 +774,27 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                     km.move_down();
                     state.modal = Some(Modal::KeyManager(km));
                 } else if is_enter || key.code == KeyCode::Char('e') {
-                        km.editing = true;
-                        km.input_buffer.clear();
-                        state.modal = Some(Modal::KeyManager(km));
-                    }
-                    KeyCode::Char('d') | KeyCode::Delete => {
-                        // Delete stored key
-                        if let Some(entry) = km.providers.get_mut(km.selected) {
-                            if entry.key_source == "stored" || entry.key_source == "env+stored" {
-                                state.key_delete_pending = Some(entry.provider_id.clone());
-                                // Update display
-                                let has_env = std::env::var(
-                                    crate::config::keyring::provider_env_var(&entry.provider_id)
-                                ).is_ok();
-                                entry.has_key = has_env;
-                                entry.key_source = if has_env {
-                                    "env".to_string()
-                                } else {
-                                    "none".to_string()
-                                };
-                            }
+                    km.editing = true;
+                    km.input_buffer.clear();
+                    state.modal = Some(Modal::KeyManager(km));
+                } else if key.code == KeyCode::Char('d') || key.code == KeyCode::Delete {
+                    if let Some(entry) = km.providers.get_mut(km.selected) {
+                        if entry.key_source == "stored" || entry.key_source == "env+stored" {
+                            state.key_delete_pending = Some(entry.provider_id.clone());
+                            let has_env = std::env::var(
+                                crate::config::keyring::provider_env_var(&entry.provider_id)
+                            ).is_ok();
+                            entry.has_key = has_env;
+                            entry.key_source = if has_env {
+                                "env".to_string()
+                            } else {
+                                "none".to_string()
+                            };
                         }
-                        state.modal = Some(Modal::KeyManager(km));
                     }
-                    _ => {
-                        state.modal = Some(Modal::KeyManager(km));
-                    }
+                    state.modal = Some(Modal::KeyManager(km));
+                } else {
+                    state.modal = Some(Modal::KeyManager(km));
                 }
             }
         }
