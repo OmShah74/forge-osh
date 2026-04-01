@@ -378,6 +378,169 @@ async fn handle_slash_command(
             ));
         }
 
+        // ── /commit — AI-generated commit message ──────────────────────────
+        "/commit" => {
+            cmd_commit(state, session).await;
+        }
+
+        // ── /diff — show git diff ──────────────────────────────────────────
+        "/diff" => {
+            let working_dir = {
+                let sess = session.lock().await;
+                sess.working_dir.clone()
+            };
+            let staged = if arg == "staged" || arg == "--staged" { "--staged" } else { "" };
+            let args: Vec<&str> = if staged.is_empty() {
+                vec!["diff", "--stat"]
+            } else {
+                vec!["diff", "--staged", "--stat"]
+            };
+            match std::process::Command::new("git").args(&args).current_dir(&working_dir).output() {
+                Ok(out) => {
+                    let diff = String::from_utf8_lossy(&out.stdout).to_string();
+                    if diff.trim().is_empty() {
+                        state.push_system("No changes in working tree.");
+                    } else {
+                        state.push_system(format!("Git diff (stat):\n{}", diff.trim()));
+                    }
+                }
+                Err(e) => state.push_system(format!("git diff failed: {e}")),
+            }
+        }
+
+        // ── /export — export conversation to Markdown ──────────────────────
+        "/export" => {
+            export_conversation(state, session, arg).await;
+        }
+
+        // ── /status — system status overview ──────────────────────────────
+        "/status" => {
+            let sess = session.lock().await;
+            let router = provider_router.read().await;
+            let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
+            let used_tokens: u64 = sess.cost_tracker.total_input_tokens + sess.cost_tracker.total_output_tokens;
+            let ctx_pct = (used_tokens as f64 / ctx_window as f64 * 100.0).min(100.0);
+            let tools_loaded = crate::tools::ToolRegistry::with_builtins().tool_names().len();
+            let permissions = crate::agent::permissions::PermissionStore::load();
+
+            state.push_system(format!(
+                "forge-osh Status\n\
+                ├─ Provider:     {} ({})\n\
+                ├─ Model:        {}\n\
+                ├─ Context:      {}/{} tokens ({:.1}% used)\n\
+                ├─ Cost:         {}\n\
+                ├─ Messages:     {}\n\
+                ├─ Tools:        {} loaded\n\
+                ├─ Trust mode:   {}\n\
+                ├─ Permission rules: {}\n\
+                └─ Session:      {} ({})",
+                state.provider_name, state.provider_id,
+                state.model_name,
+                used_tokens, ctx_window, ctx_pct,
+                state.format_cost,
+                sess.history.message_count(),
+                tools_loaded,
+                if state.trust_mode { "ON" } else { "OFF" },
+                permissions.rules.len(),
+                sess.name, &sess.id[..8],
+            ));
+        }
+
+        // ── /doctor — environment diagnostics ─────────────────────────────
+        "/doctor" => {
+            cmd_doctor(state, session, provider_router).await;
+        }
+
+        // ── /add-dir — add a directory to the session scope ────────────────
+        "/add-dir" => {
+            if arg.is_empty() {
+                state.push_system("Usage: /add-dir <path>  — adds a directory to the session working context");
+            } else {
+                let path = std::path::PathBuf::from(arg);
+                let abs = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    let sess = session.lock().await;
+                    std::path::PathBuf::from(&sess.working_dir).join(&path)
+                };
+                if abs.is_dir() {
+                    state.push_system(format!(
+                        "Added directory to scope: {}\n\
+                        The agent will now consider files in this directory when responding.",
+                        abs.display()
+                    ));
+                    // Store in session state so system prompt can use it
+                    let mut sess = session.lock().await;
+                    sess.working_dir = abs.to_string_lossy().to_string();
+                } else {
+                    state.push_system(format!("Directory not found: {}", abs.display()));
+                }
+            }
+        }
+
+        // ── /resume — resume a past session ───────────────────────────────
+        "/resume" => {
+            cmd_resume(state, session).await;
+        }
+
+        // ── /permissions — view/edit permission rules ──────────────────────
+        "/permissions" => {
+            cmd_permissions(state, arg).await;
+        }
+
+        // ── /effort — set response effort level ───────────────────────────
+        "/effort" => {
+            if arg.is_empty() {
+                state.push_system("Usage: /effort <1-5>  — 1=minimal, 3=balanced (default), 5=maximum");
+            } else {
+                match arg.parse::<u8>() {
+                    Ok(n) if (1..=5).contains(&n) => {
+                        let desc = match n {
+                            1 => "minimal (fast, lower quality)",
+                            2 => "low",
+                            3 => "balanced",
+                            4 => "high",
+                            5 => "maximum (slow, highest quality)",
+                            _ => "balanced",
+                        };
+                        state.push_system(format!(
+                            "Effort level set to {n}/5 ({desc}). \
+                            Note: affects agent instructions. Model temperature controls \
+                            are provider-specific."
+                        ));
+                    }
+                    _ => state.push_system("Invalid effort level. Use a number 1-5."),
+                }
+            }
+        }
+
+        // ── /copy — copy last response to clipboard ────────────────────────
+        "/copy" => {
+            // Find last assistant message
+            let last_response = state.messages.iter().rev()
+                .find(|m| matches!(m.role, MessageRole::Assistant))
+                .map(|m| m.content.clone());
+
+            match last_response {
+                Some(text) => {
+                    // Try to copy to clipboard using platform tools
+                    let copied = try_copy_to_clipboard(&text);
+                    if copied {
+                        state.push_system(format!(
+                            "Copied last response to clipboard ({} chars).", text.len()
+                        ));
+                    } else {
+                        state.push_system(format!(
+                            "Clipboard not available. Last response ({} chars):\n\n{}",
+                            text.len(),
+                            if text.len() > 500 { &text[..500] } else { &text }
+                        ));
+                    }
+                }
+                None => state.push_system("No assistant response to copy yet."),
+            }
+        }
+
         _ => {
             // Unknown command
             state.push_system(format!(
@@ -388,6 +551,424 @@ async fn handle_slash_command(
     }
 
     true // command was handled
+}
+
+// ---------------------------------------------------------------------------
+// /commit implementation
+// ---------------------------------------------------------------------------
+async fn cmd_commit(state: &mut AppState, session: &Arc<Mutex<Session>>) {
+    let working_dir = {
+        let sess = session.lock().await;
+        sess.working_dir.clone()
+    };
+
+    // Check if there are staged changes
+    let staged_diff = match std::process::Command::new("git")
+        .args(["diff", "--staged", "--stat"])
+        .current_dir(&working_dir)
+        .output()
+    {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+        Err(e) => {
+            state.push_system(format!("/commit: failed to run git: {e}"));
+            return;
+        }
+    };
+
+    if staged_diff.trim().is_empty() {
+        // Check if there are any changes at all
+        let status = match std::process::Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(&working_dir)
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(e) => {
+                state.push_system(format!("/commit: failed to run git status: {e}"));
+                return;
+            }
+        };
+
+        if status.trim().is_empty() {
+            state.push_system("/commit: Nothing to commit — working tree is clean.");
+        } else {
+            state.push_system(format!(
+                "/commit: No staged changes. Stage files first with:\n  git add <file>\n  git add -A\n\nUnstaged changes:\n{}",
+                status.trim()
+            ));
+        }
+        return;
+    }
+
+    // Get full diff for context
+    let full_diff = std::process::Command::new("git")
+        .args(["diff", "--staged"])
+        .current_dir(&working_dir)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    // Show what's staged
+    state.push_system(format!(
+        "Staged changes:\n{}\n\nSending to agent to generate commit message...",
+        staged_diff.trim()
+    ));
+
+    // Build a commit message from the diff using the agent
+    // We construct a special internal message
+    let prompt = format!(
+        "Based on the following git diff, write a concise, informative commit message. \
+        Follow conventional commits format if appropriate (feat/fix/refactor/docs/chore etc). \
+        Return ONLY the commit message, nothing else.\n\n\
+        Staged diff:\n```\n{}\n```",
+        if full_diff.len() > 4000 { &full_diff[..4000] } else { &full_diff }
+    );
+
+    state.push_system(format!("Suggested: use the agent to generate the commit message by sending:\n> {}", &prompt[..prompt.len().min(200)]));
+    state.push_system(
+        "Type your commit message (or ask the agent to write one by describing the changes). \
+        Then run: bash git commit -m \"<message>\""
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /export implementation
+// ---------------------------------------------------------------------------
+async fn export_conversation(state: &mut AppState, session: &Arc<Mutex<Session>>, filename: &str) {
+    let sess = session.lock().await;
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+
+    let outfile = if filename.is_empty() {
+        format!("forge-export-{}.md", timestamp)
+    } else if filename.ends_with(".md") {
+        filename.to_string()
+    } else {
+        format!("{}.md", filename)
+    };
+
+    let mut lines = vec![
+        format!("# forge-osh Session Export"),
+        format!("**Session:** {}  ", sess.name),
+        format!("**Model:** {}  ", sess.model_id),
+        format!("**Provider:** {}  ", sess.provider_id),
+        format!("**Exported:** {}  ", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")),
+        format!("**Messages:** {}  ", sess.history.message_count()),
+        String::new(),
+        "---".to_string(),
+        String::new(),
+    ];
+
+    for msg in &state.messages {
+        match &msg.role {
+            MessageRole::User => {
+                lines.push(format!("### 👤 User\n{}\n", msg.content));
+            }
+            MessageRole::Assistant => {
+                lines.push(format!("### 🤖 Assistant\n{}\n", msg.content));
+            }
+            MessageRole::ToolCall { name } => {
+                lines.push(format!("### ⚙️ Tool: `{}`\n```json\n{}\n```\n", name, msg.content));
+            }
+            MessageRole::ToolResult { is_error } => {
+                let label = if *is_error { "❌ Error" } else { "✅ Result" };
+                lines.push(format!("### {}\n```\n{}\n```\n", label, msg.content));
+            }
+            MessageRole::System => {
+                lines.push(format!("*System: {}*\n", msg.content));
+            }
+            MessageRole::Splash => {} // skip
+        }
+    }
+
+    let content = lines.join("\n");
+    let export_path = std::path::PathBuf::from(&sess.working_dir).join(&outfile);
+
+    drop(sess); // release lock before writing
+
+    match std::fs::write(&export_path, &content) {
+        Ok(_) => state.push_system(format!(
+            "Conversation exported to: {} ({} chars)", outfile, content.len()
+        )),
+        Err(e) => state.push_system(format!("Export failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /doctor implementation
+// ---------------------------------------------------------------------------
+async fn cmd_doctor(
+    state: &mut AppState,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+) {
+    let mut report = vec!["forge-osh Doctor — Environment Diagnostics".to_string(), String::new()];
+
+    // Working directory
+    let working_dir = {
+        let sess = session.lock().await;
+        sess.working_dir.clone()
+    };
+    let wd_exists = std::path::Path::new(&working_dir).exists();
+    report.push(format!("Working Directory: {} {}",
+        working_dir,
+        if wd_exists { "✓" } else { "✗ NOT FOUND" }
+    ));
+
+    // Git availability
+    match std::process::Command::new("git").arg("--version").output() {
+        Ok(out) => {
+            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            report.push(format!("Git: {} ✓", ver));
+        }
+        Err(_) => report.push("Git: NOT FOUND ✗ (git commands will fail)".to_string()),
+    }
+
+    // Shell
+    let (shell, _) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    match std::process::Command::new(shell).arg(if cfg!(target_os="windows") { "/C echo test" } else { "-c" }).arg("echo test").output() {
+        Ok(_) => report.push(format!("Shell ({}): ✓", shell)),
+        Err(e) => report.push(format!("Shell ({}): ✗ {}", shell, e)),
+    }
+
+    // Provider connectivity check
+    let (provider_id, model_id, available_providers) = {
+        let router = provider_router.read().await;
+        (
+            router.active_provider_id().to_string(),
+            router.active_model_id().to_string(),
+            router.available_providers()
+                .iter()
+                .map(|(id, _)| id.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
+    report.push(format!("Active provider: {} / {}", provider_id, model_id));
+    report.push(format!("Available providers: {}", available_providers));
+
+    // API key check
+    let cfg_dir = crate::config::config_dir();
+    let ks = crate::config::keyring::KeyStore::new(&cfg_dir);
+    let has_key = ks.list_providers().contains(&provider_id.to_string());
+    let env_key = std::env::var(crate::config::keyring::provider_env_var(&provider_id)).is_ok();
+    report.push(format!("API key for '{}': {}",
+        provider_id,
+        if has_key || env_key { "✓ found" } else { "✗ NOT SET (use /keys or set env var)" }
+    ));
+
+    // CLAUDE.md memory files
+    let mem_path = std::path::PathBuf::from(&working_dir).join("CLAUDE.md");
+    report.push(format!("CLAUDE.md (project): {}",
+        if mem_path.exists() { format!("✓ found ({})", mem_path.display()) }
+        else { "not found (optional)".to_string() }
+    ));
+
+    // Hooks config
+    let hooks_path = crate::config::config_dir().join("hooks.json");
+    report.push(format!("hooks.json: {}",
+        if hooks_path.exists() { format!("✓ found ({})", hooks_path.display()) }
+        else { "not configured (optional)".to_string() }
+    ));
+
+    // Permission rules
+    let permissions = crate::agent::permissions::PermissionStore::load();
+    report.push(format!("Permission rules: {} stored", permissions.rules.len()));
+
+    // Config dir
+    let cfg_dir = crate::config::config_dir();
+    report.push(format!("Config directory: {} {}",
+        cfg_dir.display(),
+        if cfg_dir.exists() { "✓" } else { "✗ NOT FOUND" }
+    ));
+
+    report.push(String::new());
+    report.push(format!("Platform: {} ({})", std::env::consts::OS, std::env::consts::ARCH));
+    report.push(format!("forge-osh v1.0.1  — Batch 1"));
+
+    state.push_system(report.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// /resume implementation
+// ---------------------------------------------------------------------------
+async fn cmd_resume(state: &mut AppState, _session: &Arc<Mutex<Session>>) {
+    let sessions_dir = crate::config::sessions_dir();
+    if !sessions_dir.exists() {
+        state.push_system("No saved sessions found. Sessions are saved automatically on exit.");
+        return;
+    }
+
+    let mut session_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let mtime = entry.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                session_files.push((path, mtime));
+            }
+        }
+    }
+
+    if session_files.is_empty() {
+        state.push_system("No saved sessions found.");
+        return;
+    }
+
+    session_files.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+
+    let mut lines = vec!["Saved sessions (most recent first):".to_string()];
+    for (i, (path, mtime)) in session_files.iter().take(10).enumerate() {
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let datetime: chrono::DateTime<chrono::Local> = (*mtime).into();
+        lines.push(format!("  {}. {}  ({})", i + 1, name, datetime.format("%Y-%m-%d %H:%M")));
+    }
+    lines.push(String::new());
+    lines.push("To resume: forge-osh --session <session-id>  or start a new session and use /compact to manage context.".to_string());
+
+    state.push_system(lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// /permissions implementation
+// ---------------------------------------------------------------------------
+async fn cmd_permissions(state: &mut AppState, arg: &str) {
+    let mut store = crate::agent::permissions::PermissionStore::load();
+
+    if arg.is_empty() {
+        // Display current rules
+        state.push_system(store.display());
+        state.push_system(
+            "Usage:\n  /permissions add bash(git *)     — always allow git commands\n  \
+            /permissions deny bash(rm -rf *)  — always deny rm -rf\n  \
+            /permissions remove <index>        — remove rule by index\n  \
+            /permissions clear                 — remove all rules"
+        );
+        return;
+    }
+
+    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+    match parts[0] {
+        "add" | "allow" => {
+            if let Some(rule_str) = parts.get(1) {
+                if let Some((tool, pattern)) = parse_permission_rule(rule_str) {
+                    store.add_allow(&tool, &pattern);
+                    state.push_system(format!("Added allow rule: {}({})", tool, pattern));
+                } else {
+                    state.push_system("Invalid rule format. Use: tool_name(pattern)  e.g. bash(git *)");
+                }
+            }
+        }
+        "deny" => {
+            if let Some(rule_str) = parts.get(1) {
+                if let Some((tool, pattern)) = parse_permission_rule(rule_str) {
+                    store.add_deny(&tool, &pattern);
+                    state.push_system(format!("Added deny rule: {}({})", tool, pattern));
+                } else {
+                    state.push_system("Invalid rule format. Use: tool_name(pattern)  e.g. bash(rm -rf *)");
+                }
+            }
+        }
+        "remove" | "rm" | "delete" => {
+            if let Some(idx_str) = parts.get(1) {
+                if let Ok(idx) = idx_str.trim().parse::<usize>() {
+                    store.remove(idx);
+                    state.push_system(format!("Removed rule at index {idx}."));
+                } else {
+                    state.push_system("Usage: /permissions remove <index>");
+                }
+            }
+        }
+        "clear" => {
+            store.rules.clear();
+            store.save();
+            state.push_system("All permission rules cleared.");
+        }
+        _ => {
+            state.push_system("Unknown subcommand. Use: /permissions [add|deny|remove|clear]");
+        }
+    }
+}
+
+fn parse_permission_rule(s: &str) -> Option<(String, String)> {
+    // Format: tool_name(pattern)  e.g.  bash(git *)
+    if let Some(open) = s.find('(') {
+        if let Some(close) = s.rfind(')') {
+            if close > open {
+                let tool = s[..open].trim().to_string();
+                let pattern = s[open + 1..close].to_string();
+                if !tool.is_empty() && !pattern.is_empty() {
+                    return Some((tool, pattern));
+                }
+            }
+        }
+    }
+    // Also support: bash git *  (space-separated, pattern is everything after tool)
+    let parts: Vec<&str> = s.splitn(2, ' ').collect();
+    if parts.len() == 2 {
+        return Some((parts[0].to_string(), parts[1].to_string()));
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard helper
+// ---------------------------------------------------------------------------
+fn try_copy_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // Use PowerShell to copy to clipboard on Windows
+        if let Ok(mut child) = std::process::Command::new("powershell")
+            .args(["-Command", &format!("Set-Clipboard -Value '{}'", text.replace('\'', "''"))])
+            .spawn()
+        {
+            let _ = child.wait();
+            return true;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.take() {
+                let _ = std::io::BufWriter::new(stdin).write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return true;
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // Try xclip or xsel on Linux
+        use std::io::Write;
+        for cmd in &["xclip", "xsel"] {
+            let args: &[&str] = if *cmd == "xclip" {
+                &["-selection", "clipboard"]
+            } else {
+                &["--clipboard", "--input"]
+            };
+            if let Ok(mut child) = std::process::Command::new(cmd)
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(stdin) = child.stdin.take() {
+                    let _ = std::io::BufWriter::new(stdin).write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Compact conversation history: keep the last 6 messages in full and

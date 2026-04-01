@@ -1,9 +1,11 @@
+pub mod agent_tools;
 pub mod code;
 pub mod executor;
 pub mod fs;
 pub mod git;
 pub mod search;
 pub mod shell;
+pub mod tasks;
 pub mod web;
 
 use async_trait::async_trait;
@@ -43,7 +45,7 @@ impl ToolRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
 
-        // File system tools
+        // ── File system tools ──────────────────────────────────────────────
         registry.register(Box::new(fs::ReadFileTool));
         registry.register(Box::new(fs::WriteFileTool));
         registry.register(Box::new(fs::EditFileTool));
@@ -53,10 +55,10 @@ impl ToolRegistry {
         registry.register(Box::new(fs::MoveFileTool));
         registry.register(Box::new(fs::CopyFileTool));
 
-        // Shell
+        // ── Shell ──────────────────────────────────────────────────────────
         registry.register(Box::new(shell::BashTool::default()));
 
-        // Git
+        // ── Git ────────────────────────────────────────────────────────────
         registry.register(Box::new(git::GitStatusTool));
         registry.register(Box::new(git::GitDiffTool));
         registry.register(Box::new(git::GitLogTool));
@@ -65,18 +67,30 @@ impl ToolRegistry {
         registry.register(Box::new(git::GitBranchTool));
         registry.register(Box::new(git::GitCheckoutTool));
 
-        // Search
+        // ── Search ─────────────────────────────────────────────────────────
         registry.register(Box::new(search::SearchFilesTool));
         registry.register(Box::new(search::FindFilesTool));
 
-        // Web
+        // ── Web ────────────────────────────────────────────────────────────
         registry.register(Box::new(web::WebFetchTool));
         registry.register(Box::new(web::WebSearchTool));
 
-        // Code
+        // ── Code quality ───────────────────────────────────────────────────
         registry.register(Box::new(code::RunLinterTool));
         registry.register(Box::new(code::RunTestsTool));
         registry.register(Box::new(code::RunFormatterTool));
+
+        // ── Task management ────────────────────────────────────────────────
+        registry.register(Box::new(tasks::TodoWriteTool));
+        registry.register(Box::new(tasks::TaskCreateTool));
+        registry.register(Box::new(tasks::TaskUpdateTool));
+        registry.register(Box::new(tasks::TaskGetTool));
+        registry.register(Box::new(tasks::TaskListTool));
+
+        // ── Agent orchestration ────────────────────────────────────────────
+        registry.register(Box::new(agent_tools::AskUserQuestionTool));
+        registry.register(Box::new(agent_tools::EnterPlanModeTool));
+        registry.register(Box::new(agent_tools::ExitPlanModeTool));
 
         registry
     }
@@ -90,17 +104,22 @@ impl ToolRegistry {
     }
 
     pub fn all_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let mut defs: Vec<ToolDefinition> = self.tools
             .values()
             .map(|tool| ToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
                 parameters: tool.parameters_schema(),
             })
-            .collect()
+            .collect();
+        // Sort for deterministic ordering
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        names.sort();
+        names
     }
 }

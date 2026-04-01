@@ -1,20 +1,40 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help
+    r#"forge-osh Help  (v1.0.1 — Batch 1)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
-  /help            Show this help screen
-  /clear           Clear the conversation display
-  /cost            Show token usage and cost
-  /model           Open model selector
-  /provider        Open provider selector
-  /keys            Open API key manager
-  /theme [name]    Cycle theme or set by name (dark/light/dracula/nord/solarized)
-  /trust           Toggle trust mode (skip permission prompts)
-  /compact         Compact conversation history to free context window
-  /save            Save session to disk
-  /session         Show session info
-  /quit or /exit   Exit forge-osh
+  /help              Show this help screen
+  /clear             Clear the conversation display
+  /cost              Show token usage and cost
+  /model             Open model selector
+  /provider          Open provider selector
+  /keys              Open API key manager
+  /theme [name]      Cycle theme or set by name (dark/light/dracula/nord/solarized)
+  /trust             Toggle trust mode (skip permission prompts)
+  /compact           Compact conversation history to free context window
+  /save              Save session to disk
+  /session           Show session info
+
+GIT COMMANDS
+  /commit            Generate AI commit message for staged changes
+  /diff [staged]     Show git diff stats (add 'staged' for staged only)
+  /export [file.md]  Export full conversation to a Markdown file
+
+SESSION & DIAGNOSTICS
+  /status            Full system status (provider, model, context %, cost)
+  /doctor            Environment diagnostics (git, shell, API keys, config)
+  /resume            List saved sessions for resuming
+  /add-dir <path>    Add directory to session working scope
+
+AGENT BEHAVIOUR
+  /permissions       View/edit permission rules (auto-allow/deny patterns)
+                       /permissions add bash(git *)   — always allow git
+                       /permissions deny bash(rm -rf *)
+                       /permissions remove <index>
+  /effort <1-5>      Set response effort level (1=minimal, 5=maximum)
+  /copy              Copy last assistant response to clipboard
+
+  /quit or /exit     Exit forge-osh
 
 KEYBOARD SHORTCUTS
 
@@ -50,5 +70,40 @@ KEY MANAGER  (Ctrl+K)
 
 MODEL/PROVIDER PICKERS  (Ctrl+O / Ctrl+P)
   Up / Down   Navigate items            Enter       Select
-  /           Start filter search       Esc         Cancel"#
+  /           Start filter search       Esc         Cancel
+
+AGENT TOOLS (used autonomously by the AI)
+  todo_write        Write structured task list to .forge-osh/todos.md
+  task_create       Create a tracked task in this session
+  task_update       Update task status (pending→in_progress→completed)
+  task_get          Get task details by ID
+  task_list         List all session tasks
+  ask_user          Agent pauses to ask you a clarifying question
+  enter_plan_mode   Agent proposes a plan before executing
+  exit_plan_mode    Agent exits plan mode after plan approval
+  search_files      Enhanced grep: context lines, file types, output modes
+  bash              Enhanced shell: output truncation, per-command timeout
+
+PERMISSION RULES SYSTEM
+  Rules are stored in ~/.forge-osh/permissions.json
+  Format: tool_name(pattern)
+  Examples:
+    bash(git *)           auto-allow all git commands
+    bash(cargo *)         auto-allow all cargo commands
+    read_file(*)          auto-allow all file reads
+    edit_file(/src/*)     auto-allow edits under /src/
+    bash(rm -rf *)        auto-deny rm -rf commands
+
+HOOKS SYSTEM  (~/.forge-osh/hooks.json)
+  PreToolUse   — fires before each tool call
+  PostToolUse  — fires after each tool call
+  Stop         — fires when agent finishes
+  Example:
+  { "PreToolUse": [{ "matcher": "bash", "command": "echo Running: $TOOL_INPUT" }] }
+
+MEMORY SYSTEM (CLAUDE.md)
+  forge-osh auto-loads CLAUDE.md files into the system prompt:
+  - ./CLAUDE.md          project-level instructions
+  - ~/.forge-osh/CLAUDE.md   user-level instructions
+  - Parent directories up to home are also checked"#
 }

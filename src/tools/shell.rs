@@ -8,10 +8,90 @@ use tokio::process::Command;
 use crate::types::*;
 use super::Tool;
 
+// ---------------------------------------------------------------------------
+// EndTruncatingAccumulator — keeps last N bytes of output (like Claude Code)
+// When output is huge, keeps the end (most recent) rather than the beginning.
+// ---------------------------------------------------------------------------
+struct EndTruncatingAccumulator {
+    max_bytes: usize,
+    buffer: Vec<u8>,
+    total_bytes: usize,
+    truncated: bool,
+}
+
+impl EndTruncatingAccumulator {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            buffer: Vec::new(),
+            total_bytes: 0,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        self.total_bytes += data.len();
+
+        if self.buffer.len() + data.len() <= self.max_bytes {
+            self.buffer.extend_from_slice(data);
+        } else {
+            // Keep the end: combine what we have + new data, then trim from front
+            self.buffer.extend_from_slice(data);
+            if self.buffer.len() > self.max_bytes {
+                let excess = self.buffer.len() - self.max_bytes;
+                self.buffer.drain(..excess);
+                self.truncated = true;
+            }
+        }
+    }
+
+    fn finish(self) -> String {
+        let s = String::from_utf8_lossy(&self.buffer).to_string();
+        if self.truncated {
+            format!(
+                "[Output truncated — showing last {} of {} total bytes]\n...\n{}",
+                self.buffer.len(),
+                self.total_bytes,
+                s
+            )
+        } else {
+            s
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dangerous command patterns (blocklist)
+// ---------------------------------------------------------------------------
+
+const BLOCKED_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "sudo rm -rf /",
+    "mkfs",
+    ":(){:|:&};:",          // fork bomb
+    "dd if=/dev/zero of=/dev/", // disk wipe
+    "chmod -R 777 /",
+    "chown -R root /",
+    "> /dev/sda",
+];
+
+fn is_blocked(command: &str) -> Option<&'static str> {
+    for pattern in BLOCKED_PATTERNS {
+        if command.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// BashTool
+// ---------------------------------------------------------------------------
+
 pub struct BashTool {
     pub default_timeout: u64,
     pub max_timeout: u64,
-    pub blocked_commands: Vec<String>,
+    pub max_output_bytes: usize,
 }
 
 impl Default for BashTool {
@@ -19,21 +99,8 @@ impl Default for BashTool {
         Self {
             default_timeout: 30,
             max_timeout: 300,
-            blocked_commands: vec![
-                "rm -rf /".to_string(),
-                "sudo rm -rf /".to_string(),
-                "mkfs".to_string(),
-                ":(){:|:&};:".to_string(),
-            ],
+            max_output_bytes: 200_000, // 200 KB — keeps tail of output
         }
-    }
-}
-
-impl BashTool {
-    fn is_blocked(&self, command: &str) -> bool {
-        self.blocked_commands
-            .iter()
-            .any(|blocked| command.contains(blocked))
     }
 }
 
@@ -42,16 +109,28 @@ impl Tool for BashTool {
     fn name(&self) -> &str { "bash" }
 
     fn description(&self) -> &str {
-        "Execute a bash command. Returns stdout and stderr. Commands run in the current working directory."
+        "Execute a bash/shell command. Returns combined stdout and stderr. \
+        Commands run in the current working directory. \
+        Large outputs are truncated from the front (tail is preserved). \
+        Use timeout_seconds to override the per-command timeout (max 300s)."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The command to execute" },
-                "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default: 30, max: 300)" },
-                "working_dir": { "type": "string", "description": "Override working directory (optional)" }
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute"
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Per-command timeout in seconds (default: 30, max: 300)"
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Override the working directory for this command (optional)"
+                }
             },
             "required": ["command"]
         })
@@ -65,8 +144,11 @@ impl Tool for BashTool {
             None => return ToolOutput::error("Missing 'command' parameter"),
         };
 
-        if self.is_blocked(command) {
-            return ToolOutput::error(format!("Command is blocked for safety: {command}"));
+        // Safety check
+        if let Some(blocked) = is_blocked(command) {
+            return ToolOutput::error(format!(
+                "Command blocked for safety (matches pattern '{blocked}'): {command}"
+            ));
         }
 
         let timeout = input["timeout_seconds"]
@@ -78,11 +160,7 @@ impl Tool for BashTool {
             .as_str()
             .map(|p| {
                 let path = Path::new(p);
-                if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    ctx.working_dir.join(path)
-                }
+                if path.is_absolute() { path.to_path_buf() } else { ctx.working_dir.join(path) }
             })
             .unwrap_or_else(|| ctx.working_dir.clone());
 
@@ -92,6 +170,8 @@ impl Tool for BashTool {
         } else {
             ("sh", "-c")
         };
+
+        let max_output_bytes = self.max_output_bytes;
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
@@ -105,18 +185,24 @@ impl Tool for BashTool {
                     .spawn()
                     .map_err(|e| format!("Failed to spawn process: {e}"))?;
 
-                let mut stdout = String::new();
-                let mut stderr = String::new();
+                let mut stdout_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
+                let mut stderr_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
+
+                // Read stdout and stderr
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
 
                 if let Some(mut out) = child.stdout.take() {
-                    out.read_to_string(&mut stdout)
+                    out.read_to_end(&mut stdout_buf)
                         .await
                         .map_err(|e| format!("Failed to read stdout: {e}"))?;
+                    stdout_acc.push(&stdout_buf);
                 }
                 if let Some(mut err) = child.stderr.take() {
-                    err.read_to_string(&mut stderr)
+                    err.read_to_end(&mut stderr_buf)
                         .await
                         .map_err(|e| format!("Failed to read stderr: {e}"))?;
+                    stderr_acc.push(&stderr_buf);
                 }
 
                 let status = child
@@ -125,8 +211,8 @@ impl Tool for BashTool {
                     .map_err(|e| format!("Failed to wait for process: {e}"))?;
 
                 Ok::<(String, String, i32), String>((
-                    stdout,
-                    stderr,
+                    stdout_acc.finish(),
+                    stderr_acc.finish(),
                     status.code().unwrap_or(-1),
                 ))
             },
@@ -148,10 +234,9 @@ impl Tool for BashTool {
                     output.push_str(&stderr);
                 }
 
-                // Strip ANSI codes
-                let cleaned = String::from_utf8(
-                    strip_ansi_escapes::strip(output.as_bytes())
-                ).unwrap_or(output);
+                // Strip ANSI escape codes for clean display
+                let cleaned = strip_ansi_escapes::strip(output.as_bytes());
+                let cleaned = String::from_utf8(cleaned).unwrap_or(output);
 
                 if exit_code == 0 {
                     ToolOutput::success(if cleaned.is_empty() {
@@ -169,7 +254,8 @@ impl Tool for BashTool {
             }
             Ok(Err(e)) => ToolOutput::error(e),
             Err(_) => ToolOutput::error(format!(
-                "Command timed out after {timeout} seconds: {command}"
+                "Command timed out after {timeout}s: {command}\n\
+                (Use timeout_seconds parameter to extend the timeout)"
             )),
         }
     }
@@ -192,9 +278,7 @@ mod tests {
     async fn test_echo() {
         let tool = BashTool::default();
         let ctx = test_ctx();
-        let output = tool
-            .execute(json!({"command": "echo hello"}), &ctx)
-            .await;
+        let output = tool.execute(json!({"command": "echo hello"}), &ctx).await;
         assert!(!output.is_error);
         assert!(output.content.contains("hello"));
     }
@@ -203,10 +287,24 @@ mod tests {
     async fn test_blocked_command() {
         let tool = BashTool::default();
         let ctx = test_ctx();
-        let output = tool
-            .execute(json!({"command": "rm -rf /"}), &ctx)
-            .await;
+        let output = tool.execute(json!({"command": "rm -rf /"}), &ctx).await;
         assert!(output.is_error);
         assert!(output.content.contains("blocked"));
+    }
+
+    #[test]
+    fn test_end_truncating_accumulator() {
+        let mut acc = EndTruncatingAccumulator::new(10);
+        acc.push(b"hello world"); // 11 bytes — should truncate
+        let result = acc.finish();
+        assert!(result.contains("ello world") || result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_accumulator_no_truncation() {
+        let mut acc = EndTruncatingAccumulator::new(100);
+        acc.push(b"hello");
+        let result = acc.finish();
+        assert_eq!(result, "hello");
     }
 }

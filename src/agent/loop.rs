@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{ForgeError, Result};
 use crate::provider::router::ProviderRouter;
 use crate::session::Session;
 use crate::tools::executor::ToolExecutor;
@@ -10,6 +10,7 @@ use crate::tools::ToolRegistry;
 use crate::types::*;
 
 use super::context::{ContextManager, ContextStatus};
+use super::hooks::{self, HooksConfig};
 use super::system_prompt;
 
 /// Events emitted by the agent loop to the TUI
@@ -43,9 +44,71 @@ pub struct PermissionRequest {
     pub response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
 }
 
+// ---------------------------------------------------------------------------
+// Error categorization for retry logic
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq)]
+enum ErrorKind {
+    Transient,      // Network glitch, service temporarily unavailable
+    RateLimit,      // 429 Too Many Requests
+    Overloaded,     // 529 / "overloaded" responses
+    Auth,           // 401/403 — do NOT retry
+    NotRetryable,   // Any other permanent error
+}
+
+fn categorize_error(err: &ForgeError) -> ErrorKind {
+    match err {
+        ForgeError::Api { status, message } => match status {
+            429 => ErrorKind::RateLimit,
+            529 => ErrorKind::Overloaded,
+            500 | 502 | 503 | 504 => ErrorKind::Transient,
+            401 | 403 => ErrorKind::Auth,
+            _ => {
+                // Check message content for additional hints
+                let msg_lower = message.to_lowercase();
+                if msg_lower.contains("overloaded") || msg_lower.contains("capacity") {
+                    ErrorKind::Overloaded
+                } else if msg_lower.contains("rate") || msg_lower.contains("limit") {
+                    ErrorKind::RateLimit
+                } else if msg_lower.contains("timeout") || msg_lower.contains("connection") {
+                    ErrorKind::Transient
+                } else {
+                    ErrorKind::NotRetryable
+                }
+            }
+        },
+        ForgeError::Http(e) => {
+            if e.is_timeout() || e.is_connect() {
+                ErrorKind::Transient
+            } else if e.status().map(|s| s.as_u16()) == Some(429) {
+                ErrorKind::RateLimit
+            } else {
+                ErrorKind::NotRetryable
+            }
+        }
+        ForgeError::Io(_) => ErrorKind::Transient,
+        _ => ErrorKind::NotRetryable,
+    }
+}
+
+/// Calculate exponential backoff delay in milliseconds
+fn backoff_ms(attempt: u32, base_ms: u64, cap_ms: u64, kind: &ErrorKind) -> u64 {
+    let base = match kind {
+        ErrorKind::RateLimit => base_ms * 4, // rate limits need longer delay
+        ErrorKind::Overloaded => base_ms * 2,
+        _ => base_ms,
+    };
+    let delay = base * (2u64.pow(attempt.min(10)));
+    delay.min(cap_ms)
+}
+
 impl AgentLoop {
     /// Run one turn of the agent loop: process user message until completion
     pub async fn run(&self, user_message: String) -> Result<()> {
+        // Load hooks config once at the start
+        let hooks_config = HooksConfig::load();
+
         // 1. Add user message to history
         {
             let mut session = self.session.lock().await;
@@ -113,46 +176,8 @@ impl AgentLoop {
             // 5. Send ThinkingStart
             let _ = self.event_tx.send(AgentEvent::ThinkingStart);
 
-            // 6. Stream tokens to TUI in real-time via a concurrent forwarder task.
-            //
-            //    The provider's chat() sends StreamEvent::Token events to stream_tx
-            //    AS it receives chunks from the API. We spawn a separate Tokio task
-            //    (forwarder) that reads from stream_rx and immediately forwards each
-            //    token to the TUI event channel. This means the TUI receives and
-            //    renders tokens one by one in real time, not all at once after the
-            //    API call completes.
-            //
-            //    When chat() returns, stream_tx is dropped, which causes stream_rx.recv()
-            //    to return None, which makes the forwarder loop exit cleanly.
-            let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
-            let event_tx_clone = self.event_tx.clone();
-
-            let forwarder = tokio::spawn(async move {
-                let mut rx = stream_rx;
-                while let Some(event) = rx.recv().await {
-                    if let StreamEvent::Token(t) = event {
-                        let _ = event_tx_clone.send(AgentEvent::Token(t));
-                    }
-                }
-            });
-
-            let chat_result = {
-                let router = self.provider_router.read().await;
-                let provider = router.active()?;
-                provider.chat(request, stream_tx).await
-                // router read guard dropped here; stream_tx dropped inside chat()
-            };
-
-            // Wait for all pending tokens to be forwarded before continuing
-            let _ = forwarder.await;
-
-            let response = match chat_result {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = self.event_tx.send(AgentEvent::Error(e.to_string()));
-                    return Err(e);
-                }
-            };
+            // 6. Stream tokens with retry logic (exponential backoff)
+            let response = self.call_provider_with_retry(request).await?;
 
             // 7. Record usage
             {
@@ -167,13 +192,10 @@ impl AgentLoop {
                 }
             }
 
-            // 8. If the provider didn't stream any text tokens (e.g. tool-only response),
+            // 8. If the provider didn't stream any text tokens (tool-only / non-streaming),
             //    send the full response text so the TUI can display it.
             if let Some(text) = response.content.text() {
                 if !text.is_empty() && response.content.tool_calls().is_empty() {
-                    // Only send if we haven't already sent this text via streaming.
-                    // Tool-only responses have no text, so this path is mainly for
-                    // providers that don't support streaming.
                     let _ = self.event_tx.send(AgentEvent::Token(text.to_string()));
                 }
             }
@@ -190,16 +212,25 @@ impl AgentLoop {
             if tool_calls.is_empty() {
                 // No tool calls — we're done
                 let _ = self.event_tx.send(AgentEvent::Done);
+
+                // Run Stop hooks
+                let working_dir = {
+                    let session = self.session.lock().await;
+                    std::path::PathBuf::from(&session.working_dir)
+                };
+                hooks::run_stop_hooks(&hooks_config, working_dir).await;
+
                 break;
             }
 
             // 11. Execute each tool call
             let executor = ToolExecutor::new(self.config.agent.max_output_per_tool);
+            let working_dir = {
+                let session = self.session.lock().await;
+                std::path::PathBuf::from(&session.working_dir)
+            };
             let ctx = ToolContext {
-                working_dir: {
-                    let session = self.session.lock().await;
-                    std::path::PathBuf::from(&session.working_dir)
-                },
+                working_dir: working_dir.clone(),
                 home_dir: dirs::home_dir().unwrap_or_default(),
                 session_id: {
                     let session = self.session.lock().await;
@@ -213,6 +244,9 @@ impl AgentLoop {
                     name: tc.name.clone(),
                     input: tc.input.clone(),
                 });
+
+                // Run PreToolUse hooks
+                hooks::pre_tool_use(&hooks_config, &tc.name, &tc.input, working_dir.clone()).await;
 
                 let perm_tx = self.permission_tx.clone();
                 let trust_mode = self.config.general.trust_mode;
@@ -238,6 +272,16 @@ impl AgentLoop {
                         },
                     )
                     .await;
+
+                // Run PostToolUse hooks
+                hooks::post_tool_use(
+                    &hooks_config,
+                    &tc.name,
+                    &tc.input,
+                    &output.content,
+                    output.is_error,
+                    working_dir.clone(),
+                ).await;
 
                 let _ = self.event_tx.send(AgentEvent::ToolEnd {
                     name: tc.name.clone(),
@@ -266,5 +310,82 @@ impl AgentLoop {
         }
 
         Ok(())
+    }
+
+    /// Make an API call with exponential backoff retry logic.
+    /// Retries up to 10 times for transient/rate-limit errors.
+    async fn call_provider_with_retry(&self, request: ChatRequest) -> Result<ChatResponse> {
+        const MAX_RETRIES: u32 = 10;
+        const BASE_MS: u64 = 500;
+        const CAP_MS: u64 = 120_000; // 2 minutes max delay
+
+        let mut attempt = 0u32;
+
+        loop {
+            // Stream tokens concurrently while waiting for the full response
+            let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
+            let event_tx_clone = self.event_tx.clone();
+
+            let forwarder = tokio::spawn(async move {
+                let mut rx = stream_rx;
+                while let Some(event) = rx.recv().await {
+                    if let StreamEvent::Token(t) = event {
+                        let _ = event_tx_clone.send(AgentEvent::Token(t));
+                    }
+                }
+            });
+
+            let chat_result = {
+                let router = self.provider_router.read().await;
+                let provider = router.active()?;
+                provider.chat(request.clone(), stream_tx).await
+                // router read guard + stream_tx dropped here
+            };
+
+            let _ = forwarder.await;
+
+            match chat_result {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    let kind = categorize_error(&err);
+
+                    // Non-retryable errors fail immediately
+                    if kind == ErrorKind::Auth || kind == ErrorKind::NotRetryable {
+                        let _ = self.event_tx.send(AgentEvent::Error(err.to_string()));
+                        return Err(err);
+                    }
+
+                    attempt += 1;
+                    if attempt > MAX_RETRIES {
+                        let _ = self.event_tx.send(AgentEvent::Error(format!(
+                            "Failed after {MAX_RETRIES} retries: {err}"
+                        )));
+                        return Err(err);
+                    }
+
+                    let delay_ms = backoff_ms(attempt, BASE_MS, CAP_MS, &kind);
+                    let retry_msg = match kind {
+                        ErrorKind::RateLimit => format!(
+                            "Rate limited. Retrying in {:.1}s (attempt {attempt}/{MAX_RETRIES})...",
+                            delay_ms as f64 / 1000.0
+                        ),
+                        ErrorKind::Overloaded => format!(
+                            "API overloaded. Retrying in {:.1}s (attempt {attempt}/{MAX_RETRIES})...",
+                            delay_ms as f64 / 1000.0
+                        ),
+                        _ => format!(
+                            "Transient error. Retrying in {:.1}s (attempt {attempt}/{MAX_RETRIES})...",
+                            delay_ms as f64 / 1000.0
+                        ),
+                    };
+
+                    let _ = self.event_tx.send(AgentEvent::Error(retry_msg));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+
+                    // Re-send ThinkingStart after retry
+                    let _ = self.event_tx.send(AgentEvent::ThinkingStart);
+                }
+            }
+        }
     }
 }
