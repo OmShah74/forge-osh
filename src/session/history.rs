@@ -66,6 +66,18 @@ impl ConversationHistory {
         self.updated_at = Utc::now();
     }
 
+    /// Keep only the last `keep_last` messages, discarding earlier ones.
+    /// Used by the /compact command to free context window space.
+    pub fn compact(&mut self, keep_last: usize) {
+        if self.messages.len() <= keep_last {
+            return;
+        }
+        let keep_from = self.messages.len().saturating_sub(keep_last);
+        let kept = self.messages.split_off(keep_from);
+        self.messages = kept;
+        self.updated_at = Utc::now();
+    }
+
     /// Clear all messages
     pub fn clear(&mut self) {
         self.messages.clear();

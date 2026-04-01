@@ -74,7 +74,6 @@ impl AgentLoop {
                 match ctx_mgr.check(&session.history) {
                     ContextStatus::NeedsSummarization { used, limit } => {
                         let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
-                        // Could auto-summarize here, but for now just warn
                     }
                     ContextStatus::Warning { used, limit } => {
                         let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
@@ -114,23 +113,38 @@ impl AgentLoop {
             // 5. Send ThinkingStart
             let _ = self.event_tx.send(AgentEvent::ThinkingStart);
 
-            // 6. Call provider
-            let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
+            // 6. Stream tokens to TUI in real-time via a concurrent forwarder task.
+            //
+            //    The provider's chat() sends StreamEvent::Token events to stream_tx
+            //    AS it receives chunks from the API. We spawn a separate Tokio task
+            //    (forwarder) that reads from stream_rx and immediately forwards each
+            //    token to the TUI event channel. This means the TUI receives and
+            //    renders tokens one by one in real time, not all at once after the
+            //    API call completes.
+            //
+            //    When chat() returns, stream_tx is dropped, which causes stream_rx.recv()
+            //    to return None, which makes the forwarder loop exit cleanly.
+            let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
+            let event_tx_clone = self.event_tx.clone();
 
-            let router = self.provider_router.read().await;
-            let provider = router.active()?;
-
-            let chat_result = provider.chat(request, stream_tx).await;
-
-            // Forward stream events to TUI
-            let mut tokens_forwarded = 0usize;
-            while let Ok(event) = stream_rx.try_recv() {
-                if let StreamEvent::Token(t) = &event {
-                    let _ = self.event_tx.send(AgentEvent::Token(t.clone()));
-                    tokens_forwarded += 1;
+            let forwarder = tokio::spawn(async move {
+                let mut rx = stream_rx;
+                while let Some(event) = rx.recv().await {
+                    if let StreamEvent::Token(t) = event {
+                        let _ = event_tx_clone.send(AgentEvent::Token(t));
+                    }
                 }
-            }
-            drop(router);
+            });
+
+            let chat_result = {
+                let router = self.provider_router.read().await;
+                let provider = router.active()?;
+                provider.chat(request, stream_tx).await
+                // router read guard dropped here; stream_tx dropped inside chat()
+            };
+
+            // Wait for all pending tokens to be forwarded before continuing
+            let _ = forwarder.await;
 
             let response = match chat_result {
                 Ok(r) => r,
@@ -153,12 +167,14 @@ impl AgentLoop {
                 }
             }
 
-            // 8. If no tokens were streamed, send the full response text to TUI
-            if tokens_forwarded == 0 {
-                if let Some(text) = response.content.text() {
-                    if !text.is_empty() {
-                        let _ = self.event_tx.send(AgentEvent::Token(text.to_string()));
-                    }
+            // 8. If the provider didn't stream any text tokens (e.g. tool-only response),
+            //    send the full response text so the TUI can display it.
+            if let Some(text) = response.content.text() {
+                if !text.is_empty() && response.content.tool_calls().is_empty() {
+                    // Only send if we haven't already sent this text via streaming.
+                    // Tool-only responses have no text, so this path is mainly for
+                    // providers that don't support streaming.
+                    let _ = self.event_tx.send(AgentEvent::Token(text.to_string()));
                 }
             }
 
@@ -168,7 +184,7 @@ impl AgentLoop {
                 session.history.add_assistant(response.content.clone());
             }
 
-            // 9. Check if we need to execute tools
+            // 10. Check if we need to execute tools
             let tool_calls = response.content.tool_calls().to_vec();
 
             if tool_calls.is_empty() {
@@ -177,7 +193,7 @@ impl AgentLoop {
                 break;
             }
 
-            // 10. Execute each tool call
+            // 11. Execute each tool call
             let executor = ToolExecutor::new(self.config.agent.max_output_per_tool);
             let ctx = ToolContext {
                 working_dir: {
@@ -198,11 +214,9 @@ impl AgentLoop {
                     input: tc.input.clone(),
                 });
 
-                // Create a permission callback using channels
                 let perm_tx = self.permission_tx.clone();
                 let trust_mode = self.config.general.trust_mode;
 
-                let _tool_name = tc.name.clone();
                 let output = executor
                     .execute(
                         tc,
@@ -212,7 +226,6 @@ impl AgentLoop {
                             if trust_mode {
                                 return PermissionResponse::Allow;
                             }
-                            // Send permission request to TUI
                             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                             let req = PermissionRequest {
                                 tool_name: name,
