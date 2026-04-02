@@ -45,25 +45,28 @@ impl Theme {
 
     pub fn dark() -> Self {
         Self {
-            bg: Color::Reset,
-            fg: Color::White,
-            user_msg_fg: Color::Cyan,
-            assistant_msg_fg: Color::White,
-            tool_name_fg: Color::Yellow,
-            added_fg: Color::Green,
-            removed_fg: Color::Red,
-            border_fg: Color::DarkGray,
-            header_bg: Color::Rgb(30, 30, 40),
-            header_fg: Color::White,
-            status_bg: Color::Rgb(30, 30, 40),
-            status_fg: Color::DarkGray,
-            modal_bg: Color::Rgb(40, 40, 50),
-            highlight_bg: Color::Rgb(50, 50, 70),
-            spinner_fg: Color::Cyan,
-            error_fg: Color::Red,
-            warning_fg: Color::Yellow,
-            muted_fg: Color::DarkGray,
-            prompt_fg: Color::Green,
+            // Explicit dark background — do NOT use Color::Reset because that
+            // inherits the terminal's native background colour.  On terminals
+            // with a light background this made all white/light text invisible.
+            bg: Color::Rgb(18, 18, 26),
+            fg: Color::Rgb(220, 220, 228),
+            user_msg_fg: Color::Rgb(86, 210, 230),    // bright cyan
+            assistant_msg_fg: Color::Rgb(220, 220, 228),
+            tool_name_fg: Color::Rgb(255, 198, 82),   // amber
+            added_fg: Color::Rgb(100, 220, 120),      // green
+            removed_fg: Color::Rgb(240, 90, 90),      // red
+            border_fg: Color::Rgb(80, 80, 100),
+            header_bg: Color::Rgb(28, 28, 40),
+            header_fg: Color::Rgb(220, 220, 228),
+            status_bg: Color::Rgb(28, 28, 40),
+            status_fg: Color::Rgb(120, 120, 150),
+            modal_bg: Color::Rgb(32, 32, 48),
+            highlight_bg: Color::Rgb(48, 48, 72),
+            spinner_fg: Color::Rgb(86, 210, 230),
+            error_fg: Color::Rgb(240, 90, 90),
+            warning_fg: Color::Rgb(255, 198, 82),
+            muted_fg: Color::Rgb(100, 100, 130),
+            prompt_fg: Color::Rgb(100, 220, 120),
         }
     }
 

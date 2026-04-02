@@ -174,11 +174,22 @@ impl AppState {
     }
 
     pub fn scroll_up(&mut self, n: usize) {
+        // If auto_scroll is active the rendered position is at max_scroll, but
+        // scroll_offset is still 0 (it is only used when auto_scroll=false).
+        // Sync scroll_offset to the effective position BEFORE disabling auto_scroll
+        // so we subtract from the correct base instead of jumping to the top.
+        if self.auto_scroll {
+            self.scroll_offset = self.max_scroll();
+        }
         self.auto_scroll = false;
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
 
     pub fn scroll_down(&mut self, n: usize) {
+        // Re-sync from max if auto_scroll is on (defensive: mirrors scroll_up)
+        if self.auto_scroll {
+            self.scroll_offset = self.max_scroll();
+        }
         let max = self.max_scroll();
         self.scroll_offset = (self.scroll_offset + n).min(max);
         if self.scroll_offset >= max {
@@ -1139,13 +1150,42 @@ pub async fn run_tui(
                 ),
             });
         } else {
-            state.messages.push(RenderedMessage {
-                role: MessageRole::System,
-                content: format!(
-                    "Model: {}  |  Provider: {}  |  Type /help for commands.",
-                    state.model_name, state.provider_name
-                ),
-            });
+            // Count available providers and build the startup status line.
+            // This is displayed to every new user so they can immediately see
+            // whether they need to add API keys (Ctrl+K) before starting.
+            let (provider_count, provider_list) = {
+                let router = provider_router.read().await;
+                let available: Vec<String> = router
+                    .available_providers()
+                    .iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect();
+                (available.len(), available.join(", "))
+            };
+
+            let cfg_dir = crate::config::config_dir();
+
+            if provider_count == 0 {
+                // No API keys configured — guide the user to set one up.
+                state.messages.push(RenderedMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "No providers configured yet.\n\
+                        Press Ctrl+K to add an API key, or set an env var (e.g. ANTHROPIC_API_KEY).\n\
+                        Keys are stored in: {}\n\
+                        Type /help for all commands.",
+                        cfg_dir.display()
+                    ),
+                });
+            } else {
+                state.messages.push(RenderedMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "Model: {}  |  Provider: {}  |  {} provider(s) ready: [{}]  |  Type /help for commands.",
+                        state.model_name, state.provider_name, provider_count, provider_list
+                    ),
+                });
+            }
         }
     }
 
@@ -1267,16 +1307,44 @@ pub async fn run_tui(
 
         // ---- Process pending key operations ----
         if let Some((provider_id, api_key)) = state.key_save_pending.take() {
-            let mut ks = key_store.lock().await;
-            match ks.set(&provider_id, &api_key) {
-                Ok(_) => state.push_system(format!("API key saved for {provider_id}.")),
+            let save_ok = {
+                let mut ks = key_store.lock().await;
+                ks.set(&provider_id, &api_key)
+            };
+            match save_ok {
+                Ok(_) => {
+                    // Hotreload: instantiate the provider immediately so the
+                    // user can switch to it without restarting the app.
+                    let reload_result = {
+                        let mut router = provider_router.write().await;
+                        router.reload_provider(&provider_id, api_key, &config)
+                    };
+                    match reload_result {
+                        Ok(_) => state.push_system(format!(
+                            "API key saved. Provider '{provider_id}' is now available — use Ctrl+P to switch."
+                        )),
+                        Err(e) => state.push_system(format!(
+                            "Key saved to disk, but provider init failed: {e}"
+                        )),
+                    }
+                }
                 Err(e) => state.push_system(format!("Failed to save key: {e}")),
             }
         }
         if let Some(provider_id) = state.key_delete_pending.take() {
-            let mut ks = key_store.lock().await;
-            match ks.delete(&provider_id) {
-                Ok(_) => state.push_system(format!("API key removed for {provider_id}.")),
+            let del_ok = {
+                let mut ks = key_store.lock().await;
+                ks.delete(&provider_id)
+            };
+            match del_ok {
+                Ok(_) => {
+                    // Remove provider from router immediately
+                    {
+                        let mut router = provider_router.write().await;
+                        router.remove_provider(&provider_id);
+                    }
+                    state.push_system(format!("API key removed for {provider_id}."));
+                }
                 Err(e) => state.push_system(format!("Failed to remove key: {e}")),
             }
         }
