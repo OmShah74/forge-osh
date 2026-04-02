@@ -67,6 +67,13 @@ impl ToolRegistry {
         registry.register(Box::new(git::GitCommitTool));
         registry.register(Box::new(git::GitBranchTool));
         registry.register(Box::new(git::GitCheckoutTool));
+        registry.register(Box::new(git::GitStashTool));
+        registry.register(Box::new(git::GitBlameTool));
+        registry.register(Box::new(git::GitShowTool));
+        registry.register(Box::new(git::GitResetTool));
+        registry.register(Box::new(git::GitFetchTool));
+        registry.register(Box::new(git::GitPushTool));
+        registry.register(Box::new(git::GitPullTool));
 
         // ── Search ─────────────────────────────────────────────────────────
         registry.register(Box::new(search::SearchFilesTool));
