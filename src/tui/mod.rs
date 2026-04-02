@@ -351,9 +351,23 @@ async fn handle_slash_command(
         }
 
         "/compact" => {
-            // Compact the conversation history: keep only the last N exchanges in full,
-            // summarise earlier messages into a system note.
-            compact_history(state, session).await;
+            // LLM-based compact: summarize old messages using the active provider.
+            compact_history_llm(state, session, provider_router).await;
+        }
+
+        "/undo" => {
+            let msg = crate::agent::file_history::undo_last().await;
+            state.push_system(msg);
+        }
+
+        "/new" => {
+            // Start a fresh conversation in this session (clear history + display).
+            {
+                let mut sess = session.lock().await;
+                sess.history.clear();
+            }
+            state.messages.retain(|m| matches!(m.role, MessageRole::Splash));
+            state.push_system("New conversation started. History cleared.");
         }
 
         "/save" => {
@@ -491,23 +505,23 @@ async fn handle_slash_command(
         // ── /effort — set response effort level ───────────────────────────
         "/effort" => {
             if arg.is_empty() {
-                state.push_system("Usage: /effort <1-5>  — 1=minimal, 3=balanced (default), 5=maximum");
+                let current = session.lock().await.effort_level;
+                state.push_system(format!(
+                    "Current effort: {current}/5. Usage: /effort <1-5>  — 1=minimal, 3=balanced (default), 5=maximum"
+                ));
             } else {
                 match arg.parse::<u8>() {
                     Ok(n) if (1..=5).contains(&n) => {
+                        session.lock().await.effort_level = n;
                         let desc = match n {
-                            1 => "minimal (fast, lower quality)",
-                            2 => "low",
-                            3 => "balanced",
-                            4 => "high",
-                            5 => "maximum (slow, highest quality)",
+                            1 => "minimal — temperature 0.0, most deterministic",
+                            2 => "low — temperature 0.3",
+                            3 => "balanced — temperature 0.7 (default)",
+                            4 => "high — temperature 1.0",
+                            5 => "maximum — temperature 1.2, most creative",
                             _ => "balanced",
                         };
-                        state.push_system(format!(
-                            "Effort level set to {n}/5 ({desc}). \
-                            Note: affects agent instructions. Model temperature controls \
-                            are provider-specific."
-                        ));
+                        state.push_system(format!("Effort level set to {n}/5 ({desc})."));
                     }
                     _ => state.push_system("Invalid effort level. Use a number 1-5."),
                 }
@@ -971,33 +985,80 @@ fn try_copy_to_clipboard(text: &str) -> bool {
     false
 }
 
-/// Compact conversation history: keep the last 6 messages in full and
-/// replace earlier messages with a summary notice.
-async fn compact_history(state: &mut AppState, session: &Arc<Mutex<Session>>) {
-    let mut sess = session.lock().await;
-    let messages = sess.history.messages().to_vec();
-    let keep = 6; // keep last 6 messages in full
+/// LLM-based compact: summarize old messages with the active provider,
+/// then replace them with the summary so the context window is freed.
+async fn compact_history_llm(
+    state: &mut AppState,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+) {
+    use crate::agent::compaction;
 
-    if messages.len() <= keep {
+    let keep = compaction::DEFAULT_KEEP_LAST;
+
+    let (messages, model_id, total) = {
+        let sess = session.lock().await;
+        let msgs = sess.history.messages().to_vec();
+        let total = msgs.len();
+        let model_id = sess.model_id.clone();
+        (msgs, model_id, total)
+    };
+
+    if total <= keep {
         state.push_system(format!(
-            "Conversation has only {} messages — nothing to compact.",
-            messages.len()
+            "Conversation has only {total} messages — nothing to compact (threshold: {keep})."
         ));
         return;
     }
 
-    let removed = messages.len() - keep;
-    sess.history.compact(keep);
+    let (to_summarize, _) = compaction::split_for_compaction(&messages, keep);
+    let to_summarize = to_summarize.to_vec();
 
-    // Also clear most of the rendered messages, keeping the last few
-    let rendered_keep = state.messages.len().saturating_sub(removed * 2);
-    state.messages.drain(..rendered_keep);
+    state.push_system("Compacting with AI summary — please wait...");
 
-    state.push_system(format!(
-        "Compacted: removed {} messages from history. {} messages remain.",
-        removed,
-        keep
-    ));
+    let summary_result = {
+        let router = provider_router.read().await;
+        match router.active() {
+            Ok(provider) => {
+                compaction::summarize_messages(&to_summarize, provider, &model_id).await
+            }
+            Err(e) => Err(e),
+        }
+    };
+
+    match summary_result {
+        Ok(summary) => {
+            let removed = total - keep;
+            {
+                let mut sess = session.lock().await;
+                sess.history.summarize_old(summary.clone(), keep);
+            }
+
+            // Trim the rendered view: keep only the most-recent rendered messages
+            let rendered_keep = state.messages.len().saturating_sub(removed.saturating_mul(2));
+            state.messages.drain(..rendered_keep);
+
+            state.push_system(format!(
+                "Compacted: {removed} messages summarized by AI. {keep} messages kept in full.\n\
+                Summary: {}",
+                &summary[..summary.len().min(300)]
+            ));
+        }
+        Err(e) => {
+            // Fall back to simple truncation if LLM call fails
+            let removed = total - keep;
+            {
+                let mut sess = session.lock().await;
+                sess.history.compact(keep);
+            }
+            let rendered_keep = state.messages.len().saturating_sub(removed.saturating_mul(2));
+            state.messages.drain(..rendered_keep);
+            state.push_system(format!(
+                "AI summary failed ({e}); fell back to simple truncation. \
+                Removed {removed} messages, {keep} remain."
+            ));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

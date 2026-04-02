@@ -9,6 +9,7 @@ use crate::tools::executor::ToolExecutor;
 use crate::tools::ToolRegistry;
 use crate::types::*;
 
+use super::compaction;
 use super::context::{ContextManager, ContextStatus};
 use super::hooks::{self, HooksConfig};
 use super::system_prompt;
@@ -103,6 +104,49 @@ fn backoff_ms(attempt: u32, base_ms: u64, cap_ms: u64, kind: &ErrorKind) -> u64 
     delay.min(cap_ms)
 }
 
+/// Map effort level (1–5) to a temperature override.
+/// Lower effort = more deterministic; higher effort = more creative.
+fn effort_temperature(effort: u8) -> f32 {
+    match effort {
+        1 => 0.0,
+        2 => 0.3,
+        3 => 0.7,
+        4 => 1.0,
+        5 => 1.2,
+        _ => 0.7,
+    }
+}
+
+/// Remove orphaned tool_use / tool_result message pairs from the history.
+///
+/// The Anthropic API rejects conversations where a tool_result appears without
+/// a corresponding tool_use block (or vice versa). This can happen if the
+/// conversation was compacted or truncated mid-exchange.
+fn normalize_messages(messages: &[Message]) -> Vec<Message> {
+    // Collect all tool_use IDs present in assistant messages
+    let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in messages {
+        if let Message::Assistant(content) = msg {
+            for tc in content.tool_calls() {
+                used_ids.insert(tc.id.clone());
+            }
+        }
+    }
+
+    // Filter out tool results whose tool_use_id has no matching assistant block
+    messages
+        .iter()
+        .filter(|msg| {
+            if let Message::Tool(result) = msg {
+                used_ids.contains(&result.tool_use_id)
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 impl AgentLoop {
     /// Run one turn of the agent loop: process user message until completion
     pub async fn run(&self, user_message: String) -> Result<()> {
@@ -128,20 +172,58 @@ impl AgentLoop {
                 break;
             }
 
-            // 3. Check context budget
+            // 3. Check context budget — auto-compact when at 90%+
             {
-                let session = self.session.lock().await;
-                let router = self.provider_router.read().await;
-                let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
-                let ctx_mgr = ContextManager::new(ctx_window);
-                match ctx_mgr.check(&session.history) {
-                    ContextStatus::NeedsSummarization { used, limit } => {
-                        let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
+                let needs_compact = {
+                    let session = self.session.lock().await;
+                    let router = self.provider_router.read().await;
+                    let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
+                    let ctx_mgr = ContextManager::new(ctx_window);
+                    match ctx_mgr.check(&session.history) {
+                        ContextStatus::NeedsSummarization { used, limit } => {
+                            let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
+                            true
+                        }
+                        ContextStatus::Warning { used, limit } => {
+                            let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
+                            false
+                        }
+                        _ => false,
                     }
-                    ContextStatus::Warning { used, limit } => {
-                        let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
+                };
+
+                if needs_compact {
+                    // Auto-compact: summarize old messages with LLM
+                    let (messages_to_summarize, model_id, provider_ref) = {
+                        let session = self.session.lock().await;
+                        let router = self.provider_router.read().await;
+                        let msgs = session.history.messages().to_vec();
+                        let (to_summarize, _) = compaction::split_for_compaction(
+                            &msgs,
+                            compaction::DEFAULT_KEEP_LAST,
+                        );
+                        let to_summarize = to_summarize.to_vec();
+                        let model_id = router.active_model_id().to_string();
+                        (to_summarize, model_id, ())
+                    };
+                    let _ = provider_ref; // just to silence unused warning
+
+                    let summary_result = {
+                        let router = self.provider_router.read().await;
+                        if let Ok(provider) = router.active() {
+                            compaction::summarize_messages(&messages_to_summarize, provider, &model_id).await
+                        } else {
+                            Ok("(auto-compact: provider unavailable)".to_string())
+                        }
+                    };
+
+                    if let Ok(summary) = summary_result {
+                        let mut session = self.session.lock().await;
+                        session.history.summarize_old(summary, compaction::DEFAULT_KEEP_LAST);
+                        let _ = self.event_tx.send(AgentEvent::Token(
+                            "[Context auto-compacted by AI summary]\n".to_string(),
+                        ));
                     }
-                    _ => {}
                 }
             }
 
@@ -162,12 +244,18 @@ impl AgentLoop {
                     None
                 };
 
+                // Effort-based temperature override
+                let temperature = effort_temperature(session.effort_level);
+
+                // Normalize messages to strip orphaned tool pairs
+                let normalized_messages = normalize_messages(session.history.messages());
+
                 ChatRequest {
                     model: router.active_model_id().to_string(),
-                    messages: session.history.messages().to_vec(),
+                    messages: normalized_messages,
                     tools,
                     max_tokens: self.config.agent.max_tokens,
-                    temperature: self.config.agent.temperature,
+                    temperature,
                     system: Some(system),
                     stop_sequences: Vec::new(),
                 }

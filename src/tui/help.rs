@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.1 — Batch 1)
+    r#"forge-osh Help  (v1.0.1)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen
@@ -11,7 +11,9 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /keys              Open API key manager
   /theme [name]      Cycle theme or set by name (dark/light/dracula/nord/solarized)
   /trust             Toggle trust mode (skip permission prompts)
-  /compact           Compact conversation history to free context window
+  /compact           Compact conversation history with AI summary (LLM-based)
+  /undo              Undo the last file mutation made by the agent
+  /new               Start a fresh conversation (clears history and display)
   /save              Save session to disk
   /session           Show session info
 

@@ -18,7 +18,13 @@ pub struct Session {
     #[serde(skip)]
     pub cost_tracker: CostTracker,
     pub working_dir: String,
+    /// Effort level 1–5. Maps to a temperature override in the agent loop.
+    /// 1 = minimal/deterministic, 3 = balanced (default), 5 = maximum/creative.
+    #[serde(default = "default_effort")]
+    pub effort_level: u8,
 }
+
+fn default_effort() -> u8 { 3 }
 
 impl Session {
     pub fn new(name: String, provider_id: String, model_id: String, working_dir: String) -> Self {
@@ -31,6 +37,7 @@ impl Session {
             history: ConversationHistory::new(id),
             cost_tracker: CostTracker::new(),
             working_dir,
+            effort_level: 3,
         }
     }
 

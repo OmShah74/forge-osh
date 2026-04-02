@@ -7,6 +7,7 @@ pub mod search;
 pub mod shell;
 pub mod tasks;
 pub mod web;
+pub mod worktree;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -91,6 +92,11 @@ impl ToolRegistry {
         registry.register(Box::new(agent_tools::AskUserQuestionTool));
         registry.register(Box::new(agent_tools::EnterPlanModeTool));
         registry.register(Box::new(agent_tools::ExitPlanModeTool));
+
+        // ── Git worktrees ──────────────────────────────────────────────────
+        registry.register(Box::new(worktree::EnterWorktreeTool));
+        registry.register(Box::new(worktree::ExitWorktreeTool));
+        registry.register(Box::new(worktree::ListWorktreesTool));
 
         registry
     }
