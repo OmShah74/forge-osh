@@ -1,16 +1,20 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.1)
+    r#"forge-osh Help  (v1.0.2)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen
   /clear             Clear the conversation display
   /cost              Show token usage and cost
   /model             Open model selector
+  /model list        List available models for current provider
+  /model <id>        Switch to model directly by ID or name
   /provider          Open provider selector
   /keys              Open API key manager
   /theme [name]      Cycle theme or set by name (dark/light/dracula/nord/solarized)
   /trust             Toggle trust mode (skip permission prompts)
+  /vim               Toggle vim normal mode (j/k scroll, g/G top/bottom, i/a insert)
+  /fast              Toggle fast mode (optimized output display)
   /compact           Compact conversation history with AI summary (LLM-based)
   /undo              Undo the last file mutation made by the agent
   /new               Start a fresh conversation (clears history and display)
@@ -54,6 +58,13 @@ SCROLLING
   Shift+Up/Down   Scroll by 3 lines     PgUp/PgDn    Scroll by 10 lines
   Mouse Wheel     Scroll by 3 lines     Ctrl+Home    Jump to top
   Ctrl+End        Jump to bottom (re-enables auto-scroll)
+  Esc             Enter vim normal mode
+
+VIM NORMAL MODE  (Esc to enter, i/a to return to insert)
+  j / k           Scroll down/up 3 lines
+  d / u           Scroll down/up half page
+  g               Jump to top          G     Jump to bottom
+  i / a           Return to insert mode
 
 QUICK ACTIONS
   Ctrl+O    Open model picker           Ctrl+P    Open provider picker

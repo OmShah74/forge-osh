@@ -354,3 +354,291 @@ impl Tool for GitCheckoutTool {
         }
     }
 }
+
+// ─── git_stash ────────────────────────────────────────────────────────────
+
+pub struct GitStashTool;
+
+#[async_trait]
+impl Tool for GitStashTool {
+    fn name(&self) -> &str { "git_stash" }
+    fn description(&self) -> &str {
+        "Stash uncommitted changes. Actions: 'push' (stash with optional message), 'pop' (restore latest stash), 'list' (show stashes)."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["push", "pop", "list"], "default": "list" },
+                "message": { "type": "string", "description": "Stash message (for push)" }
+            },
+            "required": []
+        })
+    }
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+        let action = input["action"].as_str().unwrap_or("list");
+        match action {
+            "list" => {
+                match run_git(&["stash", "list"], &ctx.working_dir).await {
+                    Ok(out) => ToolOutput::success(if out.trim().is_empty() {
+                        "No stashes found".to_string()
+                    } else { out }),
+                    Err(e) => ToolOutput::error(e),
+                }
+            }
+            "push" => {
+                let result = if let Some(m) = input["message"].as_str() {
+                    run_git(&["stash", "push", "-m", m], &ctx.working_dir).await
+                } else {
+                    run_git(&["stash", "push"], &ctx.working_dir).await
+                };
+                match result {
+                    Ok(out) => ToolOutput::success(format!("Changes stashed\n{out}")),
+                    Err(e) => ToolOutput::error(e),
+                }
+            }
+            "pop" => {
+                match run_git(&["stash", "pop"], &ctx.working_dir).await {
+                    Ok(out) => ToolOutput::success(format!("Stash applied\n{out}")),
+                    Err(e) => ToolOutput::error(e),
+                }
+            }
+            _ => ToolOutput::error(format!("Unknown action: {action}")),
+        }
+    }
+}
+
+// ─── git_blame ────────────────────────────────────────────────────────────
+
+pub struct GitBlameTool;
+
+#[async_trait]
+impl Tool for GitBlameTool {
+    fn name(&self) -> &str { "git_blame" }
+    fn description(&self) -> &str { "Show who last modified each line of a file (git blame)." }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "file": { "type": "string", "description": "File path to blame" },
+                "line_range": { "type": "string", "description": "Optional line range, e.g. '10,20'" }
+            },
+            "required": ["file"]
+        })
+    }
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+        let file = match input["file"].as_str() {
+            Some(f) => f,
+            None => return ToolOutput::error("Missing 'file' parameter"),
+        };
+        let result = if let Some(range) = input["line_range"].as_str() {
+            run_git(&["blame", "-L", range, file], &ctx.working_dir).await
+        } else {
+            run_git(&["blame", file], &ctx.working_dir).await
+        };
+        match result {
+            Ok(out) => ToolOutput::success(out),
+            Err(e) => ToolOutput::error(e),
+        }
+    }
+}
+
+// ─── git_show ─────────────────────────────────────────────────────────────
+
+pub struct GitShowTool;
+
+#[async_trait]
+impl Tool for GitShowTool {
+    fn name(&self) -> &str { "git_show" }
+    fn description(&self) -> &str { "Show a commit, tag, or other git object (git show <ref>)." }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "ref": { "type": "string", "description": "Commit hash, tag, or ref to show", "default": "HEAD" },
+                "stat": { "type": "boolean", "description": "Show stat summary instead of full diff", "default": false }
+            },
+            "required": []
+        })
+    }
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+        let git_ref = input["ref"].as_str().unwrap_or("HEAD");
+        let stat = input["stat"].as_bool().unwrap_or(false);
+        let mut args = vec!["show"];
+        if stat {
+            args.push("--stat");
+        }
+        args.push(git_ref);
+        match run_git(&args, &ctx.working_dir).await {
+            Ok(out) => ToolOutput::success(out),
+            Err(e) => ToolOutput::error(e),
+        }
+    }
+}
+
+// ─── git_reset ────────────────────────────────────────────────────────────
+
+pub struct GitResetTool;
+
+#[async_trait]
+impl Tool for GitResetTool {
+    fn name(&self) -> &str { "git_reset" }
+    fn description(&self) -> &str {
+        "Reset current HEAD to a specified state. Mode: 'soft' (keep staged), 'mixed' (unstage, keep files), 'hard' (discard all changes)."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "mode": { "type": "string", "enum": ["soft", "mixed", "hard"], "default": "mixed" },
+                "ref": { "type": "string", "description": "Commit ref to reset to", "default": "HEAD" }
+            },
+            "required": []
+        })
+    }
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Destructive }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+        let mode = input["mode"].as_str().unwrap_or("mixed");
+        let git_ref = input["ref"].as_str().unwrap_or("HEAD");
+        let mode_flag = match mode {
+            "soft" => "--soft",
+            "hard" => "--hard",
+            _ => "--mixed",
+        };
+        match run_git(&["reset", mode_flag, git_ref], &ctx.working_dir).await {
+            Ok(out) => ToolOutput::success(format!("Reset ({mode}) to {git_ref}\n{out}")),
+            Err(e) => ToolOutput::error(e),
+        }
+    }
+}
+
+// ─── git_fetch ────────────────────────────────────────────────────────────
+
+pub struct GitFetchTool;
+
+#[async_trait]
+impl Tool for GitFetchTool {
+    fn name(&self) -> &str { "git_fetch" }
+    fn description(&self) -> &str { "Fetch from a remote (git fetch <remote>)." }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "remote": { "type": "string", "description": "Remote name", "default": "origin" },
+                "all": { "type": "boolean", "description": "Fetch all remotes", "default": false }
+            },
+            "required": []
+        })
+    }
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+        let all = input["all"].as_bool().unwrap_or(false);
+        let remote = input["remote"].as_str().unwrap_or("origin").to_string();
+        let result = if all {
+            run_git(&["fetch", "--all"], &ctx.working_dir).await
+        } else {
+            run_git(&["fetch", &remote], &ctx.working_dir).await
+        };
+        match result {
+            Ok(out) => ToolOutput::success(format!("Fetched from {remote}\n{out}")),
+            Err(e) => ToolOutput::error(e),
+        }
+    }
+}
+
+// ─── git_push ─────────────────────────────────────────────────────────────
+
+pub struct GitPushTool;
+
+#[async_trait]
+impl Tool for GitPushTool {
+    fn name(&self) -> &str { "git_push" }
+    fn description(&self) -> &str { "Push commits to a remote repository (git push <remote> <branch>)." }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "remote": { "type": "string", "description": "Remote name", "default": "origin" },
+                "branch": { "type": "string", "description": "Branch to push (default: current branch)" },
+                "force": { "type": "boolean", "description": "Force push (--force-with-lease for safety)", "default": false },
+                "set_upstream": { "type": "boolean", "description": "Set upstream (-u)", "default": false }
+            },
+            "required": []
+        })
+    }
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+        let remote = input["remote"].as_str().unwrap_or("origin").to_string();
+        let branch = input["branch"].as_str().map(|s| s.to_string());
+        let force = input["force"].as_bool().unwrap_or(false);
+        let set_upstream = input["set_upstream"].as_bool().unwrap_or(false);
+
+        let mut args: Vec<&str> = vec!["push"];
+        if force {
+            args.push("--force-with-lease");
+        }
+        if set_upstream {
+            args.push("-u");
+        }
+        args.push(&remote);
+        if let Some(ref b) = branch {
+            args.push(b.as_str());
+        }
+
+        match run_git(&args, &ctx.working_dir).await {
+            Ok(out) => ToolOutput::success(format!("Pushed to {remote}\n{out}")),
+            Err(e) => ToolOutput::error(e),
+        }
+    }
+}
+
+// ─── git_pull ─────────────────────────────────────────────────────────────
+
+pub struct GitPullTool;
+
+#[async_trait]
+impl Tool for GitPullTool {
+    fn name(&self) -> &str { "git_pull" }
+    fn description(&self) -> &str { "Pull changes from a remote repository (git pull <remote> <branch>)." }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "remote": { "type": "string", "description": "Remote name", "default": "origin" },
+                "branch": { "type": "string", "description": "Branch to pull" },
+                "rebase": { "type": "boolean", "description": "Use rebase instead of merge", "default": false }
+            },
+            "required": []
+        })
+    }
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
+        let remote = input["remote"].as_str().unwrap_or("origin").to_string();
+        let branch = input["branch"].as_str().map(|s| s.to_string());
+        let rebase = input["rebase"].as_bool().unwrap_or(false);
+
+        let mut args: Vec<&str> = vec!["pull"];
+        if rebase {
+            args.push("--rebase");
+        }
+        args.push(&remote);
+        if let Some(ref b) = branch {
+            args.push(b.as_str());
+        }
+
+        match run_git(&args, &ctx.working_dir).await {
+            Ok(out) => ToolOutput::success(format!("Pulled from {remote}\n{out}")),
+            Err(e) => ToolOutput::error(e),
+        }
+    }
+}

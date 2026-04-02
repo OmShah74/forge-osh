@@ -690,11 +690,13 @@ fn count_input_lines(text: &str, wrap_width: usize) -> usize {
 fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let trust = if state.trust_mode { "ON" } else { "OFF" };
 
-    let scroll_info = if state.total_lines > state.visible_height && state.max_scroll() > 0 {
-        let pct = (state.effective_scroll() as f64 / state.max_scroll() as f64 * 100.0) as u16;
-        format!(" {pct}%")
+    let scroll_info = if state.total_lines > state.visible_height {
+        let current = state.effective_scroll() + 1;
+        let total = state.total_lines;
+        let vim_indicator = if state.vim_normal_mode { " [VIM]" } else { "" };
+        format!(" L{current}/{total}{vim_indicator}")
     } else {
-        String::new()
+        if state.vim_normal_mode { " [VIM]".to_string() } else { String::new() }
     };
 
     let status = format!(

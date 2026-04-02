@@ -121,6 +121,7 @@ pub struct AppState {
     pub input: InputState,
     pub modal: Option<Modal>,
     pub spinner: SpinnerState,
+    /// Lines scrolled up FROM the bottom. 0 = at bottom.
     pub scroll_offset: usize,
     pub auto_scroll: bool,
     pub total_lines: usize,
@@ -141,6 +142,8 @@ pub struct AppState {
     pub key_save_pending: Option<(String, String)>,
     pub key_delete_pending: Option<String>,
     pub model_switch_pending: Option<(String, String)>,
+    pub vim_normal_mode: bool,
+    pub fast_mode: bool,
 }
 
 impl AppState {
@@ -170,29 +173,19 @@ impl AppState {
             key_save_pending: None,
             key_delete_pending: None,
             model_switch_pending: None,
+            vim_normal_mode: false,
+            fast_mode: false,
         }
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        // If auto_scroll is active the rendered position is at max_scroll, but
-        // scroll_offset is still 0 (it is only used when auto_scroll=false).
-        // Sync scroll_offset to the effective position BEFORE disabling auto_scroll
-        // so we subtract from the correct base instead of jumping to the top.
-        if self.auto_scroll {
-            self.scroll_offset = self.max_scroll();
-        }
+        self.scroll_offset = self.scroll_offset.saturating_add(n);
         self.auto_scroll = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        // Re-sync from max if auto_scroll is on (defensive: mirrors scroll_up)
-        if self.auto_scroll {
-            self.scroll_offset = self.max_scroll();
-        }
-        let max = self.max_scroll();
-        self.scroll_offset = (self.scroll_offset + n).min(max);
-        if self.scroll_offset >= max {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+        if self.scroll_offset == 0 {
             self.auto_scroll = true;
         }
     }
@@ -202,11 +195,9 @@ impl AppState {
     }
 
     pub fn effective_scroll(&self) -> usize {
-        if self.auto_scroll {
-            self.max_scroll()
-        } else {
-            self.scroll_offset.min(self.max_scroll())
-        }
+        // scroll_offset is "lines from bottom". 0 = at bottom.
+        // effective offset from top = max_scroll - scroll_offset (clamped to 0)
+        self.max_scroll().saturating_sub(self.scroll_offset)
     }
 
     /// Push a system message
@@ -215,7 +206,7 @@ impl AppState {
             role: MessageRole::System,
             content: msg.into(),
         });
-        self.auto_scroll = true;
+        // Do NOT reset scroll here — let user keep their scroll position
     }
 }
 
@@ -267,15 +258,47 @@ async fn handle_slash_command(
         "/model" => {
             let pid = state.provider_id.clone();
             let pname = state.provider_name.clone();
-            let models = crate::config::models::models_for_provider(&pid);
-            let items: Vec<picker::PickerItem> = models
-                .iter()
-                .map(|m| picker::PickerItem::from_model_info(m, true, &pname))
-                .collect();
-            if items.is_empty() {
-                state.push_system(format!("No models found for provider '{pname}'."));
+            if arg.is_empty() {
+                // Open picker
+                let models = crate::config::models::models_for_provider(&pid);
+                let items: Vec<picker::PickerItem> = models
+                    .iter()
+                    .map(|m| picker::PickerItem::from_model_info(m, true, &pname))
+                    .collect();
+                if items.is_empty() {
+                    state.push_system(format!("No models found for provider '{pname}'."));
+                } else {
+                    state.modal = Some(Modal::Picker(PickerState::new(items)));
+                }
+            } else if arg == "list" {
+                // List available models for current provider
+                let models = crate::config::models::models_for_provider(&pid);
+                if models.is_empty() {
+                    state.push_system(format!("No models found for provider '{pname}'."));
+                } else {
+                    let mut lines = vec![format!("Models for provider '{pname}':")];
+                    for m in &models {
+                        lines.push(format!("  {} — {}", m.id, m.name));
+                    }
+                    state.push_system(lines.join("\n"));
+                }
             } else {
-                state.modal = Some(Modal::Picker(PickerState::new(items)));
+                // Direct model switch: /model <model-id>
+                let models = crate::config::models::models_for_provider(&pid);
+                let found = models.iter().find(|m| m.id == arg || m.name.to_lowercase().contains(&arg.to_lowercase()));
+                if let Some(m) = found {
+                    let model_id = m.id.clone();
+                    let model_name = m.name.clone();
+                    state.model_switch_pending = Some((pid.clone(), model_id.clone()));
+                    state.model_id = model_id.clone();
+                    state.model_name = model_name.clone();
+                    state.push_system(format!("Switched to model: {} ({})", model_name, model_id));
+                } else {
+                    state.push_system(format!(
+                        "Model '{}' not found for provider '{}'. Use /model list to see available models.",
+                        arg, pname
+                    ));
+                }
             }
         }
 
@@ -564,6 +587,32 @@ async fn handle_slash_command(
                 }
                 None => state.push_system("No assistant response to copy yet."),
             }
+        }
+
+        "/vim" => {
+            state.vim_normal_mode = !state.vim_normal_mode;
+            state.push_system(format!(
+                "Vim mode: {}  ({})",
+                if state.vim_normal_mode { "ON" } else { "OFF" },
+                if state.vim_normal_mode {
+                    "j/k scroll, d/u half-page, g/G top/bottom, i/a to insert"
+                } else {
+                    "normal input mode"
+                }
+            ));
+        }
+
+        "/fast" => {
+            state.fast_mode = !state.fast_mode;
+            state.push_system(format!(
+                "Fast mode: {}  ({})",
+                if state.fast_mode { "ON" } else { "OFF" },
+                if state.fast_mode {
+                    "tool results collapsed, streaming optimized"
+                } else {
+                    "full output display"
+                }
+            ));
         }
 
         _ => {
@@ -1224,13 +1273,15 @@ pub async fn run_tui(
                 AgentEvent::ThinkingStart => {
                     state.spinner.start(format!("{} is thinking...", state.model_name));
                     state.streaming_text.clear();
+                    state.scroll_offset = 0;
+                    state.auto_scroll = true;
                 }
                 AgentEvent::Token(t) => {
                     // Stop the "thinking" spinner on first token so the streaming
                     // text is visible immediately.
                     state.spinner.stop();
                     state.streaming_text.push_str(&t);
-                    state.auto_scroll = true;
+                    // Do NOT force auto_scroll here — user may have scrolled up
                 }
                 AgentEvent::ToolStart { name, input } => {
                     state.spinner.stop();
@@ -1398,6 +1449,51 @@ pub async fn run_tui(
                             continue;
                         }
 
+                        // Vim normal mode — hjkl scroll instead of text input
+                        if state.vim_normal_mode {
+                            match (key.modifiers, key.code) {
+                                (KeyModifiers::NONE, KeyCode::Char('j')) => { state.scroll_down(3); }
+                                (KeyModifiers::NONE, KeyCode::Char('k')) => { state.scroll_up(3); }
+                                (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                                    let h = state.visible_height / 2;
+                                    state.scroll_down(h);
+                                }
+                                (KeyModifiers::NONE, KeyCode::Char('u')) => {
+                                    let h = state.visible_height / 2;
+                                    state.scroll_up(h);
+                                }
+                                (KeyModifiers::NONE, KeyCode::Char('G')) => {
+                                    state.scroll_offset = 0;
+                                    state.auto_scroll = true;
+                                }
+                                (KeyModifiers::NONE, KeyCode::Char('g')) => {
+                                    state.scroll_offset = usize::MAX / 2;
+                                    state.auto_scroll = false;
+                                }
+                                (KeyModifiers::NONE, KeyCode::Char('i'))
+                                | (KeyModifiers::NONE, KeyCode::Char('a')) => {
+                                    state.vim_normal_mode = false;
+                                }
+                                (KeyModifiers::NONE, KeyCode::Esc) => {} // already in normal mode
+                                (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                                    if state.agent_busy {
+                                        state.spinner.stop();
+                                        state.agent_busy = false;
+                                        if !state.streaming_text.is_empty() {
+                                            state.messages.push(RenderedMessage {
+                                                role: MessageRole::Assistant,
+                                                content: std::mem::take(&mut state.streaming_text),
+                                            });
+                                        }
+                                        state.push_system("Interrupted.");
+                                    }
+                                }
+                                _ => {}
+                            }
+                            if !event::poll(Duration::ZERO)? { break; }
+                            continue;
+                        }
+
                         let action = input::map_key_normal(key);
                         match action {
                             // ---- Submit / slash commands ----
@@ -1422,6 +1518,7 @@ pub async fn run_tui(
                                             content: text.clone(),
                                         });
                                         state.agent_busy = true;
+                                        state.scroll_offset = 0;
                                         state.auto_scroll = true;
 
                                         let loop_clone = agent_loop.clone();
@@ -1452,10 +1549,11 @@ pub async fn run_tui(
                             Action::PageUp => state.scroll_up(10),
                             Action::PageDown => state.scroll_down(10),
                             Action::ScrollTop => {
-                                state.scroll_offset = 0;
+                                state.scroll_offset = usize::MAX / 2;
                                 state.auto_scroll = false;
                             }
                             Action::ScrollBottom => {
+                                state.scroll_offset = 0;
                                 state.auto_scroll = true;
                             }
 
@@ -1579,6 +1677,12 @@ pub async fn run_tui(
                                 match sess.save() {
                                     Ok(_) => state.push_system("Session saved."),
                                     Err(e) => state.push_system(format!("Save failed: {e}")),
+                                }
+                            }
+                            Action::None => {
+                                // Escape with no modifiers enters vim normal mode
+                                if key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Esc {
+                                    state.vim_normal_mode = true;
                                 }
                             }
                             _ => {}
