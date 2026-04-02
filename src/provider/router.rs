@@ -236,6 +236,95 @@ impl ProviderRouter {
         Ok(())
     }
 
+    /// Instantiate (or replace) a single cloud provider using the supplied key.
+    /// Called after the user saves a new API key so the provider becomes active
+    /// immediately without requiring a restart.
+    pub fn reload_provider(&mut self, provider_id: &str, key: String, config: &Config) -> Result<()> {
+        let provider: Box<dyn Provider> = match provider_id {
+            "anthropic" => Box::new(AnthropicProvider::new(
+                key,
+                config.providers.anthropic.base_url.clone(),
+                config.providers.anthropic.default_model.clone(),
+            )?),
+            "openai" => Box::new(OpenAICompatProvider::openai(
+                key,
+                config.providers.openai.default_model.clone(),
+            )?),
+            "gemini" => Box::new(GeminiProvider::new(
+                key,
+                config.providers.gemini.base_url.clone(),
+                config.providers.gemini.default_model.clone(),
+            )?),
+            "groq" => Box::new(OpenAICompatProvider::groq(
+                key,
+                config.providers.groq.default_model.clone(),
+            )?),
+            "grok" => Box::new(OpenAICompatProvider::grok(
+                key,
+                config.providers.grok.default_model.clone(),
+            )?),
+            "openrouter" => Box::new(OpenAICompatProvider::openrouter(
+                key,
+                config.providers.openrouter.default_model.clone(),
+            )?),
+            "mistral" => Box::new(OpenAICompatProvider::mistral(
+                key,
+                config.providers.mistral.default_model.clone(),
+            )?),
+            "deepseek" => Box::new(OpenAICompatProvider::deepseek(
+                key,
+                config.providers.deepseek.default_model.clone(),
+            )?),
+            "together" => Box::new(OpenAICompatProvider::together(
+                key,
+                config.providers.together.default_model.clone(),
+            )?),
+            "fireworks" => Box::new(OpenAICompatProvider::fireworks(
+                key,
+                config.providers.fireworks.default_model.clone(),
+            )?),
+            "perplexity" => Box::new(OpenAICompatProvider::perplexity(
+                key,
+                config.providers.perplexity.default_model.clone(),
+            )?),
+            "cohere" => Box::new(OpenAICompatProvider::cohere(
+                key,
+                config.providers.cohere.default_model.clone(),
+            )?),
+            other => {
+                return Err(crate::error::ForgeError::Provider(format!(
+                    "Unknown provider '{other}' — cannot reload"
+                )));
+            }
+        };
+
+        self.providers.insert(provider_id.to_string(), provider);
+
+        // If there was no active provider, activate this one automatically
+        if self.active_provider.is_empty() {
+            self.active_provider = provider_id.to_string();
+            if let Some(p) = self.providers.get(provider_id) {
+                self.active_model = p.model_id().to_string();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove a provider (e.g. after its API key is deleted).
+    /// If it was the active provider, falls back to the next available one.
+    pub fn remove_provider(&mut self, provider_id: &str) {
+        self.providers.remove(provider_id);
+        if self.active_provider == provider_id {
+            // Pick another available provider as the new active
+            self.active_provider = self.providers.keys().next().cloned().unwrap_or_default();
+            self.active_model = self.providers
+                .get(&self.active_provider)
+                .map(|p| p.model_id().to_string())
+                .unwrap_or_default();
+        }
+    }
+
     /// Detect and add local providers
     pub async fn detect_local_providers(&mut self, config: &Config) {
         // Ollama

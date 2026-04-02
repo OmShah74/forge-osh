@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use crate::agent::file_history;
 use crate::types::*;
 use super::Tool;
 
@@ -140,6 +141,9 @@ impl Tool for WriteFileTool {
 
         let path = resolve_path(path_str, ctx);
 
+        // Snapshot before overwriting (enables /undo)
+        file_history::take_snapshot(&path).await;
+
         // Create parent directories
         if let Some(parent) = path.parent() {
             if let Err(e) = fs::create_dir_all(parent).await {
@@ -208,6 +212,9 @@ impl Tool for EditFileTool {
         if !path.exists() {
             return ToolOutput::error(format!("File not found: {}", path.display()));
         }
+
+        // Snapshot before editing (enables /undo)
+        file_history::take_snapshot(&path).await;
 
         let mut content = match fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -319,6 +326,9 @@ impl Tool for CreateFileTool {
             return ToolOutput::error(format!("File already exists: {}", path.display()));
         }
 
+        // Snapshot the (non-existent) path so /undo can delete the created file
+        file_history::take_snapshot(&path).await;
+
         if let Some(parent) = path.parent() {
             if let Err(e) = fs::create_dir_all(parent).await {
                 return ToolOutput::error(format!("Failed to create directories: {e}"));
@@ -369,6 +379,11 @@ impl Tool for DeleteFileTool {
 
         if !path.exists() {
             return ToolOutput::error(format!("Path not found: {}", path.display()));
+        }
+
+        // Snapshot before deletion (enables /undo for files; dirs not restored)
+        if path.is_file() {
+            file_history::take_snapshot(&path).await;
         }
 
         if path.is_dir() {

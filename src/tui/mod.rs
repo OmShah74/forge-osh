@@ -174,11 +174,22 @@ impl AppState {
     }
 
     pub fn scroll_up(&mut self, n: usize) {
+        // If auto_scroll is active the rendered position is at max_scroll, but
+        // scroll_offset is still 0 (it is only used when auto_scroll=false).
+        // Sync scroll_offset to the effective position BEFORE disabling auto_scroll
+        // so we subtract from the correct base instead of jumping to the top.
+        if self.auto_scroll {
+            self.scroll_offset = self.max_scroll();
+        }
         self.auto_scroll = false;
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
 
     pub fn scroll_down(&mut self, n: usize) {
+        // Re-sync from max if auto_scroll is on (defensive: mirrors scroll_up)
+        if self.auto_scroll {
+            self.scroll_offset = self.max_scroll();
+        }
         let max = self.max_scroll();
         self.scroll_offset = (self.scroll_offset + n).min(max);
         if self.scroll_offset >= max {
@@ -351,9 +362,23 @@ async fn handle_slash_command(
         }
 
         "/compact" => {
-            // Compact the conversation history: keep only the last N exchanges in full,
-            // summarise earlier messages into a system note.
-            compact_history(state, session).await;
+            // LLM-based compact: summarize old messages using the active provider.
+            compact_history_llm(state, session, provider_router).await;
+        }
+
+        "/undo" => {
+            let msg = crate::agent::file_history::undo_last().await;
+            state.push_system(msg);
+        }
+
+        "/new" => {
+            // Start a fresh conversation in this session (clear history + display).
+            {
+                let mut sess = session.lock().await;
+                sess.history.clear();
+            }
+            state.messages.retain(|m| matches!(m.role, MessageRole::Splash));
+            state.push_system("New conversation started. History cleared.");
         }
 
         "/save" => {
@@ -378,6 +403,169 @@ async fn handle_slash_command(
             ));
         }
 
+        // ── /commit — AI-generated commit message ──────────────────────────
+        "/commit" => {
+            cmd_commit(state, session).await;
+        }
+
+        // ── /diff — show git diff ──────────────────────────────────────────
+        "/diff" => {
+            let working_dir = {
+                let sess = session.lock().await;
+                sess.working_dir.clone()
+            };
+            let staged = if arg == "staged" || arg == "--staged" { "--staged" } else { "" };
+            let args: Vec<&str> = if staged.is_empty() {
+                vec!["diff", "--stat"]
+            } else {
+                vec!["diff", "--staged", "--stat"]
+            };
+            match std::process::Command::new("git").args(&args).current_dir(&working_dir).output() {
+                Ok(out) => {
+                    let diff = String::from_utf8_lossy(&out.stdout).to_string();
+                    if diff.trim().is_empty() {
+                        state.push_system("No changes in working tree.");
+                    } else {
+                        state.push_system(format!("Git diff (stat):\n{}", diff.trim()));
+                    }
+                }
+                Err(e) => state.push_system(format!("git diff failed: {e}")),
+            }
+        }
+
+        // ── /export — export conversation to Markdown ──────────────────────
+        "/export" => {
+            export_conversation(state, session, arg).await;
+        }
+
+        // ── /status — system status overview ──────────────────────────────
+        "/status" => {
+            let sess = session.lock().await;
+            let router = provider_router.read().await;
+            let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
+            let used_tokens: u64 = sess.cost_tracker.total_input_tokens + sess.cost_tracker.total_output_tokens;
+            let ctx_pct = (used_tokens as f64 / ctx_window as f64 * 100.0).min(100.0);
+            let tools_loaded = crate::tools::ToolRegistry::with_builtins().tool_names().len();
+            let permissions = crate::agent::permissions::PermissionStore::load();
+
+            state.push_system(format!(
+                "forge-osh Status\n\
+                ├─ Provider:     {} ({})\n\
+                ├─ Model:        {}\n\
+                ├─ Context:      {}/{} tokens ({:.1}% used)\n\
+                ├─ Cost:         {}\n\
+                ├─ Messages:     {}\n\
+                ├─ Tools:        {} loaded\n\
+                ├─ Trust mode:   {}\n\
+                ├─ Permission rules: {}\n\
+                └─ Session:      {} ({})",
+                state.provider_name, state.provider_id,
+                state.model_name,
+                used_tokens, ctx_window, ctx_pct,
+                state.format_cost,
+                sess.history.message_count(),
+                tools_loaded,
+                if state.trust_mode { "ON" } else { "OFF" },
+                permissions.rules.len(),
+                sess.name, &sess.id[..8],
+            ));
+        }
+
+        // ── /doctor — environment diagnostics ─────────────────────────────
+        "/doctor" => {
+            cmd_doctor(state, session, provider_router).await;
+        }
+
+        // ── /add-dir — add a directory to the session scope ────────────────
+        "/add-dir" => {
+            if arg.is_empty() {
+                state.push_system("Usage: /add-dir <path>  — adds a directory to the session working context");
+            } else {
+                let path = std::path::PathBuf::from(arg);
+                let abs = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    let sess = session.lock().await;
+                    std::path::PathBuf::from(&sess.working_dir).join(&path)
+                };
+                if abs.is_dir() {
+                    state.push_system(format!(
+                        "Added directory to scope: {}\n\
+                        The agent will now consider files in this directory when responding.",
+                        abs.display()
+                    ));
+                    // Store in session state so system prompt can use it
+                    let mut sess = session.lock().await;
+                    sess.working_dir = abs.to_string_lossy().to_string();
+                } else {
+                    state.push_system(format!("Directory not found: {}", abs.display()));
+                }
+            }
+        }
+
+        // ── /resume — resume a past session ───────────────────────────────
+        "/resume" => {
+            cmd_resume(state, session).await;
+        }
+
+        // ── /permissions — view/edit permission rules ──────────────────────
+        "/permissions" => {
+            cmd_permissions(state, arg).await;
+        }
+
+        // ── /effort — set response effort level ───────────────────────────
+        "/effort" => {
+            if arg.is_empty() {
+                let current = session.lock().await.effort_level;
+                state.push_system(format!(
+                    "Current effort: {current}/5. Usage: /effort <1-5>  — 1=minimal, 3=balanced (default), 5=maximum"
+                ));
+            } else {
+                match arg.parse::<u8>() {
+                    Ok(n) if (1..=5).contains(&n) => {
+                        session.lock().await.effort_level = n;
+                        let desc = match n {
+                            1 => "minimal — temperature 0.0, most deterministic",
+                            2 => "low — temperature 0.3",
+                            3 => "balanced — temperature 0.7 (default)",
+                            4 => "high — temperature 1.0",
+                            5 => "maximum — temperature 1.2, most creative",
+                            _ => "balanced",
+                        };
+                        state.push_system(format!("Effort level set to {n}/5 ({desc})."));
+                    }
+                    _ => state.push_system("Invalid effort level. Use a number 1-5."),
+                }
+            }
+        }
+
+        // ── /copy — copy last response to clipboard ────────────────────────
+        "/copy" => {
+            // Find last assistant message
+            let last_response = state.messages.iter().rev()
+                .find(|m| matches!(m.role, MessageRole::Assistant))
+                .map(|m| m.content.clone());
+
+            match last_response {
+                Some(text) => {
+                    // Try to copy to clipboard using platform tools
+                    let copied = try_copy_to_clipboard(&text);
+                    if copied {
+                        state.push_system(format!(
+                            "Copied last response to clipboard ({} chars).", text.len()
+                        ));
+                    } else {
+                        state.push_system(format!(
+                            "Clipboard not available. Last response ({} chars):\n\n{}",
+                            text.len(),
+                            if text.len() > 500 { &text[..500] } else { &text }
+                        ));
+                    }
+                }
+                None => state.push_system("No assistant response to copy yet."),
+            }
+        }
+
         _ => {
             // Unknown command
             state.push_system(format!(
@@ -390,33 +578,498 @@ async fn handle_slash_command(
     true // command was handled
 }
 
-/// Compact conversation history: keep the last 6 messages in full and
-/// replace earlier messages with a summary notice.
-async fn compact_history(state: &mut AppState, session: &Arc<Mutex<Session>>) {
-    let mut sess = session.lock().await;
-    let messages = sess.history.messages().to_vec();
-    let keep = 6; // keep last 6 messages in full
+// ---------------------------------------------------------------------------
+// /commit implementation
+// ---------------------------------------------------------------------------
+async fn cmd_commit(state: &mut AppState, session: &Arc<Mutex<Session>>) {
+    let working_dir = {
+        let sess = session.lock().await;
+        sess.working_dir.clone()
+    };
 
-    if messages.len() <= keep {
+    // Check if there are staged changes
+    let staged_diff = match std::process::Command::new("git")
+        .args(["diff", "--staged", "--stat"])
+        .current_dir(&working_dir)
+        .output()
+    {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+        Err(e) => {
+            state.push_system(format!("/commit: failed to run git: {e}"));
+            return;
+        }
+    };
+
+    if staged_diff.trim().is_empty() {
+        // Check if there are any changes at all
+        let status = match std::process::Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(&working_dir)
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(e) => {
+                state.push_system(format!("/commit: failed to run git status: {e}"));
+                return;
+            }
+        };
+
+        if status.trim().is_empty() {
+            state.push_system("/commit: Nothing to commit — working tree is clean.");
+        } else {
+            state.push_system(format!(
+                "/commit: No staged changes. Stage files first with:\n  git add <file>\n  git add -A\n\nUnstaged changes:\n{}",
+                status.trim()
+            ));
+        }
+        return;
+    }
+
+    // Get full diff for context
+    let full_diff = std::process::Command::new("git")
+        .args(["diff", "--staged"])
+        .current_dir(&working_dir)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    // Show what's staged
+    state.push_system(format!(
+        "Staged changes:\n{}\n\nSending to agent to generate commit message...",
+        staged_diff.trim()
+    ));
+
+    // Build a commit message from the diff using the agent
+    // We construct a special internal message
+    let prompt = format!(
+        "Based on the following git diff, write a concise, informative commit message. \
+        Follow conventional commits format if appropriate (feat/fix/refactor/docs/chore etc). \
+        Return ONLY the commit message, nothing else.\n\n\
+        Staged diff:\n```\n{}\n```",
+        if full_diff.len() > 4000 { &full_diff[..4000] } else { &full_diff }
+    );
+
+    state.push_system(format!("Suggested: use the agent to generate the commit message by sending:\n> {}", &prompt[..prompt.len().min(200)]));
+    state.push_system(
+        "Type your commit message (or ask the agent to write one by describing the changes). \
+        Then run: bash git commit -m \"<message>\""
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /export implementation
+// ---------------------------------------------------------------------------
+async fn export_conversation(state: &mut AppState, session: &Arc<Mutex<Session>>, filename: &str) {
+    let sess = session.lock().await;
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+
+    let outfile = if filename.is_empty() {
+        format!("forge-export-{}.md", timestamp)
+    } else if filename.ends_with(".md") {
+        filename.to_string()
+    } else {
+        format!("{}.md", filename)
+    };
+
+    let mut lines = vec![
+        format!("# forge-osh Session Export"),
+        format!("**Session:** {}  ", sess.name),
+        format!("**Model:** {}  ", sess.model_id),
+        format!("**Provider:** {}  ", sess.provider_id),
+        format!("**Exported:** {}  ", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")),
+        format!("**Messages:** {}  ", sess.history.message_count()),
+        String::new(),
+        "---".to_string(),
+        String::new(),
+    ];
+
+    for msg in &state.messages {
+        match &msg.role {
+            MessageRole::User => {
+                lines.push(format!("### 👤 User\n{}\n", msg.content));
+            }
+            MessageRole::Assistant => {
+                lines.push(format!("### 🤖 Assistant\n{}\n", msg.content));
+            }
+            MessageRole::ToolCall { name } => {
+                lines.push(format!("### ⚙️ Tool: `{}`\n```json\n{}\n```\n", name, msg.content));
+            }
+            MessageRole::ToolResult { is_error } => {
+                let label = if *is_error { "❌ Error" } else { "✅ Result" };
+                lines.push(format!("### {}\n```\n{}\n```\n", label, msg.content));
+            }
+            MessageRole::System => {
+                lines.push(format!("*System: {}*\n", msg.content));
+            }
+            MessageRole::Splash => {} // skip
+        }
+    }
+
+    let content = lines.join("\n");
+    let export_path = std::path::PathBuf::from(&sess.working_dir).join(&outfile);
+
+    drop(sess); // release lock before writing
+
+    match std::fs::write(&export_path, &content) {
+        Ok(_) => state.push_system(format!(
+            "Conversation exported to: {} ({} chars)", outfile, content.len()
+        )),
+        Err(e) => state.push_system(format!("Export failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /doctor implementation
+// ---------------------------------------------------------------------------
+async fn cmd_doctor(
+    state: &mut AppState,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+) {
+    let mut report = vec!["forge-osh Doctor — Environment Diagnostics".to_string(), String::new()];
+
+    // Working directory
+    let working_dir = {
+        let sess = session.lock().await;
+        sess.working_dir.clone()
+    };
+    let wd_exists = std::path::Path::new(&working_dir).exists();
+    report.push(format!("Working Directory: {} {}",
+        working_dir,
+        if wd_exists { "✓" } else { "✗ NOT FOUND" }
+    ));
+
+    // Git availability
+    match std::process::Command::new("git").arg("--version").output() {
+        Ok(out) => {
+            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            report.push(format!("Git: {} ✓", ver));
+        }
+        Err(_) => report.push("Git: NOT FOUND ✗ (git commands will fail)".to_string()),
+    }
+
+    // Shell
+    let (shell, _) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    match std::process::Command::new(shell).arg(if cfg!(target_os="windows") { "/C echo test" } else { "-c" }).arg("echo test").output() {
+        Ok(_) => report.push(format!("Shell ({}): ✓", shell)),
+        Err(e) => report.push(format!("Shell ({}): ✗ {}", shell, e)),
+    }
+
+    // Provider connectivity check
+    let (provider_id, model_id, available_providers) = {
+        let router = provider_router.read().await;
+        (
+            router.active_provider_id().to_string(),
+            router.active_model_id().to_string(),
+            router.available_providers()
+                .iter()
+                .map(|(id, _)| id.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
+    report.push(format!("Active provider: {} / {}", provider_id, model_id));
+    report.push(format!("Available providers: {}", available_providers));
+
+    // API key check
+    let cfg_dir = crate::config::config_dir();
+    let ks = crate::config::keyring::KeyStore::new(&cfg_dir);
+    let has_key = ks.list_providers().contains(&provider_id.to_string());
+    let env_key = std::env::var(crate::config::keyring::provider_env_var(&provider_id)).is_ok();
+    report.push(format!("API key for '{}': {}",
+        provider_id,
+        if has_key || env_key { "✓ found" } else { "✗ NOT SET (use /keys or set env var)" }
+    ));
+
+    // CLAUDE.md memory files
+    let mem_path = std::path::PathBuf::from(&working_dir).join("CLAUDE.md");
+    report.push(format!("CLAUDE.md (project): {}",
+        if mem_path.exists() { format!("✓ found ({})", mem_path.display()) }
+        else { "not found (optional)".to_string() }
+    ));
+
+    // Hooks config
+    let hooks_path = crate::config::config_dir().join("hooks.json");
+    report.push(format!("hooks.json: {}",
+        if hooks_path.exists() { format!("✓ found ({})", hooks_path.display()) }
+        else { "not configured (optional)".to_string() }
+    ));
+
+    // Permission rules
+    let permissions = crate::agent::permissions::PermissionStore::load();
+    report.push(format!("Permission rules: {} stored", permissions.rules.len()));
+
+    // Config dir
+    let cfg_dir = crate::config::config_dir();
+    report.push(format!("Config directory: {} {}",
+        cfg_dir.display(),
+        if cfg_dir.exists() { "✓" } else { "✗ NOT FOUND" }
+    ));
+
+    report.push(String::new());
+    report.push(format!("Platform: {} ({})", std::env::consts::OS, std::env::consts::ARCH));
+    report.push(format!("forge-osh v1.0.1  — Batch 1"));
+
+    state.push_system(report.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// /resume implementation
+// ---------------------------------------------------------------------------
+async fn cmd_resume(state: &mut AppState, _session: &Arc<Mutex<Session>>) {
+    let sessions_dir = crate::config::sessions_dir();
+    if !sessions_dir.exists() {
+        state.push_system("No saved sessions found. Sessions are saved automatically on exit.");
+        return;
+    }
+
+    let mut session_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let mtime = entry.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                session_files.push((path, mtime));
+            }
+        }
+    }
+
+    if session_files.is_empty() {
+        state.push_system("No saved sessions found.");
+        return;
+    }
+
+    session_files.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+
+    let mut lines = vec!["Saved sessions (most recent first):".to_string()];
+    for (i, (path, mtime)) in session_files.iter().take(10).enumerate() {
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let datetime: chrono::DateTime<chrono::Local> = (*mtime).into();
+        lines.push(format!("  {}. {}  ({})", i + 1, name, datetime.format("%Y-%m-%d %H:%M")));
+    }
+    lines.push(String::new());
+    lines.push("To resume: forge-osh --session <session-id>  or start a new session and use /compact to manage context.".to_string());
+
+    state.push_system(lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// /permissions implementation
+// ---------------------------------------------------------------------------
+async fn cmd_permissions(state: &mut AppState, arg: &str) {
+    let mut store = crate::agent::permissions::PermissionStore::load();
+
+    if arg.is_empty() {
+        // Display current rules
+        state.push_system(store.display());
+        state.push_system(
+            "Usage:\n  /permissions add bash(git *)     — always allow git commands\n  \
+            /permissions deny bash(rm -rf *)  — always deny rm -rf\n  \
+            /permissions remove <index>        — remove rule by index\n  \
+            /permissions clear                 — remove all rules"
+        );
+        return;
+    }
+
+    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+    match parts[0] {
+        "add" | "allow" => {
+            if let Some(rule_str) = parts.get(1) {
+                if let Some((tool, pattern)) = parse_permission_rule(rule_str) {
+                    store.add_allow(&tool, &pattern);
+                    state.push_system(format!("Added allow rule: {}({})", tool, pattern));
+                } else {
+                    state.push_system("Invalid rule format. Use: tool_name(pattern)  e.g. bash(git *)");
+                }
+            }
+        }
+        "deny" => {
+            if let Some(rule_str) = parts.get(1) {
+                if let Some((tool, pattern)) = parse_permission_rule(rule_str) {
+                    store.add_deny(&tool, &pattern);
+                    state.push_system(format!("Added deny rule: {}({})", tool, pattern));
+                } else {
+                    state.push_system("Invalid rule format. Use: tool_name(pattern)  e.g. bash(rm -rf *)");
+                }
+            }
+        }
+        "remove" | "rm" | "delete" => {
+            if let Some(idx_str) = parts.get(1) {
+                if let Ok(idx) = idx_str.trim().parse::<usize>() {
+                    store.remove(idx);
+                    state.push_system(format!("Removed rule at index {idx}."));
+                } else {
+                    state.push_system("Usage: /permissions remove <index>");
+                }
+            }
+        }
+        "clear" => {
+            store.rules.clear();
+            store.save();
+            state.push_system("All permission rules cleared.");
+        }
+        _ => {
+            state.push_system("Unknown subcommand. Use: /permissions [add|deny|remove|clear]");
+        }
+    }
+}
+
+fn parse_permission_rule(s: &str) -> Option<(String, String)> {
+    // Format: tool_name(pattern)  e.g.  bash(git *)
+    if let Some(open) = s.find('(') {
+        if let Some(close) = s.rfind(')') {
+            if close > open {
+                let tool = s[..open].trim().to_string();
+                let pattern = s[open + 1..close].to_string();
+                if !tool.is_empty() && !pattern.is_empty() {
+                    return Some((tool, pattern));
+                }
+            }
+        }
+    }
+    // Also support: bash git *  (space-separated, pattern is everything after tool)
+    let parts: Vec<&str> = s.splitn(2, ' ').collect();
+    if parts.len() == 2 {
+        return Some((parts[0].to_string(), parts[1].to_string()));
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard helper
+// ---------------------------------------------------------------------------
+fn try_copy_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // Use PowerShell to copy to clipboard on Windows
+        if let Ok(mut child) = std::process::Command::new("powershell")
+            .args(["-Command", &format!("Set-Clipboard -Value '{}'", text.replace('\'', "''"))])
+            .spawn()
+        {
+            let _ = child.wait();
+            return true;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.take() {
+                let _ = std::io::BufWriter::new(stdin).write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return true;
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // Try xclip or xsel on Linux
+        use std::io::Write;
+        for cmd in &["xclip", "xsel"] {
+            let args: &[&str] = if *cmd == "xclip" {
+                &["-selection", "clipboard"]
+            } else {
+                &["--clipboard", "--input"]
+            };
+            if let Ok(mut child) = std::process::Command::new(cmd)
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(stdin) = child.stdin.take() {
+                    let _ = std::io::BufWriter::new(stdin).write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// LLM-based compact: summarize old messages with the active provider,
+/// then replace them with the summary so the context window is freed.
+async fn compact_history_llm(
+    state: &mut AppState,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+) {
+    use crate::agent::compaction;
+
+    let keep = compaction::DEFAULT_KEEP_LAST;
+
+    let (messages, model_id, total) = {
+        let sess = session.lock().await;
+        let msgs = sess.history.messages().to_vec();
+        let total = msgs.len();
+        let model_id = sess.model_id.clone();
+        (msgs, model_id, total)
+    };
+
+    if total <= keep {
         state.push_system(format!(
-            "Conversation has only {} messages — nothing to compact.",
-            messages.len()
+            "Conversation has only {total} messages — nothing to compact (threshold: {keep})."
         ));
         return;
     }
 
-    let removed = messages.len() - keep;
-    sess.history.compact(keep);
+    let (to_summarize, _) = compaction::split_for_compaction(&messages, keep);
+    let to_summarize = to_summarize.to_vec();
 
-    // Also clear most of the rendered messages, keeping the last few
-    let rendered_keep = state.messages.len().saturating_sub(removed * 2);
-    state.messages.drain(..rendered_keep);
+    state.push_system("Compacting with AI summary — please wait...");
 
-    state.push_system(format!(
-        "Compacted: removed {} messages from history. {} messages remain.",
-        removed,
-        keep
-    ));
+    let summary_result = {
+        let router = provider_router.read().await;
+        match router.active() {
+            Ok(provider) => {
+                compaction::summarize_messages(&to_summarize, provider, &model_id).await
+            }
+            Err(e) => Err(e),
+        }
+    };
+
+    match summary_result {
+        Ok(summary) => {
+            let removed = total - keep;
+            {
+                let mut sess = session.lock().await;
+                sess.history.summarize_old(summary.clone(), keep);
+            }
+
+            // Trim the rendered view: keep only the most-recent rendered messages
+            let rendered_keep = state.messages.len().saturating_sub(removed.saturating_mul(2));
+            state.messages.drain(..rendered_keep);
+
+            state.push_system(format!(
+                "Compacted: {removed} messages summarized by AI. {keep} messages kept in full.\n\
+                Summary: {}",
+                &summary[..summary.len().min(300)]
+            ));
+        }
+        Err(e) => {
+            // Fall back to simple truncation if LLM call fails
+            let removed = total - keep;
+            {
+                let mut sess = session.lock().await;
+                sess.history.compact(keep);
+            }
+            let rendered_keep = state.messages.len().saturating_sub(removed.saturating_mul(2));
+            state.messages.drain(..rendered_keep);
+            state.push_system(format!(
+                "AI summary failed ({e}); fell back to simple truncation. \
+                Removed {removed} messages, {keep} remain."
+            ));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,13 +1150,42 @@ pub async fn run_tui(
                 ),
             });
         } else {
-            state.messages.push(RenderedMessage {
-                role: MessageRole::System,
-                content: format!(
-                    "Model: {}  |  Provider: {}  |  Type /help for commands.",
-                    state.model_name, state.provider_name
-                ),
-            });
+            // Count available providers and build the startup status line.
+            // This is displayed to every new user so they can immediately see
+            // whether they need to add API keys (Ctrl+K) before starting.
+            let (provider_count, provider_list) = {
+                let router = provider_router.read().await;
+                let available: Vec<String> = router
+                    .available_providers()
+                    .iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect();
+                (available.len(), available.join(", "))
+            };
+
+            let cfg_dir = crate::config::config_dir();
+
+            if provider_count == 0 {
+                // No API keys configured — guide the user to set one up.
+                state.messages.push(RenderedMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "No providers configured yet.\n\
+                        Press Ctrl+K to add an API key, or set an env var (e.g. ANTHROPIC_API_KEY).\n\
+                        Keys are stored in: {}\n\
+                        Type /help for all commands.",
+                        cfg_dir.display()
+                    ),
+                });
+            } else {
+                state.messages.push(RenderedMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "Model: {}  |  Provider: {}  |  {} provider(s) ready: [{}]  |  Type /help for commands.",
+                        state.model_name, state.provider_name, provider_count, provider_list
+                    ),
+                });
+            }
         }
     }
 
@@ -625,16 +1307,44 @@ pub async fn run_tui(
 
         // ---- Process pending key operations ----
         if let Some((provider_id, api_key)) = state.key_save_pending.take() {
-            let mut ks = key_store.lock().await;
-            match ks.set(&provider_id, &api_key) {
-                Ok(_) => state.push_system(format!("API key saved for {provider_id}.")),
+            let save_ok = {
+                let mut ks = key_store.lock().await;
+                ks.set(&provider_id, &api_key)
+            };
+            match save_ok {
+                Ok(_) => {
+                    // Hotreload: instantiate the provider immediately so the
+                    // user can switch to it without restarting the app.
+                    let reload_result = {
+                        let mut router = provider_router.write().await;
+                        router.reload_provider(&provider_id, api_key, &config)
+                    };
+                    match reload_result {
+                        Ok(_) => state.push_system(format!(
+                            "API key saved. Provider '{provider_id}' is now available — use Ctrl+P to switch."
+                        )),
+                        Err(e) => state.push_system(format!(
+                            "Key saved to disk, but provider init failed: {e}"
+                        )),
+                    }
+                }
                 Err(e) => state.push_system(format!("Failed to save key: {e}")),
             }
         }
         if let Some(provider_id) = state.key_delete_pending.take() {
-            let mut ks = key_store.lock().await;
-            match ks.delete(&provider_id) {
-                Ok(_) => state.push_system(format!("API key removed for {provider_id}.")),
+            let del_ok = {
+                let mut ks = key_store.lock().await;
+                ks.delete(&provider_id)
+            };
+            match del_ok {
+                Ok(_) => {
+                    // Remove provider from router immediately
+                    {
+                        let mut router = provider_router.write().await;
+                        router.remove_provider(&provider_id);
+                    }
+                    state.push_system(format!("API key removed for {provider_id}."));
+                }
                 Err(e) => state.push_system(format!("Failed to remove key: {e}")),
             }
         }

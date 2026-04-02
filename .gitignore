@@ -7,3 +7,14 @@ dist/
 .DS_Store
 Thumbs.db
 claude-code-source-code-main/
+todo.txt
+
+# forge-osh user data — safety net in case a .forge-osh/ directory is
+# accidentally created inside the repo root (e.g. if FORGE_CONFIG_DIR is
+# set to the project dir during development).  These patterns are anchored
+# to the repo root with a leading slash so they CANNOT match src/, Cargo.toml,
+# or any other part of the codebase.
+/.forge-osh/
+/keys.json
+/hooks.json
+/permissions.json

@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
@@ -13,6 +13,17 @@ use super::{AppState, KeyManagerState, Modal, MessageRole, OSH_SPLASH_LINES};
 pub fn render(frame: &mut Frame, state: &mut AppState) {
     let theme = state.theme.clone();
     let area = frame.area();
+
+    // Fill the entire frame with the theme's background colour.
+    // Without this, cells not covered by any widget keep the terminal's native
+    // background — on light terminals, the dark theme's light-coloured text
+    // would be invisible against the white background.
+    if theme.bg != Color::Reset {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.bg).fg(theme.fg)),
+            area,
+        );
+    }
 
     // Compute input area height based on content (min 3, max 8 rows)
     let input_lines = count_input_lines(&state.input.text, area.width.saturating_sub(4) as usize);
