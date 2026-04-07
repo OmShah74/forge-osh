@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.2)
+    r#"forge-osh Help  (v1.0.3)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen
@@ -95,7 +95,9 @@ AGENT TOOLS (used autonomously by the AI)
   enter_plan_mode   Agent proposes a plan before executing
   exit_plan_mode    Agent exits plan mode after plan approval
   search_files      Enhanced grep: context lines, file types, output modes
-  bash              Enhanced shell: output truncation, per-command timeout
+  bash              Shell: read-only commands (ls/cat/grep/git log) skip permission prompts
+  powershell        PowerShell shell (Windows): Get-* cmdlets skip permission prompts
+  notebook_read     Read Jupyter .ipynb notebooks as formatted cell text
 
 PERMISSION RULES SYSTEM
   Rules are stored in ~/.forge-osh/permissions.json

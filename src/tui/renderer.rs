@@ -63,6 +63,9 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Modal::KeyManager(km) => {
                 render_key_manager(frame, km, &theme);
             }
+            Modal::CustomModelInput { provider_id, input_buffer } => {
+                render_custom_model_input(frame, provider_id, input_buffer, &theme);
+            }
         }
     }
 }
@@ -256,50 +259,49 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
         )));
     }
 
-    // Compute actual rendered line count accounting for text wrapping.
-    // This gives a much more accurate scroll position than raw line count.
-    let total_lines = estimate_rendered_lines(&lines, wrap_width);
+    // Raw line count drives scroll — no wrap estimation, no artificial ceiling.
+    // scroll_offset is "lines scrolled up from bottom" and is unbounded: when it
+    // exceeds the actual content height, effective_scroll() saturates to 0 via
+    // saturating_sub, which simply shows the very first line.  This means users
+    // can scroll freely through any amount of content — 100 lines or 1 000 000 —
+    // without any hard limit being imposed by the renderer.
+    let total_raw = lines.len();
     let visible_height = area.height as usize;
-    state.total_lines = total_lines;
+
+    state.total_lines = total_raw;
     state.visible_height = visible_height;
 
-    let scroll = state.effective_scroll();
+    // effective_scroll() = max_scroll().saturating_sub(scroll_offset)
+    // → 0 when scrolled to or past the very top (natural floor, not a cap)
+    // → max_scroll() when at the bottom (auto-scroll position)
+    let scroll_start = state.effective_scroll();
 
-    let conversation = Paragraph::new(Text::from(lines))
+    // Include a small line buffer beyond visible_height so that lines which
+    // word-wrap to multiple visual rows are not clipped at the bottom edge.
+    // Ratatui hard-clips rendering at the widget boundary, so this is safe.
+    let extra = visible_height / 3 + 8;
+    let visible_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll_start)
+        .take(visible_height + extra)
+        .collect();
+
+    let conversation = Paragraph::new(Text::from(visible_lines))
         .block(Block::default().borders(Borders::NONE))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(conversation, area);
 
-    // Scrollbar (only when content exceeds visible area)
-    if total_lines > visible_height {
-        let max_scroll = state.max_scroll();
-        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll);
+    // Scrollbar: shown whenever content is taller than the viewport.
+    // Content size = total_raw lines; current position = scroll_start (from top).
+    if total_raw > visible_height {
+        let content_size = total_raw.saturating_sub(visible_height);
+        let mut scrollbar_state = ScrollbarState::new(content_size).position(scroll_start);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
-}
-
-/// Estimate how many terminal rows `lines` will occupy when rendered with word-wrapping.
-/// This isn't perfect but is far better than just using `lines.len()`.
-fn estimate_rendered_lines(lines: &[Line], wrap_width: usize) -> usize {
-    if wrap_width == 0 {
-        return lines.len();
-    }
-    lines.iter().map(|line| {
-        let width: usize = line.spans.iter()
-            .map(|s| unicode_width::UnicodeWidthStr::width(&*s.content))
-            .sum();
-        if width == 0 {
-            1
-        } else {
-            // Ceiling division: how many wrap_width-wide rows does this line need?
-            (width + wrap_width - 1) / wrap_width
-        }
-    }).sum()
 }
 
 /// Render assistant message content with basic markdown support.
@@ -889,6 +891,37 @@ fn render_key_manager(frame: &mut Frame, km: &KeyManagerState, theme: &Theme) {
 
         frame.render_widget(list, area);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Custom model input dialog
+// ---------------------------------------------------------------------------
+
+fn render_custom_model_input(frame: &mut Frame, provider_id: &str, input_buffer: &str, theme: &Theme) {
+    let area = centered_rect(60, 30, frame.area());
+    frame.render_widget(Clear, area);
+
+    let display = if input_buffer.is_empty() {
+        "(type model ID, e.g. gpt-4o-mini)".to_string()
+    } else {
+        input_buffer.to_string()
+    };
+
+    let text = format!(
+        "Provider: {provider_id}\n\nModel ID: {display}\n\n[Enter] Use model    [Esc] Cancel"
+    );
+
+    let dialog = Paragraph::new(text)
+        .style(Style::default().fg(theme.fg))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.spinner_fg))
+                .title(" Add Custom Model "),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(dialog, area);
 }
 
 // ---------------------------------------------------------------------------

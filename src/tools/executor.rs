@@ -31,7 +31,7 @@ impl ToolExecutor {
             }
         };
 
-        let perm_level = tool.permission_level();
+        let perm_level = tool.effective_permission_level(&tool_call.input);
 
         // Check if we need permission
         let needs_permission = match &perm_level {

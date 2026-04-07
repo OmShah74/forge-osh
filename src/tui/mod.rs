@@ -78,6 +78,11 @@ pub enum Modal {
     Picker(PickerState),
     TokenInfo,
     KeyManager(KeyManagerState),
+    /// Custom model ID input (opened from model picker)
+    CustomModelInput {
+        provider_id: String,
+        input_buffer: String,
+    },
 }
 
 /// State for the API key manager modal
@@ -261,15 +266,21 @@ async fn handle_slash_command(
             if arg.is_empty() {
                 // Open picker
                 let models = crate::config::models::models_for_provider(&pid);
-                let items: Vec<picker::PickerItem> = models
+                let mut items: Vec<picker::PickerItem> = models
                     .iter()
                     .map(|m| picker::PickerItem::from_model_info(m, true, &pname))
                     .collect();
-                if items.is_empty() {
-                    state.push_system(format!("No models found for provider '{pname}'."));
-                } else {
-                    state.modal = Some(Modal::Picker(PickerState::new(items)));
-                }
+                // Always add "Add custom model" entry at the bottom
+                items.push(picker::PickerItem {
+                    provider_id: pid.clone(),
+                    provider_name: pname.clone(),
+                    model_id: "__add_custom__".to_string(),
+                    model_name: "+ Add custom model...".to_string(),
+                    context_window: 0,
+                    cost_display: "enter any model ID".to_string(),
+                    connected: true,
+                });
+                state.modal = Some(Modal::Picker(PickerState::new(items)));
             } else if arg == "list" {
                 // List available models for current provider
                 let models = crate::config::models::models_for_provider(&pid);
@@ -284,6 +295,7 @@ async fn handle_slash_command(
                 }
             } else {
                 // Direct model switch: /model <model-id>
+                // First try catalog match, then fall back to using the ID directly (custom model)
                 let models = crate::config::models::models_for_provider(&pid);
                 let found = models.iter().find(|m| m.id == arg || m.name.to_lowercase().contains(&arg.to_lowercase()));
                 if let Some(m) = found {
@@ -294,10 +306,12 @@ async fn handle_slash_command(
                     state.model_name = model_name.clone();
                     state.push_system(format!("Switched to model: {} ({})", model_name, model_id));
                 } else {
-                    state.push_system(format!(
-                        "Model '{}' not found for provider '{}'. Use /model list to see available models.",
-                        arg, pname
-                    ));
+                    // Not in catalog — use as custom model ID directly
+                    let model_id = arg.to_string();
+                    state.model_switch_pending = Some((pid.clone(), model_id.clone()));
+                    state.model_id = model_id.clone();
+                    state.model_name = model_id.clone();
+                    state.push_system(format!("Switched to custom model: {model_id} (not in catalog — make sure the ID is correct)"));
                 }
             }
         }
@@ -1607,17 +1621,21 @@ pub async fn run_tui(
                                 let pid = state.provider_id.clone();
                                 let pname = state.provider_name.clone();
                                 let models = crate::config::models::models_for_provider(&pid);
-                                let items: Vec<picker::PickerItem> = models
+                                let mut items: Vec<picker::PickerItem> = models
                                     .iter()
                                     .map(|m| picker::PickerItem::from_model_info(m, true, &pname))
                                     .collect();
-                                if items.is_empty() {
-                                    state.push_system(format!(
-                                        "No models found for provider '{pname}' (id: {pid})."
-                                    ));
-                                } else {
-                                    state.modal = Some(Modal::Picker(PickerState::new(items)));
-                                }
+                                // Always add "Add custom model" entry at the bottom
+                                items.push(picker::PickerItem {
+                                    provider_id: pid.clone(),
+                                    provider_name: pname.clone(),
+                                    model_id: "__add_custom__".to_string(),
+                                    model_name: "+ Add custom model...".to_string(),
+                                    context_window: 0,
+                                    cost_display: "enter any model ID".to_string(),
+                                    connected: true,
+                                });
+                                state.modal = Some(Modal::Picker(PickerState::new(items)));
                             }
                             Action::OpenProviderPicker => {
                                 let router = provider_router.read().await;
@@ -1837,19 +1855,27 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                         let model_id = item.model_id.clone();
                         let model_name = item.model_name.clone();
 
-                        state.model_switch_pending = Some((provider_id.clone(), model_id.clone()));
-                        state.messages.push(RenderedMessage {
-                            role: MessageRole::System,
-                            content: format!(
-                                "Switching to {} ({})",
-                                model_name, provider_name
-                            ),
-                        });
-                        // Optimistic update — will be confirmed by the pending switch handler
-                        state.provider_id = provider_id;
-                        state.provider_name = provider_name;
-                        state.model_id = model_id;
-                        state.model_name = model_name;
+                        if model_id == "__add_custom__" {
+                            // Open custom model input dialog
+                            state.modal = Some(Modal::CustomModelInput {
+                                provider_id,
+                                input_buffer: String::new(),
+                            });
+                        } else {
+                            state.model_switch_pending = Some((provider_id.clone(), model_id.clone()));
+                            state.messages.push(RenderedMessage {
+                                role: MessageRole::System,
+                                content: format!(
+                                    "Switching to {} ({})",
+                                    model_name, provider_name
+                                ),
+                            });
+                            // Optimistic update — will be confirmed by the pending switch handler
+                            state.provider_id = provider_id;
+                            state.provider_name = provider_name;
+                            state.model_id = model_id;
+                            state.model_name = model_name;
+                        }
                     }
                 }
                 Action::PickerCancel => {
@@ -1928,7 +1954,7 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                     km.input_buffer.clear();
                     state.modal = Some(Modal::KeyManager(km));
                 } else if key.code == KeyCode::Char('d') || key.code == KeyCode::Delete {
-                    if let Some(entry) = km.providers.get_mut(km.selected) {
+                    let did_delete = if let Some(entry) = km.providers.get_mut(km.selected) {
                         if entry.key_source == "stored" || entry.key_source == "env+stored" {
                             state.key_delete_pending = Some(entry.provider_id.clone());
                             let has_env = std::env::var(
@@ -1940,12 +1966,64 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             } else {
                                 "none".to_string()
                             };
+                            true
+                        } else if entry.key_source == "env" {
+                            let env_var = crate::config::keyring::provider_env_var(&entry.provider_id);
+                            state.push_system(format!(
+                                "Cannot delete key for '{}' — it is set via environment variable ({}).\n\
+                                Unset the env var to remove it.",
+                                entry.provider_id, env_var
+                            ));
+                            false
+                        } else {
+                            state.push_system(format!(
+                                "No stored key for '{}' to delete.", entry.provider_id
+                            ));
+                            false
                         }
+                    } else {
+                        false
+                    };
+                    // Close modal after deletion so user can see the confirmation message.
+                    // Keep modal open for error cases (env-only or nothing to delete).
+                    if !did_delete {
+                        state.modal = Some(Modal::KeyManager(km));
                     }
-                    state.modal = Some(Modal::KeyManager(km));
+                    // If did_delete: modal stays closed; key_delete_pending fires next frame.
                 } else {
                     state.modal = Some(Modal::KeyManager(km));
                 }
+            }
+        }
+
+        Some(Modal::CustomModelInput { provider_id, mut input_buffer }) => {
+            if key.code == KeyCode::Esc {
+                // Close without switching
+            } else if key.code == KeyCode::Enter
+                || (key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                if !input_buffer.is_empty() {
+                    let mid = input_buffer.trim().to_string();
+                    state.model_switch_pending = Some((provider_id.clone(), mid.clone()));
+                    state.provider_id = provider_id.clone();
+                    state.model_id = mid.clone();
+                    state.model_name = mid.clone();
+                    state.push_system(format!(
+                        "Switching to custom model: {mid}\n\
+                        (Make sure the model ID is correct for provider '{provider_id}')"
+                    ));
+                }
+                // Close modal whether empty or not
+            } else if key.code == KeyCode::Backspace {
+                input_buffer.pop();
+                state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
+            } else if let KeyCode::Char(c) = key.code {
+                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    input_buffer.push(c);
+                }
+                state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
+            } else {
+                state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
             }
         }
 

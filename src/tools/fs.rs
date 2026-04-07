@@ -53,6 +53,38 @@ impl Tool for ReadFileTool {
             return ToolOutput::error(format!("File not found: {}", path.display()));
         }
 
+        // Detect image files by extension — return metadata instead of binary error
+        let extension = path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase());
+        let is_image = matches!(
+            extension.as_deref(),
+            Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" | "tiff" | "tif")
+        );
+
+        if is_image {
+            let meta = fs::metadata(&path).await;
+            let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let mime = match extension.as_deref() {
+                Some("png") => "image/png",
+                Some("jpg") | Some("jpeg") => "image/jpeg",
+                Some("gif") => "image/gif",
+                Some("webp") => "image/webp",
+                Some("bmp") => "image/bmp",
+                Some("ico") => "image/x-icon",
+                Some("svg") => "image/svg+xml",
+                Some("tiff") | Some("tif") => "image/tiff",
+                _ => "image/unknown",
+            };
+            return ToolOutput::success(format!(
+                "Image file: {}\nType: {}\nSize: {} bytes ({:.1} KB)\n\n\
+                This is a binary image file. To analyze its visual content, \
+                describe what you need from it and I can use web search or \
+                other tools. SVG files can be read as text if you need the markup.",
+                path.display(), mime, size_bytes, size_bytes as f64 / 1024.0
+            ));
+        }
+
         // Check for binary
         match fs::read(&path).await {
             Ok(bytes) => {

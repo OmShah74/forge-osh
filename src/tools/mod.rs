@@ -3,6 +3,8 @@ pub mod code;
 pub mod executor;
 pub mod fs;
 pub mod git;
+pub mod notebook;
+pub mod powershell;
 pub mod search;
 pub mod shell;
 pub mod tasks;
@@ -21,6 +23,13 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> serde_json::Value;
     fn permission_level(&self) -> PermissionLevel;
+
+    /// Permission level considering the specific input (e.g. bash can be ReadOnly for `ls`).
+    /// Default delegates to `permission_level()`. Override to enable input-aware classification.
+    fn effective_permission_level(&self, _input: &serde_json::Value) -> PermissionLevel {
+        self.permission_level()
+    }
+
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolOutput;
 }
 
@@ -58,6 +67,7 @@ impl ToolRegistry {
 
         // ── Shell ──────────────────────────────────────────────────────────
         registry.register(Box::new(shell::BashTool::default()));
+        registry.register(Box::new(powershell::PowerShellTool::default()));
 
         // ── Git ────────────────────────────────────────────────────────────
         registry.register(Box::new(git::GitStatusTool));
@@ -99,6 +109,9 @@ impl ToolRegistry {
         registry.register(Box::new(agent_tools::AskUserQuestionTool));
         registry.register(Box::new(agent_tools::EnterPlanModeTool));
         registry.register(Box::new(agent_tools::ExitPlanModeTool));
+
+        // ── Notebooks ──────────────────────────────────────────────────────
+        registry.register(Box::new(notebook::NotebookReadTool));
 
         // ── Git worktrees ──────────────────────────────────────────────────
         registry.register(Box::new(worktree::EnterWorktreeTool));
