@@ -9,6 +9,115 @@ use crate::types::*;
 use super::Tool;
 
 // ---------------------------------------------------------------------------
+// Read-only command classification (from Claude Code BashTool analysis)
+// ---------------------------------------------------------------------------
+
+/// Read-only base commands — these never mutate filesystem state.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    // File listing
+    "ls", "ll", "la", "dir", "tree",
+    // File content viewing
+    "cat", "less", "more", "head", "tail", "bat", "type",
+    // Path / navigation info
+    "pwd", "echo", "printf",
+    // Lookup
+    "which", "where", "whereis", "command",
+    // Text processing (read-only when no output redirect)
+    "wc", "sort", "uniq", "cut", "tr", "diff", "cmp", "comm",
+    // File info
+    "file", "stat", "du", "df", "lsblk", "lscpu",
+    // System info
+    "uname", "hostname", "whoami", "id", "env", "printenv", "date", "uptime", "ps",
+    // Search tools
+    "grep", "rg", "ag", "ack", "ripgrep",
+    // Find (without -exec/-delete handled separately)
+    "find", "locate",
+    // Awk/sed (read-only modes)
+    "awk", "sed",
+    // Process info
+    "top", "htop", "pstree",
+    // Network info (read-only)
+    "ping", "traceroute", "netstat", "ss", "nslookup", "dig",
+    // Package listing (not install)
+    "pip", "pip3",
+    // Windows equivalents
+    "cmd",
+];
+
+/// Git subcommands that are read-only
+const GIT_READ_ONLY_SUBCOMMANDS: &[&str] = &[
+    "status", "log", "diff", "show", "blame", "branch",
+    "stash", "remote", "tag", "describe", "shortlog",
+    "reflog", "rev-parse", "cat-file", "ls-files",
+    "ls-remote", "fetch", "config", "format-patch",
+    "cherry", "cherry-pick", // cherry-pick can be mutating but we list what CC does
+];
+
+/// Returns true if the command is safe to run without Shell-level permission.
+/// Heuristic — not exhaustive but covers the common read-only patterns.
+pub fn is_read_only_command(command: &str) -> bool {
+    let cmd = command.trim();
+
+    // Reject if it contains output redirection or assignment operators
+    // (these could write to files or mutate state)
+    if cmd.contains(" > ") || cmd.starts_with("> ")
+        || cmd.contains(" >> ") || cmd.starts_with(">> ")
+        || cmd.contains(";") // chaining may include mutating commands
+    {
+        return false;
+    }
+
+    // Reject sudo
+    if cmd.starts_with("sudo ") || cmd.starts_with("sudo\t") {
+        return false;
+    }
+
+    // Extract the base command (first word, handle leading env vars)
+    let first_word = cmd.split_whitespace().next().unwrap_or("");
+
+    // Handle `git <subcommand>` specially
+    if first_word == "git" {
+        let subcommand = cmd.split_whitespace().nth(1).unwrap_or("");
+        return GIT_READ_ONLY_SUBCOMMANDS.contains(&subcommand);
+    }
+
+    // For pip, only `pip list`, `pip show`, `pip freeze` are read-only
+    if first_word == "pip" || first_word == "pip3" {
+        let subcmd = cmd.split_whitespace().nth(1).unwrap_or("");
+        return matches!(subcmd, "list" | "show" | "freeze" | "check" | "search");
+    }
+
+    // For awk/sed, only read if no output files specified via -i or redirects
+    if first_word == "sed" {
+        // -i means in-place edit — mutating
+        return !cmd.contains(" -i") && !cmd.contains("\t-i");
+    }
+
+    READ_ONLY_COMMANDS.contains(&first_word)
+}
+
+// ---------------------------------------------------------------------------
+// Command exit-code semantics (from Claude Code commandSemantics.ts)
+// ---------------------------------------------------------------------------
+
+/// Returns true if a non-zero exit code from this command should NOT be treated
+/// as an error (e.g. grep returning 1 means "no matches", not failure).
+fn is_benign_nonzero(command: &str, exit_code: i32) -> bool {
+    let base = command.split_whitespace().next().unwrap_or("");
+    match base {
+        // grep/rg: 1 = no matches found (not an error)
+        "grep" | "rg" | "ag" | "ack" if exit_code == 1 => true,
+        // diff/cmp: 1 = files differ (not an error in itself)
+        "diff" | "cmp" if exit_code == 1 => true,
+        // find: 1 = some dirs inaccessible (partial success)
+        "find" if exit_code == 1 => true,
+        // test/[: 1 = condition false
+        "test" | "[" if exit_code == 1 => true,
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EndTruncatingAccumulator — keeps last N bytes of output (like Claude Code)
 // When output is huge, keeps the end (most recent) rather than the beginning.
 // ---------------------------------------------------------------------------
@@ -138,6 +247,15 @@ impl Tool for BashTool {
 
     fn permission_level(&self) -> PermissionLevel { PermissionLevel::Shell }
 
+    fn effective_permission_level(&self, input: &serde_json::Value) -> PermissionLevel {
+        if let Some(cmd) = input["command"].as_str() {
+            if is_read_only_command(cmd) {
+                return PermissionLevel::ReadOnly;
+            }
+        }
+        PermissionLevel::Shell
+    }
+
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let command = match input["command"].as_str() {
             Some(c) => c,
@@ -238,7 +356,11 @@ impl Tool for BashTool {
                 let cleaned = strip_ansi_escapes::strip(output.as_bytes());
                 let cleaned = String::from_utf8(cleaned).unwrap_or(output);
 
-                if exit_code == 0 {
+                // Some commands use non-zero exit codes for non-error conditions
+                // (e.g. grep exit 1 = no matches, diff exit 1 = files differ)
+                let is_success = exit_code == 0 || is_benign_nonzero(command, exit_code);
+
+                if is_success {
                     ToolOutput::success(if cleaned.is_empty() {
                         "(command completed successfully with no output)".to_string()
                     } else {
