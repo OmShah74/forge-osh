@@ -17,6 +17,7 @@ pub enum Action {
     DeleteWord,
     HistoryUp,
     HistoryDown,
+    TabComplete,
 
     // Scrolling
     ScrollUp,
@@ -206,6 +207,28 @@ impl InputState {
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty()
     }
+
+    /// Save the most recent 500 history entries to disk.
+    pub fn save_history(&self, path: &std::path::Path) {
+        let recent: Vec<String> = self.history.iter()
+            .rev().take(500)
+            .rev().cloned()
+            .collect();
+        if let Ok(json) = serde_json::to_string(&recent) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Load history entries from disk (returns empty vec on any error).
+    pub fn load_history(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default()
+    }
 }
 
 /// Map a key event to an action, depending on the current UI mode.
@@ -246,9 +269,11 @@ pub fn map_key_normal(key: KeyEvent) -> Action {
         (KeyModifiers::CONTROL, KeyCode::Home) => Action::ScrollTop,
         (KeyModifiers::CONTROL, KeyCode::End) => Action::ScrollBottom,
 
-        // ---- History ----
+        // ---- History & completion ----
         (KeyModifiers::NONE, KeyCode::Up) => Action::HistoryUp,
         (KeyModifiers::NONE, KeyCode::Down) => Action::HistoryDown,
+        // Tab: complete slash commands (Ctrl+I == Tab on most terminals)
+        (KeyModifiers::NONE, KeyCode::Tab) => Action::TabComplete,
 
         // ---- Global ----
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Cancel,
