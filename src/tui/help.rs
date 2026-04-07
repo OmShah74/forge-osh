@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.3)
+    r#"forge-osh Help  (v1.0.5)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen
@@ -20,6 +20,10 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /new               Start a fresh conversation (clears history and display)
   /save              Save session to disk
   /session           Show session info
+  /init              Generate CLAUDE.md project instructions file
+  /find <pattern>    Search files (gitignore-aware glob, e.g. /find *.rs)
+  /config [key val]  View or set config (theme/trust/vim). E.g. /config theme dark
+  /stats             Show detailed session statistics (tokens, tools, context %)
 
 GIT COMMANDS
   /commit            Generate AI commit message for staged changes
@@ -52,7 +56,7 @@ INPUT LINE
   Enter          Submit message         Shift+Enter  Insert new line
   Ctrl+A         Move to line start     Ctrl+E       Move to line end
   Ctrl+U         Delete to line start   Ctrl+W       Delete previous word
-  Up / Down      Navigate input history
+  Up / Down      Navigate input history Tab          Auto-complete slash command
 
 SCROLLING
   Shift+Up/Down   Scroll by 3 lines     PgUp/PgDn    Scroll by 10 lines

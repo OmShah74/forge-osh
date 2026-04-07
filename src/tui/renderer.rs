@@ -78,13 +78,31 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
     let trust_indicator = if state.trust_mode { " [TRUST]" } else { "" };
     let busy_indicator = if state.agent_busy { " ●" } else { "" };
 
+    // Context window progress bar: [████░░░░░░] 40%
+    let ctx_bar = if state.context_pct > 0 {
+        let filled = (state.context_pct as usize * 10 / 100).min(10);
+        let empty = 10 - filled;
+        let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+        let color_hint = if state.context_pct >= 90 {
+            "!"
+        } else if state.context_pct >= 70 {
+            "~"
+        } else {
+            ""
+        };
+        format!("  [{}]{} {}%", bar, color_hint, state.context_pct)
+    } else {
+        String::new()
+    };
+
     let header_text = format!(
-        " forge-osh  {}  {}  {}  {}  {}{}{}",
+        " forge-osh  {}  {}  {}  {}  {}{}{}{}",
         state.model_name,
         state.provider_name,
         state.session_name,
         state.format_tokens,
         state.format_cost,
+        ctx_bar,
         trust_indicator,
         busy_indicator,
     );
@@ -101,7 +119,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
 
 fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
-    let wrap_width = area.width.saturating_sub(2) as usize; // subtract scrollbar
+    let _wrap_width = area.width.saturating_sub(2) as usize; // reserved for future per-line wrap estimation
 
     for msg in &state.messages {
         match &msg.role {
@@ -197,20 +215,25 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 lines.push(Line::from(""));
             }
 
-            MessageRole::ToolResult { is_error } => {
+            MessageRole::ToolResult { is_error, tool_name } => {
                 let (color, status) = if *is_error {
                     (theme.error_fg, "Error")
                 } else {
                     (theme.added_fg, "Done")
                 };
+                let tool_label = if tool_name.is_empty() {
+                    format!("  Result: {status}")
+                } else {
+                    format!("  {} → {status}", tool_name)
+                };
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("  Result: {status}"),
+                        tool_label,
                         Style::default().fg(color).add_modifier(Modifier::BOLD),
                     ),
                 ]));
                 let content_lines: Vec<&str> = msg.content.lines().collect();
-                let max_lines = 20;
+                let max_lines = 50;
                 for text_line in content_lines.iter().take(max_lines) {
                     lines.push(Line::from(Span::styled(
                         format!("    {text_line}"),
@@ -286,20 +309,27 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
         .take(visible_height + extra)
         .collect();
 
+    // Give the paragraph one less column so the scrollbar gets its own column
+    // and never overwrites text characters.
+    let para_area = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+
     let conversation = Paragraph::new(Text::from(visible_lines))
         .block(Block::default().borders(Borders::NONE))
         .wrap(Wrap { trim: false });
 
-    frame.render_widget(conversation, area);
+    frame.render_widget(conversation, para_area);
 
     // Scrollbar: shown whenever content is taller than the viewport.
-    // Content size = total_raw lines; current position = scroll_start (from top).
+    // Rendered in the rightmost column of the full area (not para_area).
     if total_raw > visible_height {
         let content_size = total_raw.saturating_sub(visible_height);
         let mut scrollbar_state = ScrollbarState::new(content_size).position(scroll_start);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("^"))
-            .end_symbol(Some("v"));
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
@@ -701,8 +731,15 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         if state.vim_normal_mode { " [VIM]".to_string() } else { String::new() }
     };
 
+    // Unread indicator: shown when scrolled away from bottom and new messages arrived
+    let unread_indicator = if state.unread_count > 0 && !state.auto_scroll {
+        format!("  ↓{} new", state.unread_count)
+    } else {
+        String::new()
+    };
+
     let status = format!(
-        " ^C Cancel  ^O Model  ^P Provider  ^K Keys  ^B Cost  ^R Theme  ^T Trust[{trust}]  /help Cmds{scroll_info}"
+        " ^C Cancel  ^O Model  ^P Provider  ^K Keys  ^B Cost  ^R Theme  ^T Trust[{trust}]  /help Cmds{scroll_info}{unread_indicator}"
     );
 
     let bar = Paragraph::new(status)

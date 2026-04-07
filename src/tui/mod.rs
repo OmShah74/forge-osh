@@ -42,7 +42,7 @@ pub enum MessageRole {
     User,
     Assistant,
     ToolCall { name: String },
-    ToolResult { is_error: bool },
+    ToolResult { is_error: bool, tool_name: String },
     System,
     /// ASCII-art splash shown once at startup
     Splash,
@@ -149,6 +149,14 @@ pub struct AppState {
     pub model_switch_pending: Option<(String, String)>,
     pub vim_normal_mode: bool,
     pub fast_mode: bool,
+    /// Context window usage 0–100 %
+    pub context_pct: u8,
+    /// Context window size in tokens (set from provider info)
+    pub context_limit: u32,
+    /// Messages added while the user was scrolled away from the bottom
+    pub unread_count: usize,
+    /// Per-tool call count for /stats
+    pub tool_stats: std::collections::HashMap<String, usize>,
 }
 
 impl AppState {
@@ -180,6 +188,10 @@ impl AppState {
             model_switch_pending: None,
             vim_normal_mode: false,
             fast_mode: false,
+            context_pct: 0,
+            context_limit: 128_000,
+            unread_count: 0,
+            tool_stats: std::collections::HashMap::new(),
         }
     }
 
@@ -192,6 +204,7 @@ impl AppState {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
+            self.unread_count = 0;
         }
     }
 
@@ -629,6 +642,30 @@ async fn handle_slash_command(
             ));
         }
 
+        // ── /init — generate a CLAUDE.md for the current project ─────────────
+        "/init" => {
+            cmd_init(state, session).await;
+        }
+
+        // ── /find — search project files for text ─────────────────────────
+        "/find" => {
+            if arg.is_empty() {
+                state.push_system("Usage: /find <text>  — search all project files for matching text");
+            } else {
+                cmd_find(state, session, arg).await;
+            }
+        }
+
+        // ── /config — view or change configuration ────────────────────────
+        "/config" => {
+            cmd_config(state, arg);
+        }
+
+        // ── /stats — detailed session statistics ──────────────────────────
+        "/stats" => {
+            cmd_stats(state, session).await;
+        }
+
         _ => {
             // Unknown command
             state.push_system(format!(
@@ -757,9 +794,10 @@ async fn export_conversation(state: &mut AppState, session: &Arc<Mutex<Session>>
             MessageRole::ToolCall { name } => {
                 lines.push(format!("### ⚙️ Tool: `{}`\n```json\n{}\n```\n", name, msg.content));
             }
-            MessageRole::ToolResult { is_error } => {
+            MessageRole::ToolResult { is_error, tool_name } => {
                 let label = if *is_error { "❌ Error" } else { "✅ Result" };
-                lines.push(format!("### {}\n```\n{}\n```\n", label, msg.content));
+                let name_part = if tool_name.is_empty() { String::new() } else { format!(" ({})", tool_name) };
+                lines.push(format!("### {}{}\n```\n{}\n```\n", label, name_part, msg.content));
             }
             MessageRole::System => {
                 lines.push(format!("*System: {}*\n", msg.content));
@@ -1059,6 +1097,300 @@ fn try_copy_to_clipboard(text: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Tab completion helper
+// ---------------------------------------------------------------------------
+
+/// Complete or list slash commands when the user presses Tab.
+fn tab_complete_slash(state: &mut AppState) {
+    let text = state.input.text.clone();
+    if !text.starts_with('/') || text.contains(' ') {
+        return;
+    }
+    const ALL_COMMANDS: &[&str] = &[
+        "/help", "/clear", "/quit", "/exit", "/cost", "/model", "/provider",
+        "/keys", "/theme", "/trust", "/vim", "/fast", "/compact", "/undo",
+        "/new", "/save", "/session", "/commit", "/diff", "/export",
+        "/status", "/doctor", "/add-dir", "/resume", "/permissions",
+        "/effort", "/copy", "/init", "/find", "/config", "/stats",
+    ];
+    let prefix = text.as_str();
+    let matches: Vec<&str> = ALL_COMMANDS.iter().copied()
+        .filter(|c| c.starts_with(prefix) && c.len() > prefix.len())
+        .collect();
+
+    match matches.len() {
+        0 => {} // no match — do nothing
+        1 => {
+            // Single match: complete with trailing space
+            state.input.text = format!("{} ", matches[0]);
+            state.input.cursor = state.input.text.len();
+        }
+        _ => {
+            // Multiple matches: extend to common prefix, then show options
+            let common = common_prefix(&matches);
+            if common.len() > prefix.len() {
+                state.input.text = common.clone();
+                state.input.cursor = common.len();
+            }
+            state.push_system(format!("Commands: {}", matches.join("  ")));
+        }
+    }
+}
+
+fn common_prefix(strings: &[&str]) -> String {
+    if strings.is_empty() { return String::new(); }
+    let first = strings[0];
+    let mut len = first.len();
+    for s in &strings[1..] {
+        len = len.min(s.len());
+        for (i, (a, b)) in first.chars().zip(s.chars()).enumerate() {
+            if a != b { len = len.min(i); break; }
+        }
+    }
+    first[..len].to_string()
+}
+
+// ---------------------------------------------------------------------------
+// /init — generate CLAUDE.md for the project
+// ---------------------------------------------------------------------------
+
+async fn cmd_init(state: &mut AppState, session: &Arc<Mutex<Session>>) {
+    let working_dir = { let sess = session.lock().await; sess.working_dir.clone() };
+    let root = std::path::Path::new(&working_dir);
+    let out_path = root.join("CLAUDE.md");
+
+    if out_path.exists() {
+        state.push_system(format!(
+            "CLAUDE.md already exists at {}. Delete it first to regenerate.",
+            out_path.display()
+        ));
+        return;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    parts.push("# CLAUDE.md\n\nThis file provides guidance to forge-osh when working with this project.\n".into());
+
+    // Detect project type and build commands
+    let (lang, build_cmds): (&str, &[&str]) =
+        if root.join("Cargo.toml").exists()      { ("Rust",               &["cargo build", "cargo test", "cargo clippy", "cargo fmt"]) }
+        else if root.join("package.json").exists()  { ("JavaScript/TypeScript", &["npm install", "npm run build", "npm test"]) }
+        else if root.join("pyproject.toml").exists() || root.join("setup.py").exists()
+                                                    { ("Python",            &["pip install -e .", "pytest", "ruff check ."]) }
+        else if root.join("go.mod").exists()        { ("Go",               &["go build ./...", "go test ./...", "go vet ./..."]) }
+        else if root.join("pom.xml").exists()       { ("Java/Maven",       &["mvn compile", "mvn test"]) }
+        else if root.join("build.gradle").exists()  { ("Java/Gradle",      &["gradle build", "gradle test"]) }
+        else                                        { ("",                  &[]) };
+
+    // Try to read project name from manifest
+    let project_name = if root.join("Cargo.toml").exists() {
+        std::fs::read_to_string(root.join("Cargo.toml")).ok()
+            .and_then(|s| s.lines().find(|l| l.starts_with("name")).and_then(|l| l.split('"').nth(1)).map(str::to_string))
+    } else if root.join("package.json").exists() {
+        std::fs::read_to_string(root.join("package.json")).ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["name"].as_str().map(str::to_string))
+    } else {
+        None
+    };
+
+    let name_part = project_name.map(|n| format!("{} — ", n)).unwrap_or_default();
+    let lang_part = if lang.is_empty() { "a project".to_string() } else { format!("a {lang} project") };
+    parts.push(format!("## Project Overview\n\n{name_part}{lang_part}.\n\nDescribe what this project does here.\n"));
+
+    if !build_cmds.is_empty() {
+        parts.push(format!("## Build & Development Commands\n\n```bash\n{}\n```\n", build_cmds.join("\n")));
+    }
+
+    parts.push("## Architecture\n\nDescribe the key modules, directories, and how they interact.\n".into());
+    parts.push("## Key Design Decisions\n\nDocument important architectural choices and their rationale.\n".into());
+    parts.push("## Notes for forge-osh\n\nAdd any project-specific instructions here (e.g. test commands, coding style, off-limits files).\n".into());
+
+    let content = parts.join("\n");
+    match std::fs::write(&out_path, &content) {
+        Ok(_) => state.push_system(format!(
+            "Created CLAUDE.md at {}  (detected: {})\nEdit it to add project-specific instructions for the agent.",
+            out_path.display(), if lang.is_empty() { "generic project" } else { lang }
+        )),
+        Err(e) => state.push_system(format!("Failed to create CLAUDE.md: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /find — full-text search across project files
+// ---------------------------------------------------------------------------
+
+async fn cmd_find(state: &mut AppState, session: &Arc<Mutex<Session>>, pattern: &str) {
+    let working_dir = { let sess = session.lock().await; sess.working_dir.clone() };
+    let pattern_lc = pattern.to_lowercase();
+
+    const BINARY_EXTS: &[&str] = &[
+        "png","jpg","jpeg","gif","webp","bmp","ico","tiff","svg",
+        "exe","dll","so","dylib","wasm","pdf","zip","tar","gz",
+        "7z","rar","mp3","mp4","avi","mov","ttf","otf","woff",
+    ];
+
+    let mut results: Vec<String> = Vec::new();
+    let mut file_count = 0usize;
+    let mut match_count = 0usize;
+    const MAX_MATCHES: usize = 60;
+
+    use ignore::WalkBuilder;
+    let walker = WalkBuilder::new(&working_dir).hidden(false).git_ignore(true).build();
+
+    for entry in walker.filter_map(|e| e.ok()) {
+        if match_count >= MAX_MATCHES { break; }
+        let path = entry.path();
+        if !path.is_file() { continue; }
+
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if BINARY_EXTS.contains(&ext.as_str()) { continue; }
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let relative = path.strip_prefix(&working_dir)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string());
+
+        let mut file_hits: Vec<String> = Vec::new();
+        for (i, line) in content.lines().enumerate() {
+            if match_count >= MAX_MATCHES { break; }
+            if line.to_lowercase().contains(&pattern_lc) {
+                let trimmed = line.trim();
+                let preview = if trimmed.len() > 120 { &trimmed[..120] } else { trimmed };
+                file_hits.push(format!("  L{}: {}", i + 1, preview));
+                match_count += 1;
+            }
+        }
+        if !file_hits.is_empty() {
+            file_count += 1;
+            results.push(format!("{}:", relative));
+            results.extend(file_hits);
+        }
+    }
+
+    if results.is_empty() {
+        state.push_system(format!("No matches found for: '{pattern}'"));
+    } else {
+        let mut out = format!(
+            "Found {match_count} match(es) in {file_count} file(s) for '{pattern}':\n{}",
+            results.join("\n")
+        );
+        if match_count >= MAX_MATCHES {
+            out.push_str(&format!("\n... (showing first {MAX_MATCHES} matches — narrow your search)"));
+        }
+        state.push_system(out);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /config — view or change settings inline
+// ---------------------------------------------------------------------------
+
+fn cmd_config(state: &mut AppState, arg: &str) {
+    if arg.is_empty() || arg == "show" {
+        state.push_system(format!(
+            "forge-osh Configuration\n\
+            ├─ theme:        {}\n\
+            ├─ trust_mode:   {}\n\
+            ├─ vim_mode:     {}\n\
+            ├─ fast_mode:    {}\n\
+            ├─ context:      {}% used ({} limit)\n\
+            └─ config file:  {}\n\n\
+            To change: /config set <key> <value>\n\
+            Keys: theme (dark/light/dracula/nord/solarized), trust (on/off)",
+            state.theme_name,
+            if state.trust_mode { "on" } else { "off" },
+            if state.vim_normal_mode { "on" } else { "off" },
+            if state.fast_mode { "on" } else { "off" },
+            state.context_pct,
+            state.context_limit,
+            crate::config::config_dir().join("config.toml").display()
+        ));
+        return;
+    }
+    let parts: Vec<&str> = arg.splitn(3, ' ').collect();
+    match parts.as_slice() {
+        ["set", key, value] => match *key {
+            "theme" => {
+                state.theme = crate::tui::themes::Theme::from_name(value);
+                state.theme_name = value.to_string();
+                state.push_system(format!("Theme set to: {value}"));
+            }
+            "trust" | "trust_mode" => {
+                let on = matches!(*value, "on" | "true" | "1" | "yes");
+                state.trust_mode = on;
+                state.push_system(format!("Trust mode: {}", if on { "ON" } else { "OFF" }));
+            }
+            "vim" | "vim_mode" => {
+                let on = matches!(*value, "on" | "true" | "1" | "yes");
+                state.vim_normal_mode = on;
+                state.push_system(format!("Vim mode: {}", if on { "ON" } else { "OFF" }));
+            }
+            _ => state.push_system(format!(
+                "Unknown config key '{key}'. Settable: theme, trust, vim"
+            )),
+        },
+        _ => state.push_system(
+            "Usage:\n  /config               — show all settings\n\
+            /config set theme <name>    — dark/light/dracula/nord/solarized\n\
+            /config set trust on|off    — toggle trust mode\n\
+            /config set vim on|off      — toggle vim normal mode"
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /stats — detailed session statistics
+// ---------------------------------------------------------------------------
+
+async fn cmd_stats(state: &mut AppState, session: &Arc<Mutex<Session>>) {
+    let (user_msgs, assistant_msgs, tool_calls, total) = {
+        let sess = session.lock().await;
+        let msgs = sess.history.messages();
+        let user   = msgs.iter().filter(|m| matches!(m, crate::types::Message::User(_))).count();
+        let asst   = msgs.iter().filter(|m| matches!(m, crate::types::Message::Assistant(_))).count();
+        let tools  = msgs.iter().filter(|m| matches!(m, crate::types::Message::Tool(_))).count();
+        (user, asst, tools, msgs.len())
+    };
+
+    let rendered_msgs = state.messages.len();
+    let tool_summary = if state.tool_stats.is_empty() {
+        "  (none yet)".to_string()
+    } else {
+        let mut entries: Vec<(&String, &usize)> = state.tool_stats.iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(a.1));
+        entries.iter().take(12)
+            .map(|(name, count)| format!("  {:<25} {}", name, count))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    state.push_system(format!(
+        "Session Statistics\n\
+        ─────────────────────────────────\n\
+        History messages:\n\
+        ├─ User:         {user_msgs}\n\
+        ├─ Assistant:    {assistant_msgs}\n\
+        ├─ Tool results: {tool_calls}\n\
+        └─ Total:        {total}\n\
+        \n\
+        Display messages: {rendered_msgs}\n\
+        Context:          {}% used\n\
+        Tokens:           {}\n\
+        Cost:             {}\n\
+        \n\
+        Tool calls this session:\n\
+        {tool_summary}",
+        state.context_pct,
+        state.format_tokens,
+        state.format_cost,
+    ));
+}
+
 /// LLM-based compact: summarize old messages with the active provider,
 /// then replace them with the summary so the context window is freed.
 async fn compact_history_llm(
@@ -1192,6 +1524,15 @@ pub async fn run_tui(
         }
     }
 
+    // Load persistent input history from previous sessions.
+    {
+        let history_path = config::config_dir().join("input_history.json");
+        let loaded = input::InputState::load_history(&history_path);
+        if !loaded.is_empty() {
+            state.input.history = loaded;
+        }
+    }
+
     // Always show the OSH splash banner first.
     state.messages.push(RenderedMessage {
         role: MessageRole::Splash,
@@ -1287,8 +1628,9 @@ pub async fn run_tui(
                 AgentEvent::ThinkingStart => {
                     state.spinner.start(format!("{} is thinking...", state.model_name));
                     state.streaming_text.clear();
-                    state.scroll_offset = 0;
-                    state.auto_scroll = true;
+                    // Do NOT reset scroll here — the user may have scrolled up to read
+                    // earlier content while the agent is working. Scroll is only reset
+                    // on explicit user Submit (see Action::Submit handler).
                 }
                 AgentEvent::Token(t) => {
                     // Stop the "thinking" spinner on first token so the streaming
@@ -1301,6 +1643,7 @@ pub async fn run_tui(
                     state.spinner.stop();
                     // Commit any streaming text before tool execution
                     if !state.streaming_text.is_empty() {
+                        if !state.auto_scroll { state.unread_count += 1; }
                         state.messages.push(RenderedMessage {
                             role: MessageRole::Assistant,
                             content: std::mem::take(&mut state.streaming_text),
@@ -1310,16 +1653,22 @@ pub async fn run_tui(
                         role: MessageRole::ToolCall { name: name.clone() },
                         content: serde_json::to_string_pretty(&input).unwrap_or_default(),
                     });
+                    // Track tool usage stats
+                    *state.tool_stats.entry(name.clone()).or_insert(0) += 1;
                     state.spinner.start(format!("Running {}...", name));
                 }
-                AgentEvent::ToolEnd { name: _, output, is_error } => {
+                AgentEvent::ToolEnd { name, output, is_error } => {
                     state.spinner.stop();
+                    if !state.auto_scroll { state.unread_count += 1; }
                     state.messages.push(RenderedMessage {
-                        role: MessageRole::ToolResult { is_error },
+                        role: MessageRole::ToolResult { is_error, tool_name: name },
                         content: output,
                     });
                 }
                 AgentEvent::ContextWarning { used, limit } => {
+                    // Update context percentage for the progress bar
+                    state.context_pct = ((used as f64 / limit as f64 * 100.0) as u8).min(100);
+                    state.context_limit = limit;
                     state.messages.push(RenderedMessage {
                         role: MessageRole::System,
                         content: format!(
@@ -1335,6 +1684,7 @@ pub async fn run_tui(
                     state.agent_busy = false;
                     // Commit remaining streaming text
                     if !state.streaming_text.is_empty() {
+                        if !state.auto_scroll { state.unread_count += 1; }
                         state.messages.push(RenderedMessage {
                             role: MessageRole::Assistant,
                             content: std::mem::take(&mut state.streaming_text),
@@ -1343,6 +1693,12 @@ pub async fn run_tui(
                     let sess = session.lock().await;
                     state.format_cost = sess.format_cost();
                     state.format_tokens = sess.format_tokens();
+                    // Update context bar from actual token usage
+                    if state.context_limit > 0 {
+                        let used = sess.cost_tracker.total_input_tokens
+                            + sess.cost_tracker.total_output_tokens;
+                        state.context_pct = ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100);
+                    }
                 }
                 AgentEvent::Error(e) => {
                     state.spinner.stop();
@@ -1556,6 +1912,9 @@ pub async fn run_tui(
                             Action::HistoryUp => state.input.history_up(),
                             Action::HistoryDown => state.input.history_down(),
                             Action::NewLine => state.input.insert_char('\n'),
+                            Action::TabComplete => {
+                                tab_complete_slash(&mut state);
+                            }
 
                             // ---- Scrolling ----
                             Action::ScrollUp => state.scroll_up(3),
@@ -1569,6 +1928,7 @@ pub async fn run_tui(
                             Action::ScrollBottom => {
                                 state.scroll_offset = 0;
                                 state.auto_scroll = true;
+                                state.unread_count = 0;
                             }
 
                             // ---- Global ----
@@ -1729,6 +2089,12 @@ pub async fn run_tui(
         let _ = sess.save();
     }
 
+    // Persist input history for next session.
+    {
+        let history_path = config::config_dir().join("input_history.json");
+        state.input.save_history(&history_path);
+    }
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -1778,7 +2144,7 @@ fn restore_history_to_display(state: &mut AppState, session: &Session) {
             }
             Message::Tool(result) => {
                 state.messages.push(RenderedMessage {
-                    role: MessageRole::ToolResult { is_error: result.is_error },
+                    role: MessageRole::ToolResult { is_error: result.is_error, tool_name: String::new() },
                     content: result.content.clone(),
                 });
             }
