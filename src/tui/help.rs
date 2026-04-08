@@ -45,6 +45,12 @@ AGENT BEHAVIOUR
   /effort <1-5>      Set response effort level (1=minimal, 5=maximum)
   /copy              Copy last assistant response to clipboard
 
+  /forge-graph       Build semantic code graph for current project (enables graph_query tool)
+  /forge-graph status     Show graph info (nodes, edges, age)
+  /forge-graph rebuild    Force full graph rebuild
+  /forge-graph query <n>  Search graph for symbol by name
+  /forge-graph clear      Remove artifact and unload graph
+
   /quit or /exit     Exit forge-osh
 
 KEYBOARD SHORTCUTS

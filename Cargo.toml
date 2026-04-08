@@ -80,6 +80,11 @@ rand = "0.8"
 indicatif = "0.17"
 console = "0.15"
 
+# Semantic graph (forge-graph)
+petgraph = { version = "0.6", features = ["serde-1"] }
+rayon = "1"
+bincode = "1"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
