@@ -83,6 +83,8 @@ pub enum Modal {
         provider_id: String,
         input_buffer: String,
     },
+    /// Session browser — list, load, delete past sessions
+    SessionBrowser(SessionBrowserState),
 }
 
 /// State for the API key manager modal
@@ -120,14 +122,42 @@ impl KeyManagerState {
     }
 }
 
+/// State for the session browser modal
+#[derive(Debug)]
+pub struct SessionBrowserState {
+    pub sessions: Vec<crate::session::checkpoint::SessionSummary>,
+    pub selected: usize,
+    /// When `Some(id)`, user pressed `d` and we show a confirmation prompt
+    pub confirm_delete: Option<String>,
+}
+
+impl SessionBrowserState {
+    pub fn new(sessions: Vec<crate::session::checkpoint::SessionSummary>) -> Self {
+        Self { sessions, selected: 0, confirm_delete: None }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 { self.selected -= 1; }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.sessions.len() { self.selected += 1; }
+    }
+
+    pub fn selected_id(&self) -> Option<&str> {
+        self.sessions.get(self.selected).map(|s| s.id.as_str())
+    }
+}
+
 /// Main application state for the TUI
 pub struct AppState {
     pub messages: Vec<RenderedMessage>,
     pub input: InputState,
     pub modal: Option<Modal>,
     pub spinner: SpinnerState,
-    /// Lines scrolled up FROM the bottom. 0 = at bottom.
-    pub scroll_offset: usize,
+    /// Absolute index of the first visible line (from top). Anchored when
+    /// auto_scroll is false so new content below never moves the viewport.
+    pub scroll_top: usize,
     pub auto_scroll: bool,
     pub total_lines: usize,
     pub visible_height: usize,
@@ -149,6 +179,10 @@ pub struct AppState {
     pub model_switch_pending: Option<(String, String)>,
     pub vim_normal_mode: bool,
     pub fast_mode: bool,
+    /// Pending session load (set by session browser, executed in main loop)
+    pub session_load_pending: Option<String>,
+    /// Pending session delete (set by session browser, executed in main loop)
+    pub session_delete_pending: Option<String>,
     /// Context window usage 0–100 %
     pub context_pct: u8,
     /// Context window size in tokens (set from provider info)
@@ -166,7 +200,7 @@ impl AppState {
             input: InputState::new(),
             modal: None,
             spinner: SpinnerState::new(),
-            scroll_offset: 0,
+            scroll_top: 0,
             auto_scroll: true,
             total_lines: 0,
             visible_height: 0,
@@ -188,6 +222,8 @@ impl AppState {
             model_switch_pending: None,
             vim_normal_mode: false,
             fast_mode: false,
+            session_load_pending: None,
+            session_delete_pending: None,
             context_pct: 0,
             context_limit: 128_000,
             unread_count: 0,
@@ -196,13 +232,21 @@ impl AppState {
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(n);
+        if self.auto_scroll {
+            // First scroll up from bottom: anchor starting at current bottom.
+            self.scroll_top = self.max_scroll().saturating_sub(n);
+        } else {
+            self.scroll_top = self.scroll_top.saturating_sub(n);
+        }
         self.auto_scroll = false;
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(n);
-        if self.scroll_offset == 0 {
+        if self.auto_scroll {
+            return; // already at bottom, nothing to do
+        }
+        self.scroll_top = self.scroll_top.saturating_add(n);
+        if self.scroll_top >= self.max_scroll() {
             self.auto_scroll = true;
             self.unread_count = 0;
         }
@@ -213,9 +257,13 @@ impl AppState {
     }
 
     pub fn effective_scroll(&self) -> usize {
-        // scroll_offset is "lines from bottom". 0 = at bottom.
-        // effective offset from top = max_scroll - scroll_offset (clamped to 0)
-        self.max_scroll().saturating_sub(self.scroll_offset)
+        if self.auto_scroll {
+            // Always show the bottom (follows new content automatically).
+            self.max_scroll()
+        } else {
+            // Anchored absolute position — clamp in case content shrank.
+            self.scroll_top.min(self.max_scroll())
+        }
     }
 
     /// Push a system message
@@ -260,7 +308,7 @@ async fn handle_slash_command(
         "/clear" | "/cls" => {
             state.messages.clear();
             state.streaming_text.clear();
-            state.scroll_offset = 0;
+            state.scroll_top = 0;
             state.auto_scroll = true;
             state.push_system("Conversation display cleared. History is still in memory.");
         }
@@ -451,6 +499,20 @@ async fn handle_slash_command(
                 state.format_tokens,
                 state.format_cost,
             ));
+        }
+
+        "/sessions" | "/history" => {
+            match crate::session::checkpoint::Checkpoint::list() {
+                Ok(sessions) if sessions.is_empty() => {
+                    state.push_system("No saved sessions found. Use /save to save the current session.");
+                }
+                Ok(sessions) => {
+                    state.modal = Some(Modal::SessionBrowser(SessionBrowserState::new(sessions)));
+                }
+                Err(e) => {
+                    state.push_system(format!("Failed to list sessions: {e}"));
+                }
+            }
         }
 
         // ── /commit — AI-generated commit message ──────────────────────────
@@ -1110,7 +1172,7 @@ fn tab_complete_slash(state: &mut AppState) {
     const ALL_COMMANDS: &[&str] = &[
         "/help", "/clear", "/quit", "/exit", "/cost", "/model", "/provider",
         "/keys", "/theme", "/trust", "/vim", "/fast", "/compact", "/undo",
-        "/new", "/save", "/session", "/commit", "/diff", "/export",
+        "/new", "/save", "/session", "/sessions", "/history", "/commit", "/diff", "/export",
         "/status", "/doctor", "/add-dir", "/resume", "/permissions",
         "/effort", "/copy", "/init", "/find", "/config", "/stats",
     ];
@@ -1770,6 +1832,77 @@ pub async fn run_tui(
             }
         }
 
+        // ---- Process pending session delete ----
+        if let Some(id) = state.session_delete_pending.take() {
+            match crate::session::checkpoint::Checkpoint::delete(&id) {
+                Ok(_) => state.push_system(format!("Session {} deleted.", &id[..8.min(id.len())])),
+                Err(e) => state.push_system(format!("Failed to delete session: {e}")),
+            }
+        }
+
+        // ---- Process pending session load ----
+        if let Some(id) = state.session_load_pending.take() {
+            match crate::session::checkpoint::Checkpoint::load(&id) {
+                Ok(mut new_session) => {
+                    // Keep current working dir so tools stay in context
+                    let current_wd = {
+                        let sess = session.lock().await;
+                        sess.working_dir.clone()
+                    };
+                    new_session.working_dir = current_wd;
+
+                    let sess_name = new_session.name.clone();
+                    let sess_provider = new_session.provider_id.clone();
+                    let sess_model = new_session.model_id.clone();
+
+                    // Replace session contents
+                    {
+                        let mut sess = session.lock().await;
+                        *sess = new_session;
+                    }
+
+                    // Rebuild TUI display from loaded history
+                    state.messages.retain(|m| matches!(m.role, MessageRole::Splash));
+                    state.streaming_text.clear();
+                    state.scroll_top = 0;
+                    state.auto_scroll = true;
+                    state.unread_count = 0;
+                    state.tool_stats.clear();
+                    state.context_pct = 0;
+                    state.format_tokens = "0 tokens".to_string();
+                    state.format_cost = "$0.00".to_string();
+                    state.session_name = sess_name.clone();
+                    state.provider_id = sess_provider.clone();
+                    state.model_id = sess_model.clone();
+                    // Update display names
+                    {
+                        let router = provider_router.read().await;
+                        for (id, name) in router.available_providers() {
+                            if id == sess_provider {
+                                state.provider_name = name.to_string();
+                                break;
+                            }
+                        }
+                        for m in &crate::config::models::models_for_provider(&sess_provider) {
+                            if m.id == sess_model {
+                                state.model_name = m.name.clone();
+                                break;
+                            }
+                        }
+                        if state.model_name.is_empty() {
+                            state.model_name = sess_model.clone();
+                        }
+                    }
+                    {
+                        let sess = session.lock().await;
+                        restore_history_to_display(&mut state, &sess);
+                    }
+                    state.push_system(format!("Loaded session: {sess_name}"));
+                }
+                Err(e) => state.push_system(format!("Failed to load session: {e}")),
+            }
+        }
+
         // ---- Process pending model/provider switch ----
         if let Some((pid, mid)) = state.model_switch_pending.take() {
             let mut router = provider_router.write().await;
@@ -1833,11 +1966,10 @@ pub async fn run_tui(
                                     state.scroll_up(h);
                                 }
                                 (KeyModifiers::NONE, KeyCode::Char('G')) => {
-                                    state.scroll_offset = 0;
                                     state.auto_scroll = true;
                                 }
                                 (KeyModifiers::NONE, KeyCode::Char('g')) => {
-                                    state.scroll_offset = usize::MAX / 2;
+                                    state.scroll_top = 0;
                                     state.auto_scroll = false;
                                 }
                                 (KeyModifiers::NONE, KeyCode::Char('i'))
@@ -1888,7 +2020,7 @@ pub async fn run_tui(
                                             content: text.clone(),
                                         });
                                         state.agent_busy = true;
-                                        state.scroll_offset = 0;
+                                        state.scroll_top = 0;
                                         state.auto_scroll = true;
 
                                         let loop_clone = agent_loop.clone();
@@ -1922,11 +2054,10 @@ pub async fn run_tui(
                             Action::PageUp => state.scroll_up(10),
                             Action::PageDown => state.scroll_down(10),
                             Action::ScrollTop => {
-                                state.scroll_offset = usize::MAX / 2;
+                                state.scroll_top = 0;
                                 state.auto_scroll = false;
                             }
                             Action::ScrollBottom => {
-                                state.scroll_offset = 0;
                                 state.auto_scroll = true;
                                 state.unread_count = 0;
                             }
@@ -1953,7 +2084,8 @@ pub async fn run_tui(
                             Action::ClearScreen => {
                                 state.messages.clear();
                                 state.streaming_text.clear();
-                                state.scroll_offset = 0;
+                                state.scroll_top = 0;
+                                state.auto_scroll = true;
                                 state.push_system("Screen cleared.");
                             }
 
@@ -2390,6 +2522,51 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
             } else {
                 state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
+            }
+        }
+
+        Some(Modal::SessionBrowser(mut browser)) => {
+            let is_enter = key.code == KeyCode::Enter
+                || (key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL));
+
+            if let Some(ref _confirm_id) = browser.confirm_delete {
+                // Waiting for second `d` or Esc to confirm/cancel delete
+                if key.code == KeyCode::Char('d') {
+                    let id = browser.confirm_delete.take().unwrap();
+                    browser.sessions.retain(|s| s.id != id);
+                    if browser.selected >= browser.sessions.len() && !browser.sessions.is_empty() {
+                        browser.selected = browser.sessions.len() - 1;
+                    }
+                    state.session_delete_pending = Some(id);
+                    if browser.sessions.is_empty() {
+                        // No sessions left — close
+                    } else {
+                        state.modal = Some(Modal::SessionBrowser(browser));
+                    }
+                } else {
+                    browser.confirm_delete = None;
+                    state.modal = Some(Modal::SessionBrowser(browser));
+                }
+            } else if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+                // Close
+            } else if key.code == KeyCode::Up {
+                browser.move_up();
+                state.modal = Some(Modal::SessionBrowser(browser));
+            } else if key.code == KeyCode::Down {
+                browser.move_down();
+                state.modal = Some(Modal::SessionBrowser(browser));
+            } else if is_enter {
+                if let Some(id) = browser.selected_id() {
+                    state.session_load_pending = Some(id.to_string());
+                }
+                // Close modal — session loads in main loop
+            } else if key.code == KeyCode::Char('d') || key.code == KeyCode::Delete {
+                if let Some(id) = browser.selected_id() {
+                    browser.confirm_delete = Some(id.to_string());
+                }
+                state.modal = Some(Modal::SessionBrowser(browser));
+            } else {
+                state.modal = Some(Modal::SessionBrowser(browser));
             }
         }
 
