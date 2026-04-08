@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use crate::agent::{AgentEvent, AgentLoop, PermissionRequest};
 use crate::config::{self, Config};
 use crate::config::keyring::KeyStore;
+use crate::graph::{CodeGraph, GraphBuildMsg, SharedGraph};
 use crate::provider::router::ProviderRouter;
 use crate::session::Session;
 use crate::tools::ToolRegistry;
@@ -191,10 +192,16 @@ pub struct AppState {
     pub unread_count: usize,
     /// Per-tool call count for /stats
     pub tool_stats: std::collections::HashMap<String, usize>,
+
+    // ── forge-graph ────────────────────────────────────────────────────────
+    /// Shared semantic code graph (shared with AgentLoop and GraphQueryTool)
+    pub shared_graph: SharedGraph,
+    /// Progress messages received from the background graph build thread
+    pub graph_build_rx: Option<std::sync::mpsc::Receiver<GraphBuildMsg>>,
 }
 
 impl AppState {
-    pub fn new(config: &Config, session: &Session) -> Self {
+    pub fn new(config: &Config, session: &Session, shared_graph: SharedGraph) -> Self {
         Self {
             messages: Vec::new(),
             input: InputState::new(),
@@ -228,6 +235,8 @@ impl AppState {
             context_limit: 128_000,
             unread_count: 0,
             tool_stats: std::collections::HashMap::new(),
+            shared_graph,
+            graph_build_rx: None,
         }
     }
 
@@ -290,6 +299,11 @@ async fn handle_slash_command(
     key_store: &Arc<Mutex<KeyStore>>,
     _config: &Arc<Config>,
 ) -> bool {
+    // Delegate /forge-graph before reaching the big match
+    if text.trim_start().starts_with("/forge-graph") {
+        cmd_forge_graph(state, session, text.trim()).await;
+        return true;
+    }
     // Split into command name and optional argument
     let (cmd, arg) = {
         let t = text.trim();
@@ -1175,6 +1189,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/new", "/save", "/session", "/sessions", "/history", "/commit", "/diff", "/export",
         "/status", "/doctor", "/add-dir", "/resume", "/permissions",
         "/effort", "/copy", "/init", "/find", "/config", "/stats",
+        "/forge-graph",
     ];
     let prefix = text.as_str();
     let matches: Vec<&str> = ALL_COMMANDS.iter().copied()
@@ -1453,6 +1468,169 @@ async fn cmd_stats(state: &mut AppState, session: &Arc<Mutex<Session>>) {
     ));
 }
 
+// ---------------------------------------------------------------------------
+// /forge-graph — build or query the semantic context graph
+// ---------------------------------------------------------------------------
+
+async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, text: &str) {
+    // Parse subcommand: /forge-graph [status|query <name>|rebuild|clear]
+    let arg = text.trim_start_matches("/forge-graph").trim();
+
+    match arg {
+        // ── status ───────────────────────────────────────────────────────────
+        "status" | "info" => {
+            let msg = {
+                let guard = state.shared_graph.read().unwrap();
+                match guard.as_ref() {
+                    None => "No forge-graph loaded.\nRun /forge-graph to build one for this project.".to_string(),
+                    Some(g) => format!(
+                        "forge-graph status\n\
+                        ├─ Root:    {}\n\
+                        ├─ Built:   {}\n\
+                        ├─ Nodes:   {}\n\
+                        ├─ Edges:   {}\n\
+                        └─ Files:   {}",
+                        g.meta.root_path,
+                        g.meta.age_description(),
+                        g.meta.total_nodes,
+                        g.meta.total_edges,
+                        g.meta.file_count,
+                    ),
+                }
+            };
+            state.push_system(msg);
+        }
+
+        // ── clear ─────────────────────────────────────────────────────────────
+        "clear" => {
+            let working_dir = { let s = session.lock().await; s.working_dir.clone() };
+            let root = std::path::PathBuf::from(&working_dir);
+            let exe_dir = CodeGraph::artifact_dir();
+            let artifact = CodeGraph::artifact_path(&root, &exe_dir);
+            if artifact.exists() {
+                match std::fs::remove_file(&artifact) {
+                    Ok(_) => state.push_system(format!("Removed artifact: {}", artifact.display())),
+                    Err(e) => state.push_system(format!("Failed to remove artifact: {e}")),
+                }
+            }
+            if let Ok(mut g) = state.shared_graph.write() {
+                *g = None;
+            }
+            state.push_system("forge-graph cleared. Run /forge-graph to rebuild.");
+        }
+
+        // ── query <name> ──────────────────────────────────────────────────────
+        s if s.starts_with("query ") => {
+            let name = s.trim_start_matches("query ").trim().to_string();
+            let msg = {
+                let guard = state.shared_graph.read().unwrap();
+                match guard.as_ref() {
+                    None => "No graph loaded. Run /forge-graph first.".to_string(),
+                    Some(g) => {
+                        use crate::graph::query::GraphQuery;
+                        let q = GraphQuery::new(g);
+                        let results = q.fuzzy_search(&name, 15);
+                        q.format_search(&results)
+                    }
+                }
+            };
+            state.push_system(msg);
+        }
+
+        // ── build (default: "" or "rebuild") ─────────────────────────────────
+        "" | "rebuild" => {
+            if state.graph_build_rx.is_some() {
+                state.push_system("Graph build already in progress. Please wait.");
+                return;
+            }
+
+            let working_dir = { let s = session.lock().await; s.working_dir.clone() };
+            let root = std::path::PathBuf::from(&working_dir);
+            let exe_dir = CodeGraph::artifact_dir();
+            let artifact = CodeGraph::artifact_path(&root, &exe_dir);
+
+            // If existing artifact and not "rebuild", load it
+            if arg.is_empty() {
+                let guard = state.shared_graph.read().unwrap();
+                if guard.is_some() {
+                    drop(guard);
+                    state.push_system(
+                        "forge-graph is already loaded. Use /forge-graph rebuild to force a full rebuild, \
+                        or /forge-graph status to see details."
+                    );
+                    return;
+                }
+            }
+
+            state.push_system(format!(
+                "Building forge-graph for: {}\nArtifact: {}\nThis may take 10–120 seconds for large codebases...",
+                root.display(), artifact.display()
+            ));
+
+            let (tx, rx) = std::sync::mpsc::channel::<GraphBuildMsg>();
+            let shared_graph = state.shared_graph.clone();
+
+            std::thread::spawn(move || {
+                use crate::graph::builder::GraphBuilder;
+                match GraphBuilder::build(&root, &tx) {
+                    Ok(graph) => {
+                        // Finalize and save artifact
+                        let save_result = graph.save(&artifact);
+                        let msg = match save_result {
+                            Ok(_) => format!(
+                                "forge-graph complete!\n\
+                                Nodes: {}  Edges: {}  Files: {}\n\
+                                Artifact: {}",
+                                graph.meta.total_nodes, graph.meta.total_edges,
+                                graph.meta.file_count, artifact.display()
+                            ),
+                            Err(e) => format!(
+                                "forge-graph built in memory ({} nodes, {} edges) but save failed: {e}\n\
+                                Graph is available for this session only.",
+                                graph.meta.total_nodes, graph.meta.total_edges
+                            ),
+                        };
+                        // Update shared graph
+                        if let Ok(mut g) = shared_graph.write() {
+                            *g = Some(graph);
+                        }
+                        let _ = tx.send(GraphBuildMsg::Done {
+                            graph: CodeGraph::new(crate::graph::GraphMeta {
+                                version: crate::graph::GRAPH_VERSION,
+                                root_path: String::new(),
+                                built_at: 0,
+                                total_nodes: 0,
+                                total_edges: 0,
+                                file_count: 0,
+                            }),
+                            artifact_path: artifact,
+                        });
+                        // Use a progress message as the done signal (Done graph is dummy)
+                        let _ = tx.send(GraphBuildMsg::Progress(format!("DONE:{msg}")));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(GraphBuildMsg::Error(e.to_string()));
+                    }
+                }
+            });
+
+            state.graph_build_rx = Some(rx);
+        }
+
+        _ => {
+            state.push_system(format!(
+                "Unknown /forge-graph subcommand: '{arg}'\n\
+                Usage:\n\
+                  /forge-graph           — build graph for current project\n\
+                  /forge-graph rebuild   — force full rebuild\n\
+                  /forge-graph status    — show graph info\n\
+                  /forge-graph query <name> — search graph for a symbol\n\
+                  /forge-graph clear     — remove artifact and unload"
+            ));
+        }
+    }
+}
+
 /// LLM-based compact: summarize old messages with the active provider,
 /// then replace them with the summary so the context window is freed.
 async fn compact_history_llm(
@@ -1539,6 +1717,7 @@ pub async fn run_tui(
     tools: Arc<ToolRegistry>,
     session: Arc<Mutex<Session>>,
     key_store: Arc<Mutex<KeyStore>>,
+    shared_graph: SharedGraph,
 ) -> anyhow::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
@@ -1555,7 +1734,7 @@ pub async fn run_tui(
     // Build initial app state
     let mut state = {
         let sess = session.lock().await;
-        AppState::new(&config, &sess)
+        AppState::new(&config, &sess, shared_graph.clone())
     };
 
     // Resolve proper display names from provider router and model catalog
@@ -1663,6 +1842,7 @@ pub async fn run_tui(
         event_tx: agent_event_tx.clone(),
         permission_tx: perm_req_tx,
         permission_rx: Arc::new(Mutex::new(perm_resp_rx)),
+        graph: shared_graph.clone(),
     });
 
     // -----------------------------------------------------------------------
@@ -1777,6 +1957,38 @@ pub async fn run_tui(
                     });
                 }
             }
+        }
+
+        // ---- Drain graph build progress messages ----
+        if state.graph_build_rx.is_some() {
+            let mut done = false;
+            // Collect messages without holding borrow on state.graph_build_rx
+            let msgs: Vec<GraphBuildMsg> = {
+                let rx = state.graph_build_rx.as_ref().unwrap();
+                let mut collected = Vec::new();
+                while let Ok(m) = rx.try_recv() {
+                    collected.push(m);
+                }
+                collected
+            };
+            for msg in msgs {
+                match msg {
+                    GraphBuildMsg::Progress(s) => {
+                        if let Some(rest) = s.strip_prefix("DONE:") {
+                            state.push_system(rest.to_string());
+                            done = true;
+                        } else {
+                            state.push_system(format!("[forge-graph] {s}"));
+                        }
+                    }
+                    GraphBuildMsg::Done { .. } => { done = true; }
+                    GraphBuildMsg::Error(e) => {
+                        state.push_system(format!("forge-graph error: {e}"));
+                        done = true;
+                    }
+                }
+            }
+            if done { state.graph_build_rx = None; }
         }
 
         // ---- Drain permission requests ----

@@ -3,6 +3,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::config::Config;
 use crate::error::{ForgeError, Result};
+use crate::graph::SharedGraph;
 use crate::provider::router::ProviderRouter;
 use crate::session::Session;
 use crate::tools::executor::ToolExecutor;
@@ -35,6 +36,8 @@ pub struct AgentLoop {
     pub event_tx: mpsc::UnboundedSender<AgentEvent>,
     pub permission_tx: mpsc::UnboundedSender<PermissionRequest>,
     pub permission_rx: Arc<Mutex<mpsc::UnboundedReceiver<PermissionResponse>>>,
+    /// Shared semantic code graph (None when /forge-graph has not been built yet)
+    pub graph: SharedGraph,
 }
 
 #[derive(Debug)]
@@ -233,9 +236,20 @@ impl AgentLoop {
                 let router = self.provider_router.read().await;
                 let provider = router.active()?;
 
+                // Build graph info string (brief lock, released before await)
+                let graph_info = self.graph.read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|cg| format!(
+                        "{} nodes, {} edges, {} files — built {}. \
+                        Use graph_query tool for O(1) symbol lookup before reading files.",
+                        cg.meta.total_nodes, cg.meta.total_edges,
+                        cg.meta.file_count, cg.meta.age_description()
+                    )));
+
                 let system = system_prompt::build_system_prompt(
                     &std::path::PathBuf::from(&session.working_dir),
                     &self.config.general.system_prompt_extra,
+                    graph_info.as_deref(),
                 );
 
                 let tools = if provider.supports_tools() {

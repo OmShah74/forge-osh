@@ -3,6 +3,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod graph;
 pub mod provider;
 pub mod session;
 pub mod tools;

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
-/// Build the system prompt dynamically based on environment
-pub fn build_system_prompt(working_dir: &Path, extra: &str) -> String {
+/// Build the system prompt dynamically based on environment.
+///
+/// `graph_info` is a brief description of the loaded forge-graph (None if not built).
+pub fn build_system_prompt(working_dir: &Path, extra: &str, graph_info: Option<&str>) -> String {
     let os_name = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let shell_name = if cfg!(target_os = "windows") {
@@ -116,6 +118,23 @@ You operate in an autonomous agentic loop:
 - Errors: explain root cause → propose fix → ask to proceed if uncertain
 - Completion: brief summary of changes made, files modified, tests run"#
     );
+
+    if let Some(info) = graph_info {
+        prompt.push_str(&format!(
+            "\n\n## Semantic Code Graph (forge-graph)\n\
+            A pre-built semantic code graph is available for this codebase: {info}\n\
+            \n\
+            **Use `graph_query` BEFORE reading files for any symbol lookup:**\n\
+            - `graph_query({{\"operation\": \"find\", \"target\": \"MyStruct\"}})` — find any symbol by name\n\
+            - `graph_query({{\"operation\": \"context_pack\", \"target\": \"src/mod.rs::Type::method\"}})` — get full context with deps\n\
+            - `graph_query({{\"operation\": \"blast_radius\", \"target\": \"fqdn\"}})` — what breaks if you change this\n\
+            - `graph_query({{\"operation\": \"file_graph\", \"target\": \"src/file.rs\"}})` — all symbols in a file\n\
+            - `graph_query({{\"operation\": \"mutations\", \"target\": \"var_name\"}})` — all mutation points\n\
+            - `graph_query({{\"operation\": \"stats\"}})` — graph statistics\n\
+            \n\
+            This avoids burning tokens on file searches — the graph gives deterministic O(1) results."
+        ));
+    }
 
     if !memory_content.is_empty() {
         prompt.push_str("\n\n## Memory (from CLAUDE.md files)\n");
@@ -352,15 +371,22 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt() {
-        let prompt = build_system_prompt(Path::new("."), "");
+        let prompt = build_system_prompt(Path::new("."), "", None);
         assert!(prompt.contains("forge"));
         assert!(prompt.contains("Working Directory"));
     }
 
     #[test]
     fn test_build_with_extra() {
-        let prompt = build_system_prompt(Path::new("."), "Always write tests");
+        let prompt = build_system_prompt(Path::new("."), "Always write tests", None);
         assert!(prompt.contains("Always write tests"));
+    }
+
+    #[test]
+    fn test_build_with_graph() {
+        let prompt = build_system_prompt(Path::new("."), "", Some("100 nodes, 200 edges"));
+        assert!(prompt.contains("forge-graph"));
+        assert!(prompt.contains("100 nodes"));
     }
 
     #[test]

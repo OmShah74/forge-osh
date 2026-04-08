@@ -3,6 +3,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::cli::*;
 use crate::config::{self, keyring::KeyStore, Config};
+use crate::graph::{new_shared_graph, SharedGraph};
 use crate::provider::router::ProviderRouter;
 use crate::session::{checkpoint::Checkpoint, Session};
 use crate::tools::ToolRegistry;
@@ -13,6 +14,8 @@ pub struct App {
     pub tools: Arc<ToolRegistry>,
     pub session: Arc<Mutex<Session>>,
     pub key_store: KeyStore,
+    /// Shared semantic code graph (None until /forge-graph has been built)
+    pub shared_graph: SharedGraph,
 }
 
 impl App {
@@ -36,6 +39,9 @@ impl App {
         }
 
         let config = Arc::new(config);
+
+        // Initialize shared graph (loaded from artifact if it exists)
+        let shared_graph = new_shared_graph();
 
         // Initialize key store
         let key_store = KeyStore::new(&config::config_dir());
@@ -63,11 +69,15 @@ impl App {
 
         let provider_router = Arc::new(RwLock::new(router));
 
-        // Initialize tools
+        // Initialize tools (always register graph_query — it self-disables when no graph)
         let tools = Arc::new(if cli.no_tools {
             ToolRegistry::new()
         } else {
-            ToolRegistry::with_builtins()
+            let mut registry = ToolRegistry::with_builtins();
+            registry.register(Box::new(
+                crate::graph::tools::GraphQueryTool::new(shared_graph.clone())
+            ));
+            registry
         });
 
         // Initialize session
@@ -103,12 +113,24 @@ impl App {
 
         let session = Arc::new(Mutex::new(session));
 
+        // Try to load graph artifact for the working directory
+        {
+            let root = std::path::PathBuf::from(&working_dir);
+            if let Some(loaded) = crate::graph::CodeGraph::try_load(&root) {
+                if let Ok(mut g) = shared_graph.write() {
+                    *g = Some(loaded);
+                    tracing::info!("forge-graph loaded from artifact");
+                }
+            }
+        }
+
         Ok(Self {
             config,
             provider_router,
             tools,
             session,
             key_store,
+            shared_graph,
         })
     }
 
@@ -120,6 +142,7 @@ impl App {
             self.tools.clone(),
             self.session.clone(),
             Arc::new(Mutex::new(self.key_store.clone())),
+            self.shared_graph.clone(),
         )
         .await
     }
@@ -142,6 +165,7 @@ impl App {
             event_tx,
             permission_tx: perm_tx,
             permission_rx: Arc::new(Mutex::new(perm_resp_rx)),
+            graph: self.shared_graph.clone(),
         };
 
         // Spawn agent
