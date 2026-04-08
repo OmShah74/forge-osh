@@ -20,6 +20,7 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /new               Start a fresh conversation (clears history and display)
   /save              Save session to disk
   /session           Show session info
+  /sessions          Open session browser (load / delete past sessions)
   /init              Generate CLAUDE.md project instructions file
   /find <pattern>    Search files (gitignore-aware glob, e.g. /find *.rs)
   /config [key val]  View or set config (theme/trust/vim). E.g. /config theme dark

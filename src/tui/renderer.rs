@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::themes::Theme;
-use super::{AppState, KeyManagerState, Modal, MessageRole, OSH_SPLASH_LINES};
+use super::{AppState, KeyManagerState, Modal, MessageRole, OSH_SPLASH_LINES, SessionBrowserState};
 
 /// Render the entire TUI
 pub fn render(frame: &mut Frame, state: &mut AppState) {
@@ -65,6 +65,9 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             }
             Modal::CustomModelInput { provider_id, input_buffer } => {
                 render_custom_model_input(frame, provider_id, input_buffer, &theme);
+            }
+            Modal::SessionBrowser(browser) => {
+                render_session_browser(frame, browser, &theme);
             }
         }
     }
@@ -232,12 +235,33 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                         Style::default().fg(color).add_modifier(Modifier::BOLD),
                     ),
                 ]));
+
                 let content_lines: Vec<&str> = msg.content.lines().collect();
+
+                // Detect diff content: any line starts with + or - (but not +++ or ---)
+                let is_diff = content_lines.iter().any(|l| {
+                    (l.starts_with('+') && !l.starts_with("+++"))
+                        || (l.starts_with('-') && !l.starts_with("---"))
+                });
+
                 let max_lines = 50;
                 for text_line in content_lines.iter().take(max_lines) {
+                    let line_color = if is_diff {
+                        if text_line.starts_with('+') && !text_line.starts_with("+++") {
+                            theme.added_fg   // green — addition
+                        } else if text_line.starts_with('-') && !text_line.starts_with("---") {
+                            theme.error_fg   // red — removal
+                        } else if text_line.starts_with("@@") {
+                            theme.tool_name_fg  // cyan — hunk header
+                        } else {
+                            theme.muted_fg   // context / file header lines
+                        }
+                    } else {
+                        theme.muted_fg
+                    };
                     lines.push(Line::from(Span::styled(
                         format!("    {text_line}"),
-                        Style::default().fg(theme.muted_fg),
+                        Style::default().fg(line_color),
                     )));
                 }
                 if content_lines.len() > max_lines {
@@ -959,6 +983,102 @@ fn render_custom_model_input(frame: &mut Frame, provider_id: &str, input_buffer:
         .wrap(Wrap { trim: false });
 
     frame.render_widget(dialog, area);
+}
+
+// ---------------------------------------------------------------------------
+// Session browser modal
+// ---------------------------------------------------------------------------
+
+fn render_session_browser(frame: &mut Frame, browser: &SessionBrowserState, theme: &Theme) {
+    use ratatui::layout::Rect;
+
+    let area = centered_rect(80, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    // Title / hint changes when confirming a delete
+    let title = if browser.confirm_delete.is_some() {
+        " Sessions  Press D again to confirm delete, any other key to cancel "
+    } else {
+        " Sessions  ↑↓ navigate   Enter load   D delete   Esc close "
+    };
+
+    if browser.sessions.is_empty() {
+        let text = "No saved sessions found.\n\nUse /save to save the current session.";
+        let p = Paragraph::new(text)
+            .style(Style::default().fg(theme.muted_fg))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border_fg))
+                    .title(title),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(p, area);
+        return;
+    }
+
+    // Build list items
+    let items: Vec<ListItem> = browser
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let is_deleting = browser.confirm_delete.as_deref() == Some(s.id.as_str());
+            let style = if i == browser.selected {
+                Style::default()
+                    .fg(theme.fg)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+
+            // Truncate updated_at to date portion only
+            let date = s.updated_at.get(..10).unwrap_or(&s.updated_at);
+
+            let delete_mark = if is_deleting { " ← DELETE?" } else { "" };
+            let text = format!(
+                "  {:<28} {:<18} {}  {} msgs{}",
+                truncate(&s.name, 28),
+                truncate(&format!("{} / {}", s.model, s.provider), 18),
+                date,
+                s.message_count,
+                delete_mark,
+            );
+
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border_fg))
+            .title(title),
+    );
+
+    let mut list_state = ListState::default().with_selected(Some(browser.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
+
+    // Footer hint inside the box (draw a small line at the bottom of the area)
+    let footer_area = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    let footer = Paragraph::new("  ID: press Enter to load conversation  |  D: mark for delete  |  Esc: close")
+        .style(Style::default().fg(theme.muted_fg));
+    frame.render_widget(footer, footer_area);
+}
+
+/// Truncate a string to at most `max` chars, appending '…' if cut.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max.saturating_sub(1)])
+    }
 }
 
 // ---------------------------------------------------------------------------

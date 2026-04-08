@@ -173,6 +173,13 @@ impl Tool for WriteFileTool {
 
         let path = resolve_path(path_str, ctx);
 
+        // Read old content before overwriting so we can show a diff
+        let old_content = if path.exists() {
+            fs::read_to_string(&path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         // Snapshot before overwriting (enables /undo)
         file_history::take_snapshot(&path).await;
 
@@ -184,11 +191,14 @@ impl Tool for WriteFileTool {
         }
 
         match fs::write(&path, content).await {
-            Ok(_) => ToolOutput::success(format!(
-                "Successfully wrote {} bytes to {}",
-                content.len(),
-                path.display()
-            )),
+            Ok(_) => {
+                let action = if old_content.is_empty() { "Created" } else { "Updated" };
+                let diff = generate_diff(&old_content, content);
+                ToolOutput::success(format!(
+                    "{} {} ({} bytes)\n\n{}",
+                    action, path.display(), content.len(), diff
+                ))
+            }
             Err(e) => ToolOutput::error(format!("Failed to write file: {e}")),
         }
     }
@@ -368,11 +378,13 @@ impl Tool for CreateFileTool {
         }
 
         match fs::write(&path, content).await {
-            Ok(_) => ToolOutput::success(format!(
-                "Created file: {} ({} bytes)",
-                path.display(),
-                content.len()
-            )),
+            Ok(_) => {
+                let diff = generate_diff("", content);
+                ToolOutput::success(format!(
+                    "Created {} ({} bytes)\n\n{}",
+                    path.display(), content.len(), diff
+                ))
+            }
             Err(e) => ToolOutput::error(format!("Failed to create file: {e}")),
         }
     }
