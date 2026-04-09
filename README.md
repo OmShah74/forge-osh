@@ -5,7 +5,7 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.3</code> &nbsp;·&nbsp;
+  <code>v1.0.8</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
@@ -32,12 +32,13 @@
 16. [Context Window & Token Management](#-context-window--token-management)
 17. [File Undo System](#-file-undo-system)
 18. [Git Worktree Isolation](#-git-worktree-isolation)
-19. [CLI Commands Reference](#-cli-commands-reference)
-20. [Configuration Reference](#-configuration-reference)
-21. [Environment Variables](#-environment-variables)
-22. [Future Roadmap](#-future-roadmap)
-23. [Contributing](#-contributing)
-24. [License & Contact](#-license--contact)
+19. [Semantic Code Graph (forge-graph)](#-semantic-code-graph-forge-graph)
+20. [CLI Commands Reference](#-cli-commands-reference)
+21. [Configuration Reference](#-configuration-reference)
+22. [Environment Variables](#-environment-variables)
+23. [Future Roadmap](#-future-roadmap)
+24. [Contributing](#-contributing)
+25. [License & Contact](#-license--contact)
 
 ---
 
@@ -66,6 +67,7 @@
 | **Undo** | File snapshot stack — undo any agent mutation instantly with `/undo` |
 | **Hooks** | Shell hooks on `PreToolUse`, `PostToolUse`, `Stop`, `Notification` events |
 | **Memory** | Auto-loads `CLAUDE.md` files from project, parent dirs, and `~/.forge-osh/` |
+| **Code Graph** | `/forge-graph` builds a full semantic code graph — deterministic O(1) symbol lookup for the agent, token-efficient codebase navigation |
 
 ---
 
@@ -79,7 +81,8 @@
 | **CLI Parsing** | [Clap](https://docs.rs/clap) v4 with derive macros |
 | **HTTP** | [Reqwest](https://docs.rs/reqwest) with Rustls TLS + SSE streaming |
 | **Tokenization** | [tiktoken-rs](https://docs.rs/tiktoken-rs) for accurate token counting |
-| **Serialization** | [Serde](https://serde.rs/) + JSON + TOML |
+| **Serialization** | [Serde](https://serde.rs/) + JSON + TOML + [Bincode](https://docs.rs/bincode) (graph artifact) |
+| **Code Graph** | [Petgraph](https://docs.rs/petgraph) `StableGraph` + [Rayon](https://docs.rs/rayon) parallel parsing |
 | **Code Quality** | [Syntect](https://docs.rs/syntect) for syntax highlighting, [Similar](https://docs.rs/similar) for diff generation |
 | **Error Handling** | [thiserror](https://docs.rs/thiserror) typed errors + [Anyhow](https://docs.rs/anyhow) |
 | **Logging** | [Tracing](https://docs.rs/tracing) with environment filtering |
@@ -111,7 +114,15 @@
     │ File I/O   │ Git (14)   │ Shell/PS     │
     │ Search     │ Web (2)    │ Code Quality │
     │ Tasks (5)  │ Agent (3)  │ Notebooks    │
-    │ Worktree(3)│            │              │
+    │ Worktree(3)│ graph_query│              │
+    └────────────┴────────────┴──────────────┘
+          │
+    ┌─────┴──────────────────────────────────┐
+    │       Semantic Code Graph (opt.)       │
+    ├────────────┬────────────┬──────────────┤
+    │ petgraph   │ Two-pass   │ Bincode      │
+    │ StableGraph│ parallel   │ artifact     │
+    │ 3 indices  │ builder    │ persistence  │
     └────────────┴────────────┴──────────────┘
 ```
 
@@ -335,6 +346,12 @@ Configurable timeouts (default: 30s, max: 300s) and a blocked-commands list prev
 | `exit_worktree` | Remove a worktree after the experiment concludes |
 | `list_worktrees` | List all worktrees, marking which ones were created in this session |
 
+### Semantic Code Graph (1 tool)
+
+| Tool | Permission | Description |
+|---|---|---|
+| `graph_query` | ReadOnly | Query the pre-built semantic code graph. Returns "no graph loaded" gracefully if no artifact exists. Supports `find`, `context_pack`, `blast_radius`, `file_graph`, `mutations`, and `stats` operations. |
+
 ---
 
 ## 🔄 The Agentic Loop & Planning
@@ -432,6 +449,15 @@ Type these at the prompt and press Enter:
 | `/status` | Full system status (provider, model, context %, cost) |
 | `/doctor` | Environment diagnostics (git, shell, API keys, config health) |
 | `/resume` | List saved sessions for resuming |
+
+### Semantic Code Graph
+| Command | Description |
+|---|---|
+| `/forge-graph` | Build a semantic code graph for the current project and save as a `.bin` artifact |
+| `/forge-graph rebuild` | Force a full graph rebuild (discards existing artifact) |
+| `/forge-graph status` | Show graph info: node count, edge count, build time, file count |
+| `/forge-graph query <name>` | Search the graph for a symbol by name |
+| `/forge-graph clear` | Remove the artifact file and unload the graph from memory |
 
 ---
 
@@ -618,6 +644,102 @@ The main working tree stays untouched. If the experiment succeeds, changes can b
 
 ---
 
+## 🕸️ Semantic Code Graph (forge-graph)
+
+`forge-osh` v1.0.8 ships with an optional but powerful **semantic code graph** engine. Once built, the agent uses it for deterministic, O(1) symbol lookup instead of spending tokens on file searches.
+
+### How It Works
+
+```
+/forge-graph          ← you type this once
+       │
+       ▼
+┌──────────────────────────────────────────────┐
+│          Two-Pass Parallel Builder           │
+│                                              │
+│  Pass 1 (parallel, rayon):                  │
+│    For every source file → regex parse       │
+│    → collect defs, imports, calls            │
+│                                              │
+│  Pass 2 (sequential):                        │
+│    Insert file nodes + symbol nodes          │
+│    Resolve edges (Contains, Calls,           │
+│    Imports, MutatesState, …)                 │
+└──────────────────┬───────────────────────────┘
+                   │
+                   ▼
+        petgraph StableGraph
+    ┌──────────────────────────┐
+    │  3 in-memory indices:    │
+    │  fqdn_index  (O(1))      │
+    │  file_index  (by path)   │
+    │  name_index  (by name)   │
+    └────────────┬─────────────┘
+                 │  bincode serialize
+                 ▼
+     forge_graph_<dirname>.bin     ← reloaded automatically on next launch
+```
+
+### Supported Languages
+
+| Language | Definitions Parsed | Imports | Call Graph |
+|---|---|---|---|
+| **Rust** | `fn`, `struct`, `enum`, `trait`, `impl`, `macro_rules!`, `mod`, `type`, `static`, `const` | `use` statements | function/method calls |
+| **Python** | `def`, `class`, `async def` | `import`, `from ... import` | function calls |
+| **JavaScript / TypeScript** | `function`, `class`, `const/let/var` arrows, `interface`, `type`, `enum` | `import`, `require()` | function calls |
+| **Go** | `func`, `type struct`, `type interface`, `var`, `const` | `import` blocks | function calls |
+
+### Node & Edge Types
+
+**Node kinds**: `File`, `Module`, `Class`, `Struct`, `Enum`, `EnumVariant`, `Function`, `Method`, `Trait`, `Interface`, `Impl`, `GlobalVar`, `TypeAlias`, `Macro`, `Field`, `ExternalStub`
+
+**Edge types**: `Contains`, `Defines`, `Calls`, `Instantiates`, `Returns`, `ReadsState`, `MutatesState`, `Implements`, `Inherits`, `Imports`, `ExternalDependency`
+
+### graph_query Operations
+
+The agent uses the `graph_query` tool automatically when a graph is loaded:
+
+```jsonc
+// Find any symbol by name
+{ "operation": "find", "target": "MyStruct" }
+
+// Get full context with transitive dependencies, within a token budget
+{ "operation": "context_pack", "target": "src/agent/loop.rs::AgentLoop::run", "token_budget": 4000 }
+
+// Blast radius — what breaks if you change this symbol?
+{ "operation": "blast_radius", "target": "src/graph/types.rs::GraphNode" }
+
+// All symbols defined in a file
+{ "operation": "file_graph", "target": "src/tui/mod.rs" }
+
+// All mutation points for a variable / field
+{ "operation": "mutations", "target": "scroll_top" }
+
+// Graph statistics
+{ "operation": "stats" }
+```
+
+### Context Pack Algorithm
+
+The `context_pack` operation uses a **token-budget BFS** to intelligently pack context:
+
+1. Start from the primary node (full snippet)
+2. BFS outward: callers → callees → containers → implementors
+3. For each candidate: include full snippet if budget allows, degrade to `signature_only` otherwise
+4. Return structured `PackedContext` with primary node + dependency list + truncation notice
+
+This avoids burning thousands of tokens reading whole files — the agent gets exactly the context it needs.
+
+### Artifact & Persistence
+
+- Artifact: `forge_graph_<sanitized-dirname>.bin` stored next to the forge-osh executable
+- Auto-loaded on startup if a matching artifact exists
+- Version-stamped (`GRAPH_VERSION = 1`) — stale artifacts from old builds are detected and rejected
+- Background build: the TUI remains responsive during graph construction; progress messages stream into the conversation display
+- Fully **optional**: if no artifact exists, forge-osh behavior is identical to previous versions
+
+---
+
 ## 🛠️ CLI Commands Reference
 
 ```bash
@@ -732,7 +854,7 @@ max_conversation_lines = 1000
    - Multi-file edit transactions with atomic rollback
 
 2. **Token Usage & Context Optimization**
-   - Semantic RAG-based context management
+   - ✅ Semantic code graph with context-pack BFS (shipped v1.0.8)
    - Prompt caching integration (Anthropic, OpenAI)
    - Aggressive auto-summarization to reduce cost and latency
 
