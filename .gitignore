@@ -8,7 +8,6 @@ dist/
 .DS_Store
 Thumbs.db
 claude-code-source-code-main/
-media/
 .claude/
 todo.txt
 tests/
