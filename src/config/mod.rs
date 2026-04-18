@@ -621,7 +621,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.general.theme, "dark");
-        assert_eq!(config.general.default_provider, "anthropic");
+        assert_eq!(config.general.default_provider, "openai");
         assert!(config.general.auto_save_sessions);
         assert!(!config.general.trust_mode);
     }

@@ -79,7 +79,6 @@ impl ContextStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::*;
 
     #[test]
     fn test_context_ok() {

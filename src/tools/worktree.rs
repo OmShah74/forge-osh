@@ -20,6 +20,7 @@ static WORKTREE_REGISTRY: Lazy<Arc<Mutex<Vec<WorktreeEntry>>>> =
 #[derive(Debug, Clone)]
 struct WorktreeEntry {
     path: String,
+    #[allow(dead_code)]
     branch: String,
 }
 
