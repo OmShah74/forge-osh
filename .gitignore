@@ -8,6 +8,8 @@ dist/
 .DS_Store
 Thumbs.db
 claude-code-source-code-main/
+media/
+.claude/
 todo.txt
 
 # forge-osh user data — safety net in case a .forge-osh/ directory is

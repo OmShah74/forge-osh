@@ -219,15 +219,15 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
             }
 
             MessageRole::ToolResult { is_error, tool_name } => {
-                let (color, status) = if *is_error {
-                    (theme.error_fg, "Error")
+                let (color, status_icon) = if *is_error {
+                    (theme.error_fg, "✗")
                 } else {
-                    (theme.added_fg, "Done")
+                    (theme.prompt_fg, "✓")
                 };
                 let tool_label = if tool_name.is_empty() {
-                    format!("  Result: {status}")
+                    format!("  {} Result", status_icon)
                 } else {
-                    format!("  {} → {status}", tool_name)
+                    format!("  {} {}", status_icon, tool_name)
                 };
                 lines.push(Line::from(vec![
                     Span::styled(
@@ -246,27 +246,42 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
 
                 let max_lines = 50;
                 for text_line in content_lines.iter().take(max_lines) {
-                    let line_color = if is_diff {
+                    if is_diff {
                         if text_line.starts_with('+') && !text_line.starts_with("+++") {
-                            theme.added_fg   // green — addition
+                            // Addition — bright green text on dark green background
+                            lines.push(Line::from(Span::styled(
+                                format!("    {text_line}"),
+                                Style::default().fg(theme.added_fg).bg(theme.added_bg),
+                            )));
                         } else if text_line.starts_with('-') && !text_line.starts_with("---") {
-                            theme.error_fg   // red — removal
+                            // Removal — bright red text on dark red background
+                            lines.push(Line::from(Span::styled(
+                                format!("    {text_line}"),
+                                Style::default().fg(theme.removed_fg).bg(theme.removed_bg),
+                            )));
                         } else if text_line.starts_with("@@") {
-                            theme.tool_name_fg  // cyan — hunk header
+                            // Hunk header — cyan/amber
+                            lines.push(Line::from(Span::styled(
+                                format!("    {text_line}"),
+                                Style::default().fg(theme.tool_name_fg).add_modifier(Modifier::ITALIC),
+                            )));
                         } else {
-                            theme.muted_fg   // context / file header lines
+                            // Context lines
+                            lines.push(Line::from(Span::styled(
+                                format!("    {text_line}"),
+                                Style::default().fg(theme.muted_fg),
+                            )));
                         }
                     } else {
-                        theme.muted_fg
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!("    {text_line}"),
-                        Style::default().fg(line_color),
-                    )));
+                        lines.push(Line::from(Span::styled(
+                            format!("    {text_line}"),
+                            Style::default().fg(theme.muted_fg),
+                        )));
+                    }
                 }
                 if content_lines.len() > max_lines {
                     lines.push(Line::from(Span::styled(
-                        format!("    ... ({} more lines hidden)", content_lines.len() - max_lines),
+                        format!("    … ({} more lines hidden)", content_lines.len() - max_lines),
                         Style::default().fg(theme.muted_fg).add_modifier(Modifier::ITALIC),
                     )));
                 }
@@ -306,30 +321,51 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
         )));
     }
 
-    // Raw line count drives scroll — no wrap estimation, no artificial ceiling.
-    // scroll_offset is "lines scrolled up from bottom" and is unbounded: when it
-    // exceeds the actual content height, effective_scroll() saturates to 0 via
-    // saturating_sub, which simply shows the very first line.  This means users
-    // can scroll freely through any amount of content — 100 lines or 1 000 000 —
-    // without any hard limit being imposed by the renderer.
-    let total_raw = lines.len();
+    // Estimate total visual lines after word-wrapping. Without this, the raw
+    // line count underestimates content height when long lines wrap, causing
+    // max_scroll() to be too small and the viewport to freeze near the bottom.
+    let wrap_width = area.width.saturating_sub(2) as usize; // -1 scrollbar, -1 border safety
+    let total_visual = if wrap_width > 0 {
+        lines.iter().map(|line| {
+            let w: usize = line.spans.iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            if w == 0 { 1 } else { (w + wrap_width - 1) / wrap_width }
+        }).sum()
+    } else {
+        lines.len()
+    };
     let visible_height = area.height as usize;
 
-    state.total_lines = total_raw;
+    state.total_lines = total_visual;
     state.visible_height = visible_height;
 
-    // effective_scroll() = max_scroll().saturating_sub(scroll_offset)
-    // → 0 when scrolled to or past the very top (natural floor, not a cap)
-    // → max_scroll() when at the bottom (auto-scroll position)
     let scroll_start = state.effective_scroll();
 
-    // Include a small line buffer beyond visible_height so that lines which
-    // word-wrap to multiple visual rows are not clipped at the bottom edge.
-    // Ratatui hard-clips rendering at the widget boundary, so this is safe.
-    let extra = visible_height / 3 + 8;
+    // We skip source lines until we've passed `scroll_start` visual rows.
+    // This is more accurate than skipping by raw line index.
+    let mut skipped_visual = 0usize;
+    let mut skip_raw = 0usize;
+    if wrap_width > 0 {
+        for line in &lines {
+            if skipped_visual >= scroll_start { break; }
+            let w: usize = line.spans.iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            let rows = if w == 0 { 1 } else { (w + wrap_width - 1) / wrap_width };
+            skipped_visual += rows;
+            skip_raw += 1;
+        }
+    } else {
+        skip_raw = scroll_start;
+    }
+
+    // Take enough source lines to fill the viewport plus a generous buffer
+    // for wrapped lines that expand to multiple visual rows.
+    let extra = visible_height / 2 + 12;
     let visible_lines: Vec<Line> = lines
         .into_iter()
-        .skip(scroll_start)
+        .skip(skip_raw)
         .take(visible_height + extra)
         .collect();
 
@@ -348,8 +384,8 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
 
     // Scrollbar: shown whenever content is taller than the viewport.
     // Rendered in the rightmost column of the full area (not para_area).
-    if total_raw > visible_height {
-        let content_size = total_raw.saturating_sub(visible_height);
+    if total_visual > visible_height {
+        let content_size = total_visual.saturating_sub(visible_height);
         let mut scrollbar_state = ScrollbarState::new(content_size).position(scroll_start);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))

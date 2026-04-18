@@ -740,6 +740,79 @@ This avoids burning thousands of tokens reading whole files — the agent gets e
 
 ---
 
+## 🐝 Multithread Swarm Architecture & Recent Enhancements (v1.0.10 - v1.0.13+)
+
+Starting from version 1.0.10 through 1.0.13, `forge-osh` received a major series of professional-grade architectural upgrades. These updates focus on context preservation, default model reliability, graceful execution management, and primarily, a completely new optional **Multithreaded Swarm Architecture** inspired by enterprise-grade agent harnesses.
+
+### 1. The Coordinator-Worker Swarm Pattern (v1.0.13)
+
+By default, `forge-osh` operates in a serial, **monolithic loop** — you ask a question, the agent plans, tools execute sequentially, and you get a final answer. While highly reliable, this can be slow for tasks that can be parallelized (e.g., researching three different API endpoints while simultaneously writing boilerplate code).
+
+To solve this, v1.0.13 introduces the **Coordinator-Worker Swarm Architecture**.
+
+#### How to Enable Multithreading
+The multithreaded architecture is **100% opt-in** and completely preserves the existing stable monolithic workflow when turned off.
+- Type `/multithread` (or `/mt`) in the prompt to toggle the Swarm mode on.
+- The UI will explicitly notify you that subsequent prompts prefixed with `@worker` will spawn parallel background agents.
+- When toggled off, the application seamlessly reverts to the standard linear execution model without any configuration overhead or restarts required.
+
+#### What is a Worker?
+A **Worker** is a self-contained, lightweight LLM execution unit operating on its own dedicated `tokio` asynchronous operating system thread. 
+- **Isolated Memory:** Each worker maintains its own completely independent `ConversationHistory`. When a worker searches the web or executes tools, its tool calls and message history do not pollute your main visual conversation thread.
+- **Independent Context Windows:** Workers do not share tokens. You can spawn a worker to read a massive 100K-token log file, and it will not consume the token budget of your main chat session snippet.
+- **Trust Mode Authorization:** Because workers are authorized by the user via the Coordinator, they automatically run in **Trust Mode**, executing their toolchains without prompting you for `Y/n` confirmations.
+
+#### Spawning and Managing Workers
+When multithreading is ON, pinging a worker is as simple as tagging your prompt:
+```text
+@worker Deep dive into the Albot Video RAG ingestion pipeline and document the extraction logic.
+```
+Immediately, the Coordinator intercepts this, spawns the worker in the background, and gives control of the input line right back to you. You can immediately continue chatting with the monolithic loop or spawn additional workers:
+```text
+@worker Find out why the Windows build is complaining about missing MSYS2 dependencies.
+@worker Write a python script to parse the nginx error logs in the /scratch directory.
+```
+
+The Coordinator manages these parallel threads via a message-passing Event Bus:
+- **`⚡ Worker Spawned`**: The TUI notifies you as soon as the background thread spins up.
+- **`Worker Tool Signals`**: In real-time (and quietly), you'll see brief indicators (e.g., `[worker-5b2a] running read_file...`) letting you know the background agent is actively working.
+- **`✅ Worker Completed`**: Once the worker succeeds, it pushes its final summarized report directly to your main chat view. It also reports its independent token consumption (`Worker tokens: 1240 in / 850 out`).
+- **`❌ Worker Failed`**: If a worker runs out of iterations or hits an API error, it gracefully halts and reports the exact failure stack trace to the coordinator without crashing your session.
+
+#### Swarm Control Commands
+You have full granular control over the swarm via dedicated commands:
+- `/multithread status`: Lists all currently executing workers, their unique `uuid` hashes, and the truncated description of what task they are currently solving.
+- `/multithread stop`: Broadcasts an abort signal (via tokio `JoinHandle::abort()`) to gracefully instantly kill all background workers running in the swarm.
+
+---
+
+### 2. Intelligent Context Compaction Rewrite (v1.0.10)
+
+Earlier versions of the agent occasionally ran into truncations where issuing a `/compact` command would blindly strip the context window down to the last 16 messages without understanding semantic relevance. 
+
+v1.0.10 entirely rewrote the Context Compaction engine:
+- The system now uses LLM-powered dynamic summarization of historical message chains.
+- Instead of raw slicing (which orphaned `ToolCall` and `ToolResult` pairs, leading to API rejection errors), the compaction system strips orphaned IDs automatically via a strict validation pass.
+- By configuring `auto_summarize_at` in `config.toml`, the system will proactively trigger this dense summarization protocol seamlessly when your context window usage reaches 80%, guaranteeing you never hit a hard token wall mid-generation.
+
+### 3. Smart Default Overrides & Provider Enhancements (v1.0.11)
+
+To provide the absolute best out-of-the-box experience:
+- The default provider router logic has been upgraded to prioritize **OpenAI** with `gpt-4o` if API keys are comprehensively available, superseding older faulty default cascades.
+- Full support for the bleeding-edge OpenAI pathways has been integrated, including `gpt-4.1` (and `o1` architectures) for tasks requiring deep reasoning before output.
+- Auto-routing now seamlessly falls back downward (e.g., Claude → GPT → Gemini) without hard-crashing if a specific endpoint experiences a timeout or rate-limit violation.
+
+### 4. Graceful Execution Abortion (v1.0.12)
+
+A major UX limitation in monolithic CLI tools is the inability to cancel a long-running generation short of killing the entire process architecture (which destroys unsaved history and token tracking metrics).
+
+- **True `Ctrl+C` Interrupts:** The application now intercepts standard `SIGINT` signals correctly inside the TUI loop. 
+- Pressing `Ctrl+C` while the agent is thinking (or spinning on a massive file read block) now gracefully aborts *only* the `tokio` sub-task running the agent loop.
+- **Partial Stream Preservation:** Any partially streamed text generated before the abort signal was sent is captured, formatted, and permanently committed to the conversation history alongside a `[Execution cancelled by user]` tag.
+- The UI spinner halts instantly, and control of the raw input line is immediately released back to the user without dropping the overall `forge-osh` application.
+
+---
+
 ## 🛠️ CLI Commands Reference
 
 ```bash

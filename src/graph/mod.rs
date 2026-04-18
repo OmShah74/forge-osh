@@ -41,7 +41,7 @@ pub enum GraphBuildMsg {
 // ---------------------------------------------------------------------------
 
 /// Increment when the binary format changes in a breaking way.
-pub const GRAPH_VERSION: u32 = 1;
+pub const GRAPH_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // The semantic code graph

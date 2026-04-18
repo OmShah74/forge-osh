@@ -325,7 +325,7 @@ fn default_theme() -> String {
     "dark".to_string()
 }
 fn default_provider() -> String {
-    "anthropic".to_string()
+    "openai".to_string()
 }
 fn default_true() -> bool {
     true

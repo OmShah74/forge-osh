@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::config::Config;
@@ -25,6 +26,12 @@ pub enum AgentEvent {
     ContextWarning { used: u32, limit: u32 },
     Done,
     Error(String),
+    // -- Multithread worker events (only emitted when /multithread is ON) --
+    WorkerSpawned { worker_id: String, description: String },
+    WorkerCompleted { worker_id: String, description: String, result: String, duration_ms: u64 },
+    WorkerFailed { worker_id: String, description: String, error: String, duration_ms: u64 },
+    WorkerToolStart { worker_id: String, name: String },
+    WorkerToolEnd { worker_id: String, name: String, is_error: bool },
 }
 
 /// The core agentic loop
@@ -126,6 +133,12 @@ fn effort_temperature(effort: u8) -> f32 {
 /// a corresponding tool_use block (or vice versa). This can happen if the
 /// conversation was compacted or truncated mid-exchange.
 fn normalize_messages(messages: &[Message]) -> Vec<Message> {
+    normalize_messages_pub(messages)
+}
+
+/// Public version of normalize_messages — used by Worker to strip orphaned
+/// tool_use / tool_result pairs from its own isolated history.
+pub fn normalize_messages_pub(messages: &[Message]) -> Vec<Message> {
     // Collect all tool_use IDs present in assistant messages
     let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in messages {
@@ -279,7 +292,7 @@ impl AgentLoop {
             let _ = self.event_tx.send(AgentEvent::ThinkingStart);
 
             // 6. Stream tokens with retry logic (exponential backoff)
-            let response = self.call_provider_with_retry(request).await?;
+            let (response, did_stream) = self.call_provider_with_retry(request).await?;
 
             // 7. Record usage
             {
@@ -294,11 +307,14 @@ impl AgentLoop {
                 }
             }
 
-            // 8. If the provider didn't stream any text tokens (tool-only / non-streaming),
-            //    send the full response text so the TUI can display it.
-            if let Some(text) = response.content.text() {
-                if !text.is_empty() && response.content.tool_calls().is_empty() {
-                    let _ = self.event_tx.send(AgentEvent::Token(text.to_string()));
+            // 8. If the provider didn't stream any text tokens (e.g. non-streaming
+            //    provider or tool-only response), send the full response text
+            //    so the TUI can display it. Guard against double-emission.
+            if !did_stream {
+                if let Some(text) = response.content.text() {
+                    if !text.is_empty() {
+                        let _ = self.event_tx.send(AgentEvent::Token(text.to_string()));
+                    }
                 }
             }
 
@@ -416,7 +432,8 @@ impl AgentLoop {
 
     /// Make an API call with exponential backoff retry logic.
     /// Retries up to 10 times for transient/rate-limit errors.
-    async fn call_provider_with_retry(&self, request: ChatRequest) -> Result<ChatResponse> {
+    /// Returns (response, did_stream_tokens).
+    async fn call_provider_with_retry(&self, request: ChatRequest) -> Result<(ChatResponse, bool)> {
         const MAX_RETRIES: u32 = 10;
         const BASE_MS: u64 = 500;
         const CAP_MS: u64 = 120_000; // 2 minutes max delay
@@ -427,11 +444,14 @@ impl AgentLoop {
             // Stream tokens concurrently while waiting for the full response
             let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
             let event_tx_clone = self.event_tx.clone();
+            let did_stream = Arc::new(AtomicBool::new(false));
+            let did_stream_clone = did_stream.clone();
 
             let forwarder = tokio::spawn(async move {
                 let mut rx = stream_rx;
                 while let Some(event) = rx.recv().await {
                     if let StreamEvent::Token(t) = event {
+                        did_stream_clone.store(true, Ordering::Release);
                         let _ = event_tx_clone.send(AgentEvent::Token(t));
                     }
                 }
@@ -447,7 +467,7 @@ impl AgentLoop {
             let _ = forwarder.await;
 
             match chat_result {
-                Ok(response) => return Ok(response),
+                Ok(response) => return Ok((response, did_stream.load(Ordering::Acquire))),
                 Err(err) => {
                     let kind = categorize_error(&err);
 
