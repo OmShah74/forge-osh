@@ -1,6 +1,6 @@
-/// Optional planning phase for complex tasks.
-/// When planning_mode is enabled, the agent will first describe its plan
-/// before executing.
+//! Optional planning phase for complex tasks.
+//! When planning_mode is enabled, the agent will first describe its plan
+//! before executing.
 
 pub struct Planner;
 

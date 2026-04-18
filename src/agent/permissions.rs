@@ -1,13 +1,13 @@
-/// Permission rules system — wildcard pattern-based auto-allow/deny rules
-/// persisted across sessions in ~/.forge-osh/permissions.json
-///
-/// Format:  tool_name(pattern)
-/// Examples:
-///   bash(git *)         — allow all git commands
-///   bash(npm test)      — allow exactly "npm test"
-///   read_file(/src/*)   — allow reading anything in /src/
-///   read_file(*)        — allow all file reads
-///   edit_file(*)        — allow all file edits
+//! Permission rules system — wildcard pattern-based auto-allow/deny rules
+//! persisted across sessions in ~/.forge-osh/permissions.json
+//!
+//! Format:  tool_name(pattern)
+//! Examples:
+//!   bash(git *)         — allow all git commands
+//!   bash(npm test)      — allow exactly "npm test"
+//!   read_file(/src/*)   — allow reading anything in /src/
+//!   read_file(*)        — allow all file reads
+//!   edit_file(*)        — allow all file edits
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

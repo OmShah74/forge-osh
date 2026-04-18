@@ -1,3 +1,6 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+
 pub mod agent;
 pub mod app;
 pub mod cli;

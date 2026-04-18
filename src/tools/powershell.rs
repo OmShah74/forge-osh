@@ -1,6 +1,6 @@
-/// PowerShellTool — execute PowerShell commands on Windows.
-/// On non-Windows platforms this tool reports that PowerShell is unavailable.
-/// Mirrors BashTool's design: output truncation, timeout, safety blocklist.
+//! PowerShellTool — execute PowerShell commands on Windows.
+//! On non-Windows platforms this tool reports that PowerShell is unavailable.
+//! Mirrors BashTool's design: output truncation, timeout, safety blocklist.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};

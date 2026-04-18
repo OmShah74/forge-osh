@@ -33,6 +33,7 @@ pub fn builtin_model_catalog() -> Vec<ModelInfo> {
     models
 }
 
+#[allow(clippy::too_many_arguments)]
 fn m(
     id: &str,
     name: &str,

@@ -1,6 +1,6 @@
-/// NotebookReadTool — read Jupyter .ipynb notebooks as human-readable text.
-/// Cells are displayed with their type (code/markdown/raw), source, and output.
-/// No new dependencies required — uses serde_json which is already in the project.
+//! NotebookReadTool — read Jupyter .ipynb notebooks as human-readable text.
+//! Cells are displayed with their type (code/markdown/raw), source, and output.
+//! No new dependencies required — uses serde_json which is already in the project.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};

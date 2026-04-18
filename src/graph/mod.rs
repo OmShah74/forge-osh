@@ -30,6 +30,7 @@ pub fn new_shared_graph() -> SharedGraph {
 // Progress messages sent from the build thread back to the TUI
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::large_enum_variant)]
 pub enum GraphBuildMsg {
     Progress(String),
     Done { graph: CodeGraph, artifact_path: PathBuf },

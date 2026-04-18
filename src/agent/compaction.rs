@@ -1,10 +1,10 @@
-/// LLM-based context compaction.
-///
-/// Instead of blindly truncating old messages (which loses context),
-/// this module sends the messages-to-be-dropped to the active LLM
-/// and asks it to produce a dense summary. That summary replaces the
-/// dropped messages as a single User message so the model always has
-/// a coherent view of what happened before.
+//! LLM-based context compaction.
+//!
+//! Instead of blindly truncating old messages (which loses context),
+//! this module sends the messages-to-be-dropped to the active LLM
+//! and asks it to produce a dense summary. That summary replaces the
+//! dropped messages as a single User message so the model always has
+//! a coherent view of what happened before.
 
 use tokio::sync::mpsc;
 
