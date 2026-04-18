@@ -1,7 +1,7 @@
-/// TodoWriteTool + Task management tools (TaskCreate/Update/Get/List)
-///
-/// These tools let the agent manage its own task list in `.forge-osh/todos.md`
-/// and track in-session tasks with status (pending → in_progress → completed).
+//! TodoWriteTool + Task management tools (TaskCreate/Update/Get/List)
+//!
+//! These tools let the agent manage its own task list in `.forge-osh/todos.md`
+//! and track in-session tasks with status (pending → in_progress → completed).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

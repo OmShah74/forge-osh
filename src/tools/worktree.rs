@@ -1,8 +1,8 @@
-/// Git worktree tools: enter_worktree / exit_worktree / list_worktrees.
-///
-/// Worktrees let the agent work in an isolated checkout without disturbing
-/// the main working tree. Risky refactors or experiments can run inside a
-/// temporary worktree; the main branch stays clean.
+//! Git worktree tools: enter_worktree / exit_worktree / list_worktrees.
+//!
+//! Worktrees let the agent work in an isolated checkout without disturbing
+//! the main working tree. Risky refactors or experiments can run inside a
+//! temporary worktree; the main branch stays clean.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -20,6 +20,7 @@ static WORKTREE_REGISTRY: Lazy<Arc<Mutex<Vec<WorktreeEntry>>>> =
 #[derive(Debug, Clone)]
 struct WorktreeEntry {
     path: String,
+    #[allow(dead_code)]
     branch: String,
 }
 

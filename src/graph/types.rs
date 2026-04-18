@@ -8,36 +8,55 @@ use serde::{Deserialize, Serialize};
 pub struct Modifiers(pub u16);
 
 pub mod mflags {
-    pub const IS_PUBLIC:   u16 = 0b0000_0001;
-    pub const IS_ASYNC:    u16 = 0b0000_0010;
-    pub const IS_UNSAFE:   u16 = 0b0000_0100;
-    pub const IS_STATIC:   u16 = 0b0000_1000;
-    pub const IS_MUT:      u16 = 0b0001_0000;
-    pub const IS_EXTERN:   u16 = 0b0010_0000;
-    pub const IS_CONST:    u16 = 0b0100_0000;
-    pub const IS_ABSTRACT: u16 = 0b1000_0000;
+    pub const IS_PUBLIC:     u16 = 0b0000_0000_0000_0001;
+    pub const IS_ASYNC:      u16 = 0b0000_0000_0000_0010;
+    pub const IS_UNSAFE:     u16 = 0b0000_0000_0000_0100;
+    pub const IS_STATIC:     u16 = 0b0000_0000_0000_1000;
+    pub const IS_MUT:        u16 = 0b0000_0000_0001_0000;
+    pub const IS_EXTERN:     u16 = 0b0000_0000_0010_0000;
+    pub const IS_CONST:      u16 = 0b0000_0000_0100_0000;
+    pub const IS_ABSTRACT:   u16 = 0b0000_0000_1000_0000;
+    // High byte
+    pub const IS_OVERRIDE:   u16 = 0b0000_0001_0000_0000;
+    pub const IS_FINAL:      u16 = 0b0000_0010_0000_0000;
+    pub const IS_READONLY:   u16 = 0b0000_0100_0000_0000;
+    pub const IS_LAMBDA:     u16 = 0b0000_1000_0000_0000;
+    pub const IS_DEPRECATED: u16 = 0b0001_0000_0000_0000;
+    pub const IS_VIRTUAL:    u16 = 0b0010_0000_0000_0000;
+    pub const IS_NATIVE:     u16 = 0b0100_0000_0000_0000;
+    pub const IS_INLINE:     u16 = 0b1000_0000_0000_0000;
 }
 
 impl Modifiers {
-    #[inline] pub fn is_public(self)   -> bool { self.0 & mflags::IS_PUBLIC   != 0 }
-    #[inline] pub fn is_async(self)    -> bool { self.0 & mflags::IS_ASYNC    != 0 }
-    #[inline] pub fn is_unsafe(self)   -> bool { self.0 & mflags::IS_UNSAFE   != 0 }
-    #[inline] pub fn is_static(self)   -> bool { self.0 & mflags::IS_STATIC   != 0 }
-    #[inline] pub fn is_mut(self)      -> bool { self.0 & mflags::IS_MUT      != 0 }
-    #[inline] pub fn is_const(self)    -> bool { self.0 & mflags::IS_CONST    != 0 }
-    #[inline] pub fn is_abstract(self) -> bool { self.0 & mflags::IS_ABSTRACT != 0 }
+    #[inline] pub fn is_public(self)     -> bool { self.0 & mflags::IS_PUBLIC     != 0 }
+    #[inline] pub fn is_async(self)      -> bool { self.0 & mflags::IS_ASYNC      != 0 }
+    #[inline] pub fn is_unsafe(self)     -> bool { self.0 & mflags::IS_UNSAFE     != 0 }
+    #[inline] pub fn is_static(self)     -> bool { self.0 & mflags::IS_STATIC     != 0 }
+    #[inline] pub fn is_mut(self)        -> bool { self.0 & mflags::IS_MUT        != 0 }
+    #[inline] pub fn is_const(self)      -> bool { self.0 & mflags::IS_CONST      != 0 }
+    #[inline] pub fn is_abstract(self)   -> bool { self.0 & mflags::IS_ABSTRACT   != 0 }
+    #[inline] pub fn is_override(self)   -> bool { self.0 & mflags::IS_OVERRIDE   != 0 }
+    #[inline] pub fn is_final(self)      -> bool { self.0 & mflags::IS_FINAL      != 0 }
+    #[inline] pub fn is_readonly(self)   -> bool { self.0 & mflags::IS_READONLY   != 0 }
+    #[inline] pub fn is_virtual(self)    -> bool { self.0 & mflags::IS_VIRTUAL    != 0 }
+    #[inline] pub fn is_native(self)     -> bool { self.0 & mflags::IS_NATIVE     != 0 }
     #[inline] pub fn set(&mut self, flag: u16) { self.0 |= flag; }
     #[inline] pub fn with(mut self, flag: u16) -> Self { self.0 |= flag; self }
 
     pub fn describe(self) -> String {
         let mut parts = Vec::new();
-        if self.is_public()   { parts.push("pub"); }
-        if self.is_async()    { parts.push("async"); }
-        if self.is_unsafe()   { parts.push("unsafe"); }
-        if self.is_static()   { parts.push("static"); }
-        if self.is_const()    { parts.push("const"); }
-        if self.is_mut()      { parts.push("mut"); }
-        if self.is_abstract() { parts.push("abstract"); }
+        if self.is_public()     { parts.push("pub"); }
+        if self.is_async()      { parts.push("async"); }
+        if self.is_unsafe()     { parts.push("unsafe"); }
+        if self.is_static()     { parts.push("static"); }
+        if self.is_const()      { parts.push("const"); }
+        if self.is_mut()        { parts.push("mut"); }
+        if self.is_abstract()   { parts.push("abstract"); }
+        if self.is_override()   { parts.push("override"); }
+        if self.is_final()      { parts.push("final"); }
+        if self.is_readonly()   { parts.push("readonly"); }
+        if self.is_virtual()    { parts.push("virtual"); }
+        if self.is_native()     { parts.push("native"); }
         parts.join(" ")
     }
 }
@@ -60,9 +79,14 @@ pub enum NodeKind {
     Interface,
     Impl,
     GlobalVar,
+    LocalVar,
+    Parameter,
     TypeAlias,
     Macro,
     Field,
+    Constructor,
+    Property,
+    Constant,
     ExternalStub,
 }
 
@@ -81,9 +105,14 @@ impl NodeKind {
             NodeKind::Interface     => "INTERFACE",
             NodeKind::Impl          => "IMPL",
             NodeKind::GlobalVar     => "GLOBAL",
+            NodeKind::LocalVar      => "LOCAL",
+            NodeKind::Parameter     => "PARAM",
             NodeKind::TypeAlias     => "TYPE",
             NodeKind::Macro         => "MACRO",
             NodeKind::Field         => "FIELD",
+            NodeKind::Constructor   => "CTOR",
+            NodeKind::Property      => "PROPERTY",
+            NodeKind::Constant      => "CONST",
             NodeKind::ExternalStub  => "EXTERN",
         }
     }
@@ -177,21 +206,37 @@ pub enum Language {
     Cpp,
     Java,
     C,
+    CSharp,
+    Ruby,
+    Kotlin,
+    Swift,
+    Bash,
+    PHP,
+    Lua,
+    Scala,
     Unknown,
 }
 
 impl Language {
     pub fn from_extension(ext: &str) -> Self {
         match ext {
-            "rs"                        => Language::Rust,
-            "py" | "pyw"                => Language::Python,
-            "js" | "mjs" | "cjs"       => Language::JavaScript,
-            "ts" | "tsx"                => Language::TypeScript,
-            "go"                        => Language::Go,
-            "cpp" | "cc" | "cxx" | "hpp" => Language::Cpp,
-            "java"                      => Language::Java,
-            "c" | "h"                   => Language::C,
-            _                           => Language::Unknown,
+            "rs"                              => Language::Rust,
+            "py" | "pyw" | "pyi"             => Language::Python,
+            "js" | "mjs" | "cjs" | "jsx"     => Language::JavaScript,
+            "ts" | "tsx" | "mts" | "cts"     => Language::TypeScript,
+            "go"                              => Language::Go,
+            "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "h++" => Language::Cpp,
+            "java"                            => Language::Java,
+            "c" | "h"                         => Language::C,
+            "cs"                              => Language::CSharp,
+            "rb" | "rake" | "gemspec"         => Language::Ruby,
+            "kt" | "kts"                      => Language::Kotlin,
+            "swift"                           => Language::Swift,
+            "sh" | "bash" | "zsh" | "fish"   => Language::Bash,
+            "php" | "php3" | "php4" | "php5" | "phtml" => Language::PHP,
+            "lua"                             => Language::Lua,
+            "scala" | "sc"                    => Language::Scala,
+            _                                 => Language::Unknown,
         }
     }
 
@@ -205,6 +250,14 @@ impl Language {
             Language::Cpp        => "C++",
             Language::Java       => "Java",
             Language::C          => "C",
+            Language::CSharp     => "C#",
+            Language::Ruby       => "Ruby",
+            Language::Kotlin     => "Kotlin",
+            Language::Swift      => "Swift",
+            Language::Bash       => "Bash",
+            Language::PHP        => "PHP",
+            Language::Lua        => "Lua",
+            Language::Scala      => "Scala",
             Language::Unknown    => "Unknown",
         }
     }

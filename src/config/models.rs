@@ -33,6 +33,7 @@ pub fn builtin_model_catalog() -> Vec<ModelInfo> {
     models
 }
 
+#[allow(clippy::too_many_arguments)]
 fn m(
     id: &str,
     name: &str,
@@ -98,26 +99,18 @@ pub fn openai_models() -> Vec<ModelInfo> {
 
 pub fn gemini_models() -> Vec<ModelInfo> {
     vec![
-        m("gemini-2.5-pro-preview-05-06", "Gemini 2.5 Pro", 1_048_576, true, true, 1.25, 10.0, "gemini"),
-        m("gemini-2.5-flash-preview-05-20", "Gemini 2.5 Flash", 1_048_576, true, true, 0.15, 0.60, "gemini"),
         m("gemini-2.0-flash", "Gemini 2.0 Flash", 1_048_576, true, true, 0.10, 0.40, "gemini"),
         m("gemini-2.0-flash-lite", "Gemini 2.0 Flash Lite", 1_048_576, true, true, 0.075, 0.30, "gemini"),
+        m("gemini-2.0-pro-exp-02-05", "Gemini 2.0 Pro Exp", 2_097_152, true, true, 0.0, 0.0, "gemini"),
+        m("gemini-2.0-flash-thinking-exp-01-21", "Gemini 2.0 Flash Thinking", 1_048_576, true, true, 0.0, 0.0, "gemini"),
         m("gemini-1.5-pro", "Gemini 1.5 Pro", 2_097_152, true, true, 1.25, 5.0, "gemini"),
         m("gemini-1.5-pro-002", "Gemini 1.5 Pro 002", 2_097_152, true, true, 1.25, 5.0, "gemini"),
         m("gemini-1.5-flash", "Gemini 1.5 Flash", 1_048_576, true, true, 0.075, 0.30, "gemini"),
         m("gemini-1.5-flash-002", "Gemini 1.5 Flash 002", 1_048_576, true, true, 0.075, 0.30, "gemini"),
         m("gemini-1.5-flash-8b", "Gemini 1.5 Flash 8B", 1_048_576, true, true, 0.0375, 0.15, "gemini"),
-        m("gemini-2.0-flash-thinking-exp", "Gemini 2.0 Flash Thinking", 1_048_576, true, true, 0.0, 0.0, "gemini"),
-        m("gemma-3-27b-it", "Gemma 3 27B", 131_072, true, true, 0.0, 0.0, "gemini"),
-        m("gemma-3-12b-it", "Gemma 3 12B", 131_072, true, false, 0.0, 0.0, "gemini"),
-        m("gemma-3-4b-it", "Gemma 3 4B", 131_072, true, false, 0.0, 0.0, "gemini"),
-        m("gemma-3-1b-it", "Gemma 3 1B", 32_768, false, false, 0.0, 0.0, "gemini"),
-        m("gemini-embedding-exp", "Gemini Embedding", 8_192, false, false, 0.0, 0.0, "gemini"),
-        m("imagen-3.0-generate-002", "Imagen 3.0", 0, false, true, 0.0, 0.0, "gemini"),
-        m("veo-2.0-generate-001", "Veo 2.0", 0, false, true, 0.0, 0.0, "gemini"),
-        m("gemini-2.0-flash-live-001", "Gemini 2.0 Flash Live", 1_048_576, true, true, 0.10, 0.40, "gemini"),
-        m("learnlm-2.0-flash-experimental", "LearnLM 2.0 Flash", 1_048_576, true, true, 0.0, 0.0, "gemini"),
-        m("gemini-2.5-pro-exp-03-25", "Gemini 2.5 Pro Exp", 1_048_576, true, true, 0.0, 0.0, "gemini"),
+        m("gemma-2-27b-it", "Gemma 2 27B", 8_192, true, false, 0.0, 0.0, "gemini"),
+        m("gemma-2-9b-it", "Gemma 2 9B", 8_192, true, false, 0.0, 0.0, "gemini"),
+        m("learnlm-1.5-pro-experimental", "LearnLM 1.5 Pro", 2_097_152, true, true, 0.0, 0.0, "gemini"),
     ]
 }
 

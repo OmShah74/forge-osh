@@ -7,6 +7,7 @@ pub mod spinner;
 pub mod themes;
 
 use std::sync::Arc;
+use crate::agent::Coordinator;
 use std::time::Duration;
 
 use crossterm::{
@@ -163,6 +164,11 @@ pub struct AppState {
     pub total_lines: usize,
     pub visible_height: usize,
     pub streaming_text: String,
+    /// Guard against committing the same streaming text twice. Stores the
+    /// hash of the last text that was committed as an Assistant message.
+    /// Cleared on each ThinkingStart so a new turn can legitimately produce
+    /// text that happens to match a previous turn.
+    pub last_committed_hash: u64,
     pub provider_id: String,
     pub provider_name: String,
     pub model_id: String,
@@ -175,6 +181,7 @@ pub struct AppState {
     pub theme_name: String,
     pub running: bool,
     pub agent_busy: bool,
+    pub agent_task: Option<tokio::task::JoinHandle<()>>,
     pub key_save_pending: Option<(String, String)>,
     pub key_delete_pending: Option<String>,
     pub model_switch_pending: Option<(String, String)>,
@@ -192,6 +199,15 @@ pub struct AppState {
     pub unread_count: usize,
     /// Per-tool call count for /stats
     pub tool_stats: std::collections::HashMap<String, usize>,
+
+    // ── Multithread Coordinator-Worker Architecture ─────────────────────
+    /// When true, user prompts are routed through the Coordinator which
+    /// spawns parallel Worker tasks. When false (default), everything uses
+    /// the standard monolithic AgentLoop::run().
+    pub multithread_mode: bool,
+    /// The coordinator instance (always created, but only active when
+    /// multithread_mode is true).
+    pub coordinator: Option<Coordinator>,
 
     // ── forge-graph ────────────────────────────────────────────────────────
     /// Shared semantic code graph (shared with AgentLoop and GraphQueryTool)
@@ -212,6 +228,7 @@ impl AppState {
             total_lines: 0,
             visible_height: 0,
             streaming_text: String::new(),
+            last_committed_hash: 0,
             provider_id: session.provider_id.clone(),
             provider_name: session.provider_id.clone(),
             model_id: session.model_id.clone(),
@@ -224,6 +241,7 @@ impl AppState {
             theme_name: config.general.theme.clone(),
             running: true,
             agent_busy: false,
+            agent_task: None,
             key_save_pending: None,
             key_delete_pending: None,
             model_switch_pending: None,
@@ -235,6 +253,8 @@ impl AppState {
             context_limit: 128_000,
             unread_count: 0,
             tool_stats: std::collections::HashMap::new(),
+            multithread_mode: false,
+            coordinator: None,
             shared_graph,
             graph_build_rx: None,
         }
@@ -475,7 +495,12 @@ async fn handle_slash_command(
 
         "/compact" => {
             // LLM-based compact: summarize old messages using the active provider.
-            compact_history_llm(state, session, provider_router).await;
+            let keep = if !arg.is_empty() {
+                arg.parse().unwrap_or(crate::agent::compaction::DEFAULT_KEEP_LAST)
+            } else {
+                crate::agent::compaction::DEFAULT_KEEP_LAST
+            };
+            compact_history_llm(state, session, provider_router, keep).await;
         }
 
         "/undo" => {
@@ -703,6 +728,52 @@ async fn handle_slash_command(
                     "normal input mode"
                 }
             ));
+        }
+
+        "/multithread" | "/mt" => {
+            if arg == "status" || arg == "info" {
+                // Show multithread status
+                if state.multithread_mode {
+                    if let Some(ref coord) = state.coordinator {
+                        let workers = coord.list_workers();
+                        if workers.is_empty() {
+                            state.push_system("Multithread mode: ON  |  No active workers.");
+                        } else {
+                            let mut lines = vec![format!("Multithread mode: ON  |  {} active worker(s):", workers.len())];
+                            for (id, desc) in &workers {
+                                lines.push(format!("  • {id} — {desc}"));
+                            }
+                            state.push_system(lines.join("\n"));
+                        }
+                    } else {
+                        state.push_system("Multithread mode: ON  (coordinator not initialized)");
+                    }
+                } else {
+                    state.push_system("Multithread mode: OFF  (use /multithread to enable)");
+                }
+            } else if arg == "stop" {
+                // Stop all workers
+                if let Some(ref mut coord) = state.coordinator {
+                    coord.stop_all();
+                    state.push_system("All workers stopped.");
+                } else {
+                    state.push_system("No coordinator active.");
+                }
+            } else {
+                // Toggle on/off
+                state.multithread_mode = !state.multithread_mode;
+                state.push_system(format!(
+                    "Multithread mode: {}\n{}",
+                    if state.multithread_mode { "ON" } else { "OFF" },
+                    if state.multithread_mode {
+                        "Prompts prefixed with @worker will spawn parallel workers.\n\
+                        Use /multithread status to see active workers.\n\
+                        Use /multithread stop to cancel all workers."
+                    } else {
+                        "Standard monolithic execution restored."
+                    }
+                ));
+            }
         }
 
         "/fast" => {
@@ -1189,7 +1260,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/new", "/save", "/session", "/sessions", "/history", "/commit", "/diff", "/export",
         "/status", "/doctor", "/add-dir", "/resume", "/permissions",
         "/effort", "/copy", "/init", "/find", "/config", "/stats",
-        "/forge-graph",
+        "/forge-graph", "/multithread",
     ];
     let prefix = text.as_str();
     let matches: Vec<&str> = ALL_COMMANDS.iter().copied()
@@ -1637,10 +1708,9 @@ async fn compact_history_llm(
     state: &mut AppState,
     session: &Arc<Mutex<Session>>,
     provider_router: &Arc<RwLock<ProviderRouter>>,
+    keep: usize,
 ) {
     use crate::agent::compaction;
-
-    let keep = compaction::DEFAULT_KEEP_LAST;
 
     let (messages, model_id, total) = {
         let sess = session.lock().await;
@@ -1652,7 +1722,7 @@ async fn compact_history_llm(
 
     if total <= keep {
         state.push_system(format!(
-            "Conversation has only {total} messages — nothing to compact (threshold: {keep})."
+            "Conversation has {total} messages. Nothing to compact (keeping last {keep})."
         ));
         return;
     }
@@ -1705,6 +1775,39 @@ async fn compact_history_llm(
             ));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming text commit with deduplication
+// ---------------------------------------------------------------------------
+
+/// Commit the current streaming_text as an Assistant message, but only if it
+/// has not already been committed (detected via hash). This prevents the same
+/// text from appearing twice in the conversation display.
+fn commit_streaming_text(state: &mut AppState) {
+    if state.streaming_text.is_empty() {
+        return;
+    }
+    // Compute a simple hash of the text to detect duplicates
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    state.streaming_text.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    if hash == state.last_committed_hash && state.last_committed_hash != 0 {
+        // Duplicate detected — discard without committing
+        state.streaming_text.clear();
+        return;
+    }
+    state.last_committed_hash = hash;
+
+    if !state.auto_scroll {
+        state.unread_count += 1;
+    }
+    state.messages.push(RenderedMessage {
+        role: MessageRole::Assistant,
+        content: std::mem::take(&mut state.streaming_text),
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1859,9 +1962,9 @@ pub async fn run_tui(
 
         // Poll interval: faster when agent is working (for smooth streaming)
         let timeout = if state.spinner.active || state.agent_busy {
-            Duration::from_millis(30)
+            Duration::from_millis(16)
         } else {
-            Duration::from_millis(80)
+            Duration::from_millis(50)
         };
 
         // ---- Drain agent events (non-blocking) ----
@@ -1870,6 +1973,8 @@ pub async fn run_tui(
                 AgentEvent::ThinkingStart => {
                     state.spinner.start(format!("{} is thinking...", state.model_name));
                     state.streaming_text.clear();
+                    // Reset dedup hash so the new turn can produce legitimate text
+                    state.last_committed_hash = 0;
                     // Do NOT reset scroll here — the user may have scrolled up to read
                     // earlier content while the agent is working. Scroll is only reset
                     // on explicit user Submit (see Action::Submit handler).
@@ -1877,20 +1982,16 @@ pub async fn run_tui(
                 AgentEvent::Token(t) => {
                     // Stop the "thinking" spinner on first token so the streaming
                     // text is visible immediately.
-                    state.spinner.stop();
+                    if state.spinner.active {
+                        state.spinner.stop();
+                    }
                     state.streaming_text.push_str(&t);
                     // Do NOT force auto_scroll here — user may have scrolled up
                 }
                 AgentEvent::ToolStart { name, input } => {
                     state.spinner.stop();
                     // Commit any streaming text before tool execution
-                    if !state.streaming_text.is_empty() {
-                        if !state.auto_scroll { state.unread_count += 1; }
-                        state.messages.push(RenderedMessage {
-                            role: MessageRole::Assistant,
-                            content: std::mem::take(&mut state.streaming_text),
-                        });
-                    }
+                    commit_streaming_text(&mut state);
                     state.messages.push(RenderedMessage {
                         role: MessageRole::ToolCall { name: name.clone() },
                         content: serde_json::to_string_pretty(&input).unwrap_or_default(),
@@ -1924,14 +2025,8 @@ pub async fn run_tui(
                 AgentEvent::Done => {
                     state.spinner.stop();
                     state.agent_busy = false;
-                    // Commit remaining streaming text
-                    if !state.streaming_text.is_empty() {
-                        if !state.auto_scroll { state.unread_count += 1; }
-                        state.messages.push(RenderedMessage {
-                            role: MessageRole::Assistant,
-                            content: std::mem::take(&mut state.streaming_text),
-                        });
-                    }
+                    // Commit remaining streaming text (guarded against duplicates)
+                    commit_streaming_text(&mut state);
                     let sess = session.lock().await;
                     state.format_cost = sess.format_cost();
                     state.format_tokens = sess.format_tokens();
@@ -1945,16 +2040,61 @@ pub async fn run_tui(
                 AgentEvent::Error(e) => {
                     state.spinner.stop();
                     state.agent_busy = false;
-                    if !state.streaming_text.is_empty() {
-                        state.messages.push(RenderedMessage {
-                            role: MessageRole::Assistant,
-                            content: std::mem::take(&mut state.streaming_text),
-                        });
-                    }
+                    // Commit any partial streaming text before showing error
+                    commit_streaming_text(&mut state);
                     state.messages.push(RenderedMessage {
                         role: MessageRole::System,
                         content: format!("Error: {e}"),
                     });
+                }
+                // -- Multithread worker events -----------------------------------
+                AgentEvent::WorkerSpawned { worker_id, description } => {
+                    state.messages.push(RenderedMessage {
+                        role: MessageRole::System,
+                        content: format!("⚡ Worker spawned: {description} [{worker_id}]"),
+                    });
+                }
+                AgentEvent::WorkerCompleted { worker_id, description, result, duration_ms } => {
+                    let duration_s = duration_ms as f64 / 1000.0;
+                    let preview = if result.len() > 500 {
+                        format!("{}…", &result[..500])
+                    } else {
+                        result
+                    };
+                    state.messages.push(RenderedMessage {
+                        role: MessageRole::System,
+                        content: format!(
+                            "✅ Worker completed: {description} [{worker_id}] ({duration_s:.1}s)\n\
+                            Result: {preview}"
+                        ),
+                    });
+                }
+                AgentEvent::WorkerFailed { worker_id, description, error, duration_ms } => {
+                    let duration_s = duration_ms as f64 / 1000.0;
+                    state.messages.push(RenderedMessage {
+                        role: MessageRole::System,
+                        content: format!(
+                            "❌ Worker failed: {description} [{worker_id}] ({duration_s:.1}s)\n\
+                            Error: {error}"
+                        ),
+                    });
+                }
+                AgentEvent::WorkerToolStart { worker_id, name } => {
+                    // Brief notification — don't clutter the display
+                    if !state.fast_mode {
+                        state.messages.push(RenderedMessage {
+                            role: MessageRole::System,
+                            content: format!("  [{worker_id}] running {name}..."),
+                        });
+                    }
+                }
+                AgentEvent::WorkerToolEnd { worker_id, name, is_error } => {
+                    if is_error && !state.fast_mode {
+                        state.messages.push(RenderedMessage {
+                            role: MessageRole::System,
+                            content: format!("  [{worker_id}] {name} returned error"),
+                        });
+                    }
                 }
             }
         }
@@ -1989,6 +2129,16 @@ pub async fn run_tui(
                 }
             }
             if done { state.graph_build_rx = None; }
+        }
+
+        // ---- Drain coordinator worker notifications ----
+        if state.multithread_mode {
+            if let Some(ref mut coord) = state.coordinator {
+                let worker_events = coord.drain_notifications();
+                for ev in worker_events {
+                    let _ = agent_event_tx.send(ev);
+                }
+            }
         }
 
         // ---- Drain permission requests ----
@@ -2191,15 +2341,13 @@ pub async fn run_tui(
                                 (KeyModifiers::NONE, KeyCode::Esc) => {} // already in normal mode
                                 (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                                     if state.agent_busy {
+                                        if let Some(task) = state.agent_task.take() {
+                                            task.abort();
+                                        }
                                         state.spinner.stop();
                                         state.agent_busy = false;
-                                        if !state.streaming_text.is_empty() {
-                                            state.messages.push(RenderedMessage {
-                                                role: MessageRole::Assistant,
-                                                content: std::mem::take(&mut state.streaming_text),
-                                            });
-                                        }
-                                        state.push_system("Interrupted.");
+                                        commit_streaming_text(&mut state);
+                                        state.push_system("Execution cancelled by user.");
                                     }
                                 }
                                 _ => {}
@@ -2225,6 +2373,34 @@ pub async fn run_tui(
                                             &key_store,
                                             &config,
                                         ).await;
+                                    } else if state.multithread_mode && text.starts_with("@worker ") {
+                                        // Multithread mode: @worker prefix spawns a parallel worker
+                                        let task_prompt = text.strip_prefix("@worker ").unwrap_or(&text).to_string();
+                                        state.messages.push(RenderedMessage {
+                                            role: MessageRole::User,
+                                            content: text.clone(),
+                                        });
+                                        // Lazily initialize coordinator if needed
+                                        if state.coordinator.is_none() {
+                                            state.coordinator = Some(Coordinator::new(
+                                                provider_router.clone(),
+                                                tools.clone(),
+                                                config.clone(),
+                                                shared_graph.clone(),
+                                                session.clone(),
+                                                agent_event_tx.clone(),
+                                            ));
+                                        }
+                                        if let Some(ref mut coord) = state.coordinator {
+                                            let desc = if task_prompt.len() > 60 {
+                                                format!("{}…", &task_prompt[..60])
+                                            } else {
+                                                task_prompt.clone()
+                                            };
+                                            coord.spawn_worker(desc, task_prompt);
+                                        }
+                                        state.scroll_top = 0;
+                                        state.auto_scroll = true;
                                     } else {
                                         // Normal user message — send to agent loop
                                         state.messages.push(RenderedMessage {
@@ -2236,9 +2412,9 @@ pub async fn run_tui(
                                         state.auto_scroll = true;
 
                                         let loop_clone = agent_loop.clone();
-                                        tokio::spawn(async move {
+                                        state.agent_task = Some(tokio::spawn(async move {
                                             let _ = loop_clone.run(text).await;
-                                        });
+                                        }));
                                     }
                                 }
                             }
@@ -2282,15 +2458,13 @@ pub async fn run_tui(
                             }
                             Action::Cancel => {
                                 if state.agent_busy {
+                                    if let Some(task) = state.agent_task.take() {
+                                        task.abort();
+                                    }
                                     state.spinner.stop();
                                     state.agent_busy = false;
-                                    if !state.streaming_text.is_empty() {
-                                        state.messages.push(RenderedMessage {
-                                            role: MessageRole::Assistant,
-                                            content: std::mem::take(&mut state.streaming_text),
-                                        });
-                                    }
-                                    state.push_system("Interrupted.");
+                                    commit_streaming_text(&mut state);
+                                    state.push_system("Execution cancelled by user.");
                                 }
                             }
                             Action::ClearScreen => {

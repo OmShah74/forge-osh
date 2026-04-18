@@ -1,7 +1,7 @@
-/// Agent orchestration tools:
-/// - AskUserQuestionTool — pause and ask user a clarifying question
-/// - EnterPlanModeTool — switch to plan mode (LLM proposes plan, user approves)
-/// - ExitPlanModeTool — exit plan mode
+//! Agent orchestration tools:
+//! - AskUserQuestionTool — pause and ask user a clarifying question
+//! - EnterPlanModeTool — switch to plan mode (LLM proposes plan, user approves)
+//! - ExitPlanModeTool — exit plan mode
 
 use async_trait::async_trait;
 use serde_json::{json, Value};

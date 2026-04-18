@@ -1,23 +1,23 @@
-/// Hooks system — shell commands that fire at specific agent lifecycle events.
-///
-/// Config format (~/.forge-osh/hooks.json):
-/// {
-///   "PreToolUse": [
-///     { "matcher": "bash", "command": "echo 'About to run bash: $TOOL_INPUT'" }
-///   ],
-///   "PostToolUse": [
-///     { "matcher": "*", "command": "echo 'Tool $TOOL_NAME done'" }
-///   ],
-///   "Stop": [
-///     { "command": "notify-send 'forge-osh done'" }
-///   ]
-/// }
-///
-/// Environment variables set when hooks run:
-///   TOOL_NAME   — name of the tool (e.g. "bash")
-///   TOOL_INPUT  — JSON-serialized tool input
-///   TOOL_OUTPUT — tool output (PostToolUse only)
-///   IS_ERROR    — "1" if tool errored (PostToolUse only)
+//! Hooks system — shell commands that fire at specific agent lifecycle events.
+//!
+//! Config format (~/.forge-osh/hooks.json):
+//! {
+//!   "PreToolUse": [
+//!     { "matcher": "bash", "command": "echo 'About to run bash: $TOOL_INPUT'" }
+//!   ],
+//!   "PostToolUse": [
+//!     { "matcher": "*", "command": "echo 'Tool $TOOL_NAME done'" }
+//!   ],
+//!   "Stop": [
+//!     { "command": "notify-send 'forge-osh done'" }
+//!   ]
+//! }
+//!
+//! Environment variables set when hooks run:
+//!   TOOL_NAME   — name of the tool (e.g. "bash")
+//!   TOOL_INPUT  — JSON-serialized tool input
+//!   TOOL_OUTPUT — tool output (PostToolUse only)
+//!   IS_ERROR    — "1" if tool errored (PostToolUse only)
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

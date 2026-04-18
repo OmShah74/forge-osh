@@ -30,6 +30,7 @@ pub fn new_shared_graph() -> SharedGraph {
 // Progress messages sent from the build thread back to the TUI
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::large_enum_variant)]
 pub enum GraphBuildMsg {
     Progress(String),
     Done { graph: CodeGraph, artifact_path: PathBuf },
@@ -41,7 +42,7 @@ pub enum GraphBuildMsg {
 // ---------------------------------------------------------------------------
 
 /// Increment when the binary format changes in a breaking way.
-pub const GRAPH_VERSION: u32 = 1;
+pub const GRAPH_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // The semantic code graph

@@ -325,7 +325,7 @@ fn default_theme() -> String {
     "dark".to_string()
 }
 fn default_provider() -> String {
-    "anthropic".to_string()
+    "openai".to_string()
 }
 fn default_true() -> bool {
     true
@@ -621,7 +621,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.general.theme, "dark");
-        assert_eq!(config.general.default_provider, "anthropic");
+        assert_eq!(config.general.default_provider, "openai");
         assert!(config.general.auto_save_sessions);
         assert!(!config.general.trust_mode);
     }

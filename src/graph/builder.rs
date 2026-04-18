@@ -20,7 +20,34 @@ use sha2::{Digest, Sha256};
 
 /// Extensions we bother to parse.
 const PARSEABLE_EXTS: &[&str] = &[
-    "rs", "py", "js", "mjs", "cjs", "ts", "tsx", "go", "cpp", "cc", "cxx", "java", "c", "h",
+    // Rust
+    "rs",
+    // Python
+    "py", "pyw", "pyi",
+    // JavaScript / TypeScript
+    "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts",
+    // Go
+    "go",
+    // C / C++
+    "c", "h", "cpp", "cc", "cxx", "hpp", "hxx", "h++",
+    // Java
+    "java",
+    // C#
+    "cs",
+    // Ruby
+    "rb", "rake", "gemspec",
+    // Kotlin
+    "kt", "kts",
+    // Swift
+    "swift",
+    // Bash / shell
+    "sh", "bash", "zsh", "fish",
+    // PHP
+    "php", "php3", "php4", "php5", "phtml",
+    // Lua
+    "lua",
+    // Scala
+    "scala", "sc",
 ];
 
 /// Directories we skip unconditionally.
@@ -198,6 +225,7 @@ impl GraphBuilder {
             }
         }
 
+
         let _ = progress.send(GraphBuildMsg::Progress(
             format!("Inserted {} nodes — resolving edges...", graph.graph.node_count())
         ));
@@ -257,7 +285,9 @@ impl GraphBuilder {
                     .get(&call.target)
                     .map(|v| v.iter()
                         .filter(|&&i| graph.graph.node_weight(i)
-                            .map(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method | NodeKind::Macro))
+                            .map(|n| matches!(n.kind,
+                                NodeKind::Function | NodeKind::Method |
+                                NodeKind::Macro | NodeKind::Constructor))
                             .unwrap_or(false))
                         .take(5)
                         .copied()
@@ -280,7 +310,9 @@ impl GraphBuilder {
                         .get(&mut_ref.target)
                         .map(|v| v.iter()
                             .filter(|&&i| graph.graph.node_weight(i)
-                                .map(|n| matches!(n.kind, NodeKind::GlobalVar | NodeKind::Field))
+                                .map(|n| matches!(n.kind,
+                                    NodeKind::GlobalVar | NodeKind::Field |
+                                    NodeKind::LocalVar  | NodeKind::Property))
                                 .unwrap_or(false))
                             .take(3)
                             .copied()
@@ -289,6 +321,40 @@ impl GraphBuilder {
                     if let Some(ci) = caller_idx {
                         for ti in target_idxs {
                             edges_to_add.push((ci, ti, EdgeType::MutatesState));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Inherits / Implements edges (from parser's superclass/interfaces) ────
+        for pf in &parsed {
+            for def in &pf.defs {
+                let def_fqdn = make_fqdn(&pf.path, def.container.as_deref(), &def.name);
+                let def_idx = graph.fqdn_index.get(&def_fqdn).copied();
+                if let Some(di) = def_idx {
+                    // Superclass → Inherits edge
+                    if let Some(ref sc) = def.superclass {
+                        if let Some(targets) = graph.name_index.get(sc) {
+                            for &ti in targets.iter().take(3) {
+                                if let Some(n) = graph.graph.node_weight(ti) {
+                                    if matches!(n.kind, NodeKind::Class | NodeKind::Struct) {
+                                        edges_to_add.push((di, ti, EdgeType::Inherits));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Interfaces → Implements edges
+                    for iface in &def.interfaces {
+                        if let Some(targets) = graph.name_index.get(iface) {
+                            for &ti in targets.iter().take(3) {
+                                if let Some(n) = graph.graph.node_weight(ti) {
+                                    if matches!(n.kind, NodeKind::Trait | NodeKind::Interface) {
+                                        edges_to_add.push((di, ti, EdgeType::Implements));
+                                    }
+                                }
+                            }
                         }
                     }
                 }

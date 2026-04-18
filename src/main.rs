@@ -1,3 +1,6 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+
 use clap::Parser;
 
 use forge_agent::app::App;

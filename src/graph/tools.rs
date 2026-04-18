@@ -29,6 +29,7 @@ impl Tool for GraphQueryTool {
         token-efficient codebase navigation without reading files. \
         Operations: find (search by name), context_pack (full context for a symbol), \
         blast_radius (what depends on a symbol), file_graph (all symbols in a file), \
+        callers (find all direct callers of a function/method), \
         mutations (all mutation points of a variable), stats (graph statistics)."
     }
 
@@ -38,7 +39,7 @@ impl Tool for GraphQueryTool {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["find", "context_pack", "blast_radius", "file_graph", "mutations", "stats"],
+                    "enum": ["find", "context_pack", "blast_radius", "file_graph", "callers", "mutations", "stats"],
                     "description": "The query operation to perform."
                 },
                 "target": {
@@ -159,6 +160,43 @@ impl Tool for GraphQueryTool {
                 ToolOutput::success(q.format_file_graph(&file_key, &nodes))
             }
 
+            // ── callers ───────────────────────────────────────────────────
+            "callers" => {
+                let target = match input["target"].as_str() {
+                    Some(t) => t,
+                    None    => return ToolOutput::error("'target' is required for 'callers'"),
+                };
+
+                let fqdn = if cg.fqdn_index.contains_key(target) {
+                    target.to_string()
+                } else {
+                    let hits = q.fuzzy_search(target, 1);
+                    match hits.first() {
+                        Some((n, _)) => n.fqdn.clone(),
+                        None => return ToolOutput::success(format!("No symbol found matching '{target}'.")),
+                    }
+                };
+
+                if let Some(&idx) = cg.fqdn_index.get(&fqdn) {
+                    let callers = q.callers(idx);
+                    if callers.is_empty() {
+                        ToolOutput::success(format!("No callers found for `{fqdn}`. \
+                            Either it is never called, or the call pattern wasn't captured during graph build."))
+                    } else {
+                        let mut out = format!("## Callers of `{fqdn}` ({} total)\n\n", callers.len());
+                        for node in &callers {
+                            out.push_str(&format!("- [{kind}] `{fqdn}` ({file}:{line})\n  {sig}\n",
+                                kind = node.kind.label(), fqdn = node.fqdn,
+                                file = node.file_path, line = node.span.start_line + 1,
+                                sig = node.content.signature_only));
+                        }
+                        ToolOutput::success(out)
+                    }
+                } else {
+                    ToolOutput::success(format!("Symbol '{fqdn}' not found in graph."))
+                }
+            }
+
             // ── mutations ─────────────────────────────────────────────────
             "mutations" => {
                 let target = match input["target"].as_str() {
@@ -244,7 +282,7 @@ impl Tool for GraphQueryTool {
             }
 
             _ => ToolOutput::error(format!(
-                "Unknown operation '{op}'. Valid: find, context_pack, blast_radius, file_graph, mutations, stats"
+                "Unknown operation '{op}'. Valid: find, context_pack, blast_radius, file_graph, callers, mutations, stats"
             )),
         }
     }

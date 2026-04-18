@@ -1,8 +1,8 @@
-/// File snapshot / undo system.
-///
-/// Before every mutating file operation (write, edit, create, delete),
-/// a snapshot of the original file is pushed onto a global stack.
-/// The /undo TUI command pops the last snapshot and restores the file.
+//! File snapshot / undo system.
+//!
+//! Before every mutating file operation (write, edit, create, delete),
+//! a snapshot of the original file is pushed onto a global stack.
+//! The /undo TUI command pops the last snapshot and restores the file.
 
 use once_cell::sync::Lazy;
 use std::path::Path;
