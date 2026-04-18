@@ -12,6 +12,17 @@
 
 ---
 
+<p align="center">
+  <img src="media/img1.png" width="800">
+  <img src="media/img2.png" width="800">
+  <img src="media/img3.png" width="800">
+  <img src="media/img8.png" width="800">
+  <img src="media/img4.png" width="800">
+  <img src="media/img5.png" width="800">
+  <img src="media/img6.png" width="800">
+  <img src="media/img7.png" width="800">
+</p>
+
 ## 📑 Table of Contents
 
 1.  [Project Vision](#-project-vision)
