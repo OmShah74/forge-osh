@@ -22,3 +22,4 @@ tests/
 /keys.json
 /hooks.json
 /permissions.json
+test_errors.log
