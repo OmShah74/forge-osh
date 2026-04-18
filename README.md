@@ -5,12 +5,23 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.8</code> &nbsp;·&nbsp;
+  <code>v1.0.13</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
 
 ---
+
+<p align="center">
+  <img src="media/img1.png" width="800">
+  <img src="media/img2.png" width="800">
+  <img src="media/img3.png" width="800">
+  <img src="media/img8.png" width="800">
+  <img src="media/img4.png" width="800">
+  <img src="media/img5.png" width="800">
+  <img src="media/img6.png" width="800">
+  <img src="media/img7.png" width="800">
+</p>
 
 ## 📑 Table of Contents
 
