@@ -57,6 +57,9 @@ fn m(
 }
 
 pub fn anthropic_models() -> Vec<ModelInfo> {
+    // All currently-available Claude models ship with a 200k-token context
+    // window on the default tier. The 1M-token beta is opt-in via the
+    // anthropic-beta: context-1m-2025-08-07 header and is NOT the default.
     vec![
         m("claude-opus-4-20250514", "Claude Opus 4", 200_000, true, true, 15.0, 75.0, "anthropic"),
         m("claude-sonnet-4-20250514", "Claude Sonnet 4", 200_000, true, true, 3.0, 15.0, "anthropic"),
@@ -69,6 +72,7 @@ pub fn anthropic_models() -> Vec<ModelInfo> {
         m("claude-3-haiku-20240307", "Claude 3 Haiku", 200_000, true, true, 0.25, 1.25, "anthropic"),
         m("claude-opus-4-5-20250826", "Claude Opus 4.5", 200_000, true, true, 15.0, 75.0, "anthropic"),
         m("claude-sonnet-4-6-20250827", "Claude Sonnet 4.6", 200_000, true, true, 3.0, 15.0, "anthropic"),
+        m("claude-opus-4-7", "Claude Opus 4.7", 200_000, true, true, 15.0, 75.0, "anthropic"),
     ]
 }
 
@@ -206,10 +210,12 @@ pub fn mistral_models() -> Vec<ModelInfo> {
 }
 
 pub fn deepseek_models() -> Vec<ModelInfo> {
+    // DeepSeek API currently advertises 128k context for chat (V3) and
+    // reasoner (R1). Coder-V2 also serves at 128k.
     vec![
-        m("deepseek-chat", "DeepSeek Chat (V3)", 65_536, true, false, 0.27, 1.10, "deepseek"),
-        m("deepseek-reasoner", "DeepSeek Reasoner (R1)", 65_536, true, false, 0.55, 2.19, "deepseek"),
-        m("deepseek-coder", "DeepSeek Coder", 65_536, true, false, 0.14, 0.28, "deepseek"),
+        m("deepseek-chat", "DeepSeek Chat (V3)", 128_000, true, false, 0.27, 1.10, "deepseek"),
+        m("deepseek-reasoner", "DeepSeek Reasoner (R1)", 128_000, true, false, 0.55, 2.19, "deepseek"),
+        m("deepseek-coder", "DeepSeek Coder", 128_000, true, false, 0.14, 0.28, "deepseek"),
     ]
 }
 
@@ -264,13 +270,14 @@ pub fn fireworks_models() -> Vec<ModelInfo> {
 }
 
 pub fn perplexity_models() -> Vec<ModelInfo> {
+    // Perplexity Sonar models advertise ~127k context with a 8k output cap.
     vec![
         m("sonar-pro", "Sonar Pro", 200_000, true, false, 3.0, 15.0, "perplexity"),
-        m("sonar", "Sonar", 128_000, true, false, 1.0, 1.0, "perplexity"),
-        m("sonar-deep-research", "Sonar Deep Research", 128_000, true, false, 2.0, 8.0, "perplexity"),
-        m("sonar-reasoning-pro", "Sonar Reasoning Pro", 128_000, true, false, 2.0, 8.0, "perplexity"),
-        m("sonar-reasoning", "Sonar Reasoning", 128_000, true, false, 1.0, 5.0, "perplexity"),
-        m("r1-1776", "R1-1776", 128_000, true, false, 2.0, 8.0, "perplexity"),
+        m("sonar", "Sonar", 127_072, true, false, 1.0, 1.0, "perplexity"),
+        m("sonar-deep-research", "Sonar Deep Research", 127_072, true, false, 2.0, 8.0, "perplexity"),
+        m("sonar-reasoning-pro", "Sonar Reasoning Pro", 127_072, true, false, 2.0, 8.0, "perplexity"),
+        m("sonar-reasoning", "Sonar Reasoning", 127_072, true, false, 1.0, 5.0, "perplexity"),
+        m("r1-1776", "R1-1776", 127_072, true, false, 2.0, 8.0, "perplexity"),
     ]
 }
 

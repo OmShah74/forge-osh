@@ -181,6 +181,7 @@ impl Provider for OllamaProvider {
                 "model": request.model,
                 "messages": self.build_messages(&request.messages, request.system.as_deref()),
                 "stream": true,
+                "stream_options": {"include_usage": true},
             });
 
             if let Some(tools) = &request.tools {

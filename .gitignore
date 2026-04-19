@@ -7,7 +7,7 @@ dist/
 *~
 .DS_Store
 Thumbs.db
-claude-code-source-code-main/
+tempp/
 .claude/
 todo.txt
 tests/

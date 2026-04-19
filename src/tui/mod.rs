@@ -594,7 +594,8 @@ async fn handle_slash_command(
             let sess = session.lock().await;
             let router = provider_router.read().await;
             let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
-            let used_tokens: u64 = sess.cost_tracker.total_input_tokens + sess.cost_tracker.total_output_tokens;
+            let cumulative: u64 = sess.cost_tracker.total_input_tokens + sess.cost_tracker.total_output_tokens;
+            let used_tokens: u64 = sess.cost_tracker.context_tokens_estimate();
             let ctx_pct = (used_tokens as f64 / ctx_window as f64 * 100.0).min(100.0);
             let tools_loaded = crate::tools::ToolRegistry::with_builtins().tool_names().len();
             let permissions = crate::agent::permissions::PermissionStore::load();
@@ -604,6 +605,7 @@ async fn handle_slash_command(
                 ├─ Provider:     {} ({})\n\
                 ├─ Model:        {}\n\
                 ├─ Context:      {}/{} tokens ({:.1}% used)\n\
+                ├─ Cumulative:   {} tokens across {} call(s)\n\
                 ├─ Cost:         {}\n\
                 ├─ Messages:     {}\n\
                 ├─ Tools:        {} loaded\n\
@@ -613,6 +615,7 @@ async fn handle_slash_command(
                 state.provider_name, state.provider_id,
                 state.model_name,
                 used_tokens, ctx_window, ctx_pct,
+                cumulative, sess.cost_tracker.call_count(),
                 state.format_cost,
                 sess.history.message_count(),
                 tools_loaded,
@@ -1720,9 +1723,11 @@ async fn compact_history_llm(
         (msgs, model_id, total)
     };
 
-    if total <= keep {
+    // No hard minimum: keep=0 replaces everything with a summary. The user
+    // can pass any keep_last they want.
+    if total == 0 || (keep > 0 && total <= keep) {
         state.push_system(format!(
-            "Conversation has {total} messages. Nothing to compact (keeping last {keep})."
+            "Conversation has {total} message(s). Nothing to compact (keeping last {keep})."
         ));
         return;
     }
@@ -1732,11 +1737,16 @@ async fn compact_history_llm(
 
     state.push_system("Compacting with AI summary — please wait...");
 
+    let ctx_window = {
+        let router = provider_router.read().await;
+        router.active().map(|p| p.context_window()).unwrap_or(128_000)
+    };
+
     let summary_result = {
         let router = provider_router.read().await;
         match router.active() {
             Ok(provider) => {
-                compaction::summarize_messages(&to_summarize, provider, &model_id).await
+                compaction::summarize_messages(&to_summarize, provider, &model_id, ctx_window).await
             }
             Err(e) => Err(e),
         }
@@ -1847,6 +1857,13 @@ pub async fn run_tui(
         state.provider_id = pid.to_string();
         state.model_id = router.active_model_id().to_string();
 
+        // Pull the real context window from the active provider so the
+        // progress bar scales correctly from the first turn — no more
+        // hard-coded 128k default for providers with 200k/1M windows.
+        if let Ok(p) = router.active() {
+            state.context_limit = p.context_window();
+        }
+
         // Provider display name
         for (id, name) in router.available_providers() {
             if id == pid {
@@ -1865,6 +1882,18 @@ pub async fn run_tui(
         // If still empty, fall back to model_id
         if state.model_name.is_empty() {
             state.model_name = state.model_id.clone();
+        }
+    }
+
+    // Restore persisted cost/tokens display from the loaded session — these
+    // are serialized into the session json and must survive restart.
+    {
+        let sess = session.lock().await;
+        state.format_tokens = sess.format_tokens();
+        state.format_cost = sess.format_cost();
+        if state.context_limit > 0 {
+            let used = sess.cost_tracker.context_tokens_estimate();
+            state.context_pct = ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100);
         }
     }
 
@@ -2030,12 +2059,17 @@ pub async fn run_tui(
                     let sess = session.lock().await;
                     state.format_cost = sess.format_cost();
                     state.format_tokens = sess.format_tokens();
-                    // Update context bar from actual token usage
+                    // Context % reflects what is CURRENTLY in the model's
+                    // prompt (last reported prompt_tokens), not the
+                    // cumulative sum across every turn — the latter would
+                    // only ever grow and bears no relation to the real
+                    // context-window fill level.
                     if state.context_limit > 0 {
-                        let used = sess.cost_tracker.total_input_tokens
-                            + sess.cost_tracker.total_output_tokens;
+                        let used = sess.cost_tracker.context_tokens_estimate();
                         state.context_pct = ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100);
                     }
+                    // Persist so tokens & cost survive app close.
+                    let _ = sess.save();
                 }
                 AgentEvent::Error(e) => {
                     state.spinner.stop();
@@ -2230,9 +2264,25 @@ pub async fn run_tui(
                     state.auto_scroll = true;
                     state.unread_count = 0;
                     state.tool_stats.clear();
-                    state.context_pct = 0;
-                    state.format_tokens = "0 tokens".to_string();
-                    state.format_cost = "$0.00".to_string();
+                    // Restore token/cost counters from the persisted
+                    // cost_tracker so they do NOT reset on reload.
+                    {
+                        let sess = session.lock().await;
+                        state.format_tokens = sess.format_tokens();
+                        state.format_cost = sess.format_cost();
+                    }
+                    // Context window + percentage come from provider + session.
+                    {
+                        let router = provider_router.read().await;
+                        if let Ok(p) = router.active() {
+                            state.context_limit = p.context_window();
+                        }
+                        let sess = session.lock().await;
+                        let used = sess.cost_tracker.context_tokens_estimate();
+                        state.context_pct = if state.context_limit > 0 {
+                            ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100)
+                        } else { 0 };
+                    }
                     state.session_name = sess_name.clone();
                     state.provider_id = sess_provider.clone();
                     state.model_id = sess_model.clone();
@@ -2273,6 +2323,16 @@ pub async fn run_tui(
                     // Update display names after switch
                     state.provider_id = pid.clone();
                     state.model_id = mid.clone();
+                    // Refresh context window from the NEW provider so the
+                    // progress bar reflects the correct limit.
+                    if let Ok(p) = router.active() {
+                        state.context_limit = p.context_window();
+                        let sess = session.lock().await;
+                        let used = sess.cost_tracker.context_tokens_estimate();
+                        state.context_pct = if state.context_limit > 0 {
+                            ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100)
+                        } else { 0 };
+                    }
                     for (id, name) in router.available_providers() {
                         if id == pid {
                             state.provider_name = name.to_string();
