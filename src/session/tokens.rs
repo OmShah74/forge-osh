@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::types::*;
 
 /// Approximate token counter.
@@ -35,15 +37,29 @@ impl TokenCounter {
 }
 
 /// Tracks cost across a session
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CostTracker {
+    #[serde(default)]
     pub total_input_tokens: u64,
+    #[serde(default)]
     pub total_output_tokens: u64,
+    #[serde(default)]
     pub total_cost_usd: f64,
+    /// Last known input_tokens reported by the provider for the most recent
+    /// API call. Providers typically report the FULL prompt token count every
+    /// turn (not a delta), so this is the best estimate of "what's in the
+    /// model's context window right now" — which is what we show in the
+    /// progress bar. Cumulative `total_input_tokens` keeps growing across
+    /// turns and does not reflect actual context usage.
+    #[serde(default)]
+    pub last_prompt_tokens: u32,
+    #[serde(default)]
+    pub last_output_tokens: u32,
+    #[serde(default)]
     entries: Vec<CostEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 struct CostEntry {
     input_tokens: u32,
@@ -67,6 +83,8 @@ impl CostTracker {
         self.total_input_tokens += usage.input_tokens as u64;
         self.total_output_tokens += usage.output_tokens as u64;
         self.total_cost_usd += cost;
+        self.last_prompt_tokens = usage.input_tokens;
+        self.last_output_tokens = usage.output_tokens;
 
         self.entries.push(CostEntry {
             input_tokens: usage.input_tokens,
@@ -75,6 +93,19 @@ impl CostTracker {
             output_cost_per_million: output_cost_per_m,
             cost_usd: cost,
         });
+    }
+
+    /// Best-estimate of tokens currently filling the model's context window.
+    /// Uses the last reported prompt token count when available; otherwise
+    /// falls back to the cumulative input tokens (which is a conservative
+    /// overestimate but better than zero for providers that don't return
+    /// usage).
+    pub fn context_tokens_estimate(&self) -> u64 {
+        if self.last_prompt_tokens > 0 {
+            self.last_prompt_tokens as u64 + self.last_output_tokens as u64
+        } else {
+            self.total_input_tokens + self.total_output_tokens
+        }
     }
 
     /// Get formatted cost string

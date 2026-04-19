@@ -276,6 +276,9 @@ impl Provider for OpenAICompatProvider {
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
             "stream": true,
+            // Ask the server for a final usage chunk so we can track tokens
+            // and cost for every OpenAI-compatible provider.
+            "stream_options": {"include_usage": true},
         });
 
         // Inject system message at the start if provided

@@ -15,7 +15,7 @@ pub struct Session {
     pub provider_id: String,
     pub model_id: String,
     pub history: ConversationHistory,
-    #[serde(skip)]
+    #[serde(default)]
     pub cost_tracker: CostTracker,
     pub working_dir: String,
     /// Effort level 1–5. Maps to a temperature override in the agent loop.

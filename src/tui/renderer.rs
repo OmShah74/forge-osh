@@ -892,13 +892,30 @@ fn render_picker(frame: &mut Frame, picker: &super::picker::PickerState, theme: 
 }
 
 fn render_token_info(frame: &mut Frame, state: &AppState, theme: &Theme) {
-    let area = centered_rect(52, 35, frame.area());
+    let area = centered_rect(64, 45, frame.area());
     frame.render_widget(Clear, area);
 
+    let ctx_bar = {
+        let filled = (state.context_pct as usize * 20 / 100).min(20);
+        let empty = 20 - filled;
+        "█".repeat(filled) + &"░".repeat(empty)
+    };
     let text = format!(
-        "Usage & Cost\n\nProvider : {}\nModel    : {}\nTokens   : {}\nCost     : {}\n\nPress Esc to close",
+        "Usage & Cost\n\n\
+         Provider : {}\n\
+         Model    : {}\n\
+         Context  : [{}] {}% of {} tokens\n\
+         Tokens   : {}\n\
+         Cost     : {}\n\n\
+         Context % reflects the last prompt's size in the model's window.\n\
+         Cumulative tokens keep growing as each turn adds to the bill.\n\
+         Use /compact [keep] to free context with an AI summary.\n\n\
+         Press Esc to close",
         state.provider_name,
         state.model_name,
+        ctx_bar,
+        state.context_pct,
+        state.context_limit,
         state.format_tokens,
         state.format_cost,
     );

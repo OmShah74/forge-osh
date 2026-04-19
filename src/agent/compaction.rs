@@ -5,6 +5,15 @@
 //! and asks it to produce a dense summary. That summary replaces the
 //! dropped messages as a single User message so the model always has
 //! a coherent view of what happened before.
+//!
+//! Design notes:
+//! - There is NO hard minimum on how many messages must stay in full. The
+//!   user decides via `/compact <keep_last>`. Auto-compaction (triggered
+//!   when the context window hits the warning threshold) keeps `keep_last`
+//!   = 0 by default, letting the model see only the AI-written summary.
+//! - The summarizer receives the FULL transcript (not a per-message
+//!   truncated preview). We only cap the transcript when it would itself
+//!   exceed the context window of the summarizing call.
 
 use tokio::sync::mpsc;
 
@@ -12,65 +21,83 @@ use crate::error::Result;
 use crate::provider::Provider;
 use crate::types::*;
 
-/// Default: keep the last 8 exchanges (16 messages) in full.
-pub const DEFAULT_KEEP_LAST: usize = 16;
+/// Default keep-last for manual `/compact` (no argument).
+/// 0 means "replace the entire conversation with a summary."
+/// The user can override at the command: `/compact 4` keeps the last
+/// four messages in full.
+pub const DEFAULT_KEEP_LAST: usize = 0;
 
 /// Summarize a slice of messages using the active LLM.
 /// Returns a compact summary string suitable for injection as context.
+///
+/// The full transcript is sent — no per-message truncation — so the
+/// summary is lossless to the best of the model's ability. We only cap
+/// the overall transcript length if the summarizing request itself would
+/// blow past the provider's context window. That cap is passed as
+/// `context_window_tokens`; pass 0 to disable.
 pub async fn summarize_messages(
     messages: &[Message],
     provider: &dyn Provider,
     model_id: &str,
+    context_window_tokens: u32,
 ) -> Result<String> {
     if messages.is_empty() {
         return Ok("(no prior conversation)".to_string());
     }
 
-    // Build a text transcript — cap individual fields so the summarization
-    // request itself doesn't exceed context limits.
+    // Build a full text transcript with no per-message truncation —
+    // we want the summarizer to see everything.
     let mut transcript = String::new();
     for msg in messages {
         match msg {
             Message::User(UserContent::Text(t)) => {
-                let preview: String = t.chars().take(600).collect();
-                transcript.push_str(&format!("User: {}\n\n", preview));
+                transcript.push_str("User: ");
+                transcript.push_str(t);
+                transcript.push_str("\n\n");
             }
             Message::Assistant(content) => {
                 if let Some(text) = content.text() {
                     if !text.is_empty() {
-                        let preview: String = text.chars().take(600).collect();
-                        transcript.push_str(&format!("Assistant: {}\n\n", preview));
+                        transcript.push_str("Assistant: ");
+                        transcript.push_str(text);
+                        transcript.push_str("\n\n");
                     }
                 }
                 for tc in content.tool_calls() {
-                    let input_preview: String = serde_json::to_string(&tc.input)
-                        .unwrap_or_default()
-                        .chars()
-                        .take(200)
-                        .collect();
+                    let input_str =
+                        serde_json::to_string(&tc.input).unwrap_or_default();
                     transcript.push_str(&format!(
                         "[Tool call: {}({})]\n\n",
-                        tc.name, input_preview
+                        tc.name, input_str
                     ));
                 }
             }
             Message::Tool(result) => {
-                let preview: String = result.content.chars().take(400).collect();
                 let status = if result.is_error { "ERROR" } else { "OK" };
-                transcript.push_str(&format!("[Tool result ({status}): {preview}]\n\n"));
+                transcript.push_str(&format!(
+                    "[Tool result ({status})]: {}\n\n",
+                    result.content
+                ));
             }
         }
     }
 
-    // Hard cap to avoid the summarisation request itself blowing the context
-    let transcript = if transcript.len() > 12_000 {
-        format!(
-            "{}...\n[transcript truncated for summarization]",
-            &transcript[..12_000]
-        )
-    } else {
-        transcript
-    };
+    // Safety cap: leave headroom (~25% of the context window) for the
+    // summary prompt itself, the system prompt, and the response. Only
+    // truncate when the transcript really would not fit.
+    if context_window_tokens > 0 {
+        // ~4 chars per token; budget 75% of context for the transcript.
+        let max_chars = (context_window_tokens as usize).saturating_mul(3); // 0.75 * 4
+        if transcript.len() > max_chars {
+            // Keep the TAIL of the transcript (newer messages are the most
+            // load-bearing for ongoing work). Mark the head as truncated.
+            let cut = transcript.len() - max_chars;
+            let tail = &transcript[cut..];
+            transcript = format!(
+                "[…earlier conversation omitted because it exceeded the summarizer's context window…]\n\n{tail}"
+            );
+        }
+    }
 
     let summarize_request = ChatRequest {
         model: model_id.to_string(),
@@ -87,7 +114,7 @@ pub async fn summarize_messages(
             TRANSCRIPT TO SUMMARIZE:\n{transcript}"
         )))],
         tools: None,
-        max_tokens: 1024,
+        max_tokens: 4096,
         temperature: 0.2,
         system: Some(
             "You are a precise technical conversation summarizer for an AI coding agent. \
@@ -134,6 +161,17 @@ mod tests {
         let (to_summarize, to_keep) = split_for_compaction(&msgs, 8);
         assert_eq!(to_summarize.len(), 12);
         assert_eq!(to_keep.len(), 8);
+    }
+
+    #[test]
+    fn test_split_all() {
+        let msgs: Vec<Message> = (0..5)
+            .map(|i| Message::User(UserContent::Text(format!("msg {i}"))))
+            .collect();
+
+        let (to_summarize, to_keep) = split_for_compaction(&msgs, 0);
+        assert_eq!(to_summarize.len(), 5);
+        assert_eq!(to_keep.len(), 0);
     }
 
     #[test]

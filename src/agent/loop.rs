@@ -189,13 +189,20 @@ impl AgentLoop {
             }
 
             // 3. Check context budget — auto-compact when at 90%+
+            //
+            // Behaviour matches Claude Code: at 80% we send a ContextWarning
+            // event (TUI shows it in the header bar), at 90% we auto-compact
+            // the entire conversation using the SAME model the user is
+            // talking to. The full conversation is sent to the summarizer —
+            // no per-message truncation. After compaction the conversation
+            // is replaced by a single summary message (keep_last = 0).
             {
-                let needs_compact = {
+                let (needs_compact, ctx_window) = {
                     let session = self.session.lock().await;
                     let router = self.provider_router.read().await;
                     let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
                     let ctx_mgr = ContextManager::new(ctx_window);
-                    match ctx_mgr.check(&session.history) {
+                    let needs = match ctx_mgr.check(&session.history) {
                         ContextStatus::NeedsSummarization { used, limit } => {
                             let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
                             true
@@ -205,40 +212,70 @@ impl AgentLoop {
                             false
                         }
                         _ => false,
-                    }
+                    };
+                    (needs, ctx_window)
                 };
 
                 if needs_compact {
-                    // Auto-compact: summarize old messages with LLM
-                    let (messages_to_summarize, model_id, provider_ref) = {
+                    // No hard minimum — user-configured policy. Default 0
+                    // means "replace the whole thing with a summary".
+                    let keep_last = compaction::DEFAULT_KEEP_LAST;
+
+                    // Let the user know BEFORE we hit the wall.
+                    let _ = self.event_tx.send(AgentEvent::Token(
+                        "\n[context window full — auto-compacting conversation with the current model…]\n".to_string(),
+                    ));
+
+                    // Feed the FULL conversation (not just the prefix) to
+                    // the summarizer so nothing is silently dropped. We
+                    // then replace the prefix with the summary, keeping
+                    // the last `keep_last` messages verbatim.
+                    let (messages_all, model_id) = {
                         let session = self.session.lock().await;
                         let router = self.provider_router.read().await;
-                        let msgs = session.history.messages().to_vec();
-                        let (to_summarize, _) = compaction::split_for_compaction(
-                            &msgs,
-                            compaction::DEFAULT_KEEP_LAST,
-                        );
-                        let to_summarize = to_summarize.to_vec();
-                        let model_id = router.active_model_id().to_string();
-                        (to_summarize, model_id, ())
+                        (
+                            session.history.messages().to_vec(),
+                            router.active_model_id().to_string(),
+                        )
                     };
-                    let _ = provider_ref; // just to silence unused warning
+
+                    let (to_summarize_slice, _) =
+                        compaction::split_for_compaction(&messages_all, keep_last);
+                    let to_summarize = to_summarize_slice.to_vec();
 
                     let summary_result = {
                         let router = self.provider_router.read().await;
                         if let Ok(provider) = router.active() {
-                            compaction::summarize_messages(&messages_to_summarize, provider, &model_id).await
+                            compaction::summarize_messages(
+                                &to_summarize,
+                                provider,
+                                &model_id,
+                                ctx_window,
+                            )
+                            .await
                         } else {
                             Ok("(auto-compact: provider unavailable)".to_string())
                         }
                     };
 
-                    if let Ok(summary) = summary_result {
-                        let mut session = self.session.lock().await;
-                        session.history.summarize_old(summary, compaction::DEFAULT_KEEP_LAST);
-                        let _ = self.event_tx.send(AgentEvent::Token(
-                            "[Context auto-compacted by AI summary]\n".to_string(),
-                        ));
+                    match summary_result {
+                        Ok(summary) => {
+                            let mut session = self.session.lock().await;
+                            session.history.summarize_old(summary, keep_last);
+                            let _ = self.event_tx.send(AgentEvent::Token(
+                                "[context auto-compacted — conversation replaced with AI summary]\n"
+                                    .to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            // Fall back to hard truncation so the next
+                            // request doesn't exceed the window.
+                            let mut session = self.session.lock().await;
+                            session.history.compact(keep_last);
+                            let _ = self.event_tx.send(AgentEvent::Error(format!(
+                                "Auto-compact failed ({e}); fell back to truncation."
+                            )));
+                        }
                     }
                 }
             }
