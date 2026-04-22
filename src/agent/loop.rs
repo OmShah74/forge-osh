@@ -1,19 +1,23 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::instrument;
 
+use crate::agent::permissions::PermissionStore;
 use crate::config::Config;
 use crate::error::{ForgeError, Result};
 use crate::graph::SharedGraph;
 use crate::provider::router::ProviderRouter;
-use crate::session::Session;
+use crate::session::{FileStateCache, Session};
 use crate::tools::executor::ToolExecutor;
 use crate::tools::ToolRegistry;
 use crate::types::*;
 
 use super::compaction;
 use super::context::{ContextManager, ContextStatus};
-use super::hooks::{self, HooksConfig};
+use super::hooks::{self, HooksConfig, PreToolOutcome};
 use super::system_prompt;
 
 /// Events emitted by the agent loop to the TUI
@@ -24,6 +28,15 @@ pub enum AgentEvent {
     ToolStart { name: String, input: serde_json::Value },
     ToolEnd { name: String, output: String, is_error: bool },
     ContextWarning { used: u32, limit: u32 },
+    /// Auto-compaction finished (success or graceful fallback). The TUI uses
+    /// this to drain its rendered message log and refresh the context bar so
+    /// the user SEES the window free up, not just the next turn.
+    HistoryCompacted {
+        kept: usize,
+        removed: usize,
+        summary_preview: String,
+        succeeded: bool,
+    },
     Done,
     Error(String),
     // -- Multithread worker events (only emitted when /multithread is ON) --
@@ -45,6 +58,19 @@ pub struct AgentLoop {
     pub permission_rx: Arc<Mutex<mpsc::UnboundedReceiver<PermissionResponse>>>,
     /// Shared semantic code graph (None when /forge-graph has not been built yet)
     pub graph: SharedGraph,
+    /// Session-scoped file-state cache, shared with tool execution contexts.
+    pub file_cache: Arc<FileStateCache>,
+    /// Permission rules loaded from disk. Refreshed at the start of every turn.
+    pub permission_store: Arc<parking_lot::RwLock<PermissionStore>>,
+    /// Cancellation signal honoured by provider streams and tool executors.
+    /// Wrapped so the TUI can install a fresh token between turns without
+    /// recreating the whole `AgentLoop` (CancellationToken is one-shot).
+    /// `run()` snapshots `.read().clone()` at the start of each turn.
+    pub cancel: Arc<parking_lot::RwLock<CancellationToken>>,
+    /// Current permission mode (Default / Plan / AcceptEdits / Bypass).
+    pub permission_mode: Arc<parking_lot::RwLock<PermissionMode>>,
+    /// Current thinking config (Disabled / Enabled / Budget).
+    pub thinking: Arc<parking_lot::RwLock<ThinkingConfig>>,
 }
 
 #[derive(Debug)]
@@ -76,7 +102,6 @@ fn categorize_error(err: &ForgeError) -> ErrorKind {
             500 | 502 | 503 | 504 => ErrorKind::Transient,
             401 | 403 => ErrorKind::Auth,
             _ => {
-                // Check message content for additional hints
                 let msg_lower = message.to_lowercase();
                 if msg_lower.contains("overloaded") || msg_lower.contains("capacity") {
                     ErrorKind::Overloaded
@@ -103,10 +128,9 @@ fn categorize_error(err: &ForgeError) -> ErrorKind {
     }
 }
 
-/// Calculate exponential backoff delay in milliseconds
 fn backoff_ms(attempt: u32, base_ms: u64, cap_ms: u64, kind: &ErrorKind) -> u64 {
     let base = match kind {
-        ErrorKind::RateLimit => base_ms * 4, // rate limits need longer delay
+        ErrorKind::RateLimit => base_ms * 4,
         ErrorKind::Overloaded => base_ms * 2,
         _ => base_ms,
     };
@@ -114,32 +138,17 @@ fn backoff_ms(attempt: u32, base_ms: u64, cap_ms: u64, kind: &ErrorKind) -> u64 
     delay.min(cap_ms)
 }
 
-/// Map effort level (1–5) to a temperature override.
-/// Lower effort = more deterministic; higher effort = more creative.
 fn effort_temperature(effort: u8) -> f32 {
     match effort {
-        1 => 0.0,
-        2 => 0.3,
-        3 => 0.7,
-        4 => 1.0,
-        5 => 1.2,
-        _ => 0.7,
+        1 => 0.0, 2 => 0.3, 3 => 0.7, 4 => 1.0, 5 => 1.2, _ => 0.7,
     }
 }
 
-/// Remove orphaned tool_use / tool_result message pairs from the history.
-///
-/// The Anthropic API rejects conversations where a tool_result appears without
-/// a corresponding tool_use block (or vice versa). This can happen if the
-/// conversation was compacted or truncated mid-exchange.
 fn normalize_messages(messages: &[Message]) -> Vec<Message> {
     normalize_messages_pub(messages)
 }
 
-/// Public version of normalize_messages — used by Worker to strip orphaned
-/// tool_use / tool_result pairs from its own isolated history.
 pub fn normalize_messages_pub(messages: &[Message]) -> Vec<Message> {
-    // Collect all tool_use IDs present in assistant messages
     let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in messages {
         if let Message::Assistant(content) = msg {
@@ -148,8 +157,6 @@ pub fn normalize_messages_pub(messages: &[Message]) -> Vec<Message> {
             }
         }
     }
-
-    // Filter out tool results whose tool_use_id has no matching assistant block
     messages
         .iter()
         .filter(|msg| {
@@ -163,11 +170,101 @@ pub fn normalize_messages_pub(messages: &[Message]) -> Vec<Message> {
         .collect()
 }
 
+pub struct ConsecutiveFailureTracker {
+    failures: HashMap<(String, String), u32>,
+    max_consecutive: u32,
+}
+
+impl ConsecutiveFailureTracker {
+    pub fn new(max: u32) -> Self {
+        Self { failures: HashMap::new(), max_consecutive: max }
+    }
+
+    pub fn record(&mut self, tool_name: &str, input: &serde_json::Value, is_error: bool) -> Option<u32> {
+        let file_path = input["path"].as_str().unwrap_or("").to_string();
+        let key = (tool_name.to_string(), file_path);
+        if is_error {
+            let count = self.failures.entry(key).or_insert(0);
+            *count += 1;
+            if *count >= self.max_consecutive {
+                let total = *count;
+                return Some(total);
+            }
+        } else {
+            self.failures.remove(&key);
+        }
+        None
+    }
+
+    pub fn reset(&mut self) { self.failures.clear(); }
+}
+
 impl AgentLoop {
+    /// Trigger cancellation of the current turn. Safe to call from any thread.
+    pub fn cancel_current_turn(&self) {
+        self.cancel.read().cancel();
+    }
+
+    /// Install a fresh cancellation token for the next turn. Must be called
+    /// after a cancel + before issuing another `run()`. Returns a clone of
+    /// the newly installed token so the TUI can retain a handle to it.
+    pub fn reset_cancel(&self) -> CancellationToken {
+        let fresh = CancellationToken::new();
+        *self.cancel.write() = fresh.clone();
+        fresh
+    }
+
+    /// Snapshot the active cancellation token. Every use of the token inside
+    /// the loop/tool pipeline goes through this so a mid-turn swap cannot
+    /// race — the snapshot is taken once per turn.
+    fn cancel_token(&self) -> CancellationToken {
+        self.cancel.read().clone()
+    }
+
+    fn build_tool_ctx(&self, working_dir: std::path::PathBuf, session_id: String) -> ToolContext {
+        let mode = *self.permission_mode.read();
+        ToolContext {
+            working_dir,
+            home_dir: dirs::home_dir().unwrap_or_default(),
+            session_id,
+            trust_mode: mode == PermissionMode::Bypass || self.config.general.trust_mode,
+            permission_mode: mode,
+            file_cache: Some(self.file_cache.clone()),
+        }
+    }
+
     /// Run one turn of the agent loop: process user message until completion
+    #[instrument(skip_all, fields(user_msg_len = user_message.len()))]
     pub async fn run(&self, user_message: String) -> Result<()> {
-        // Load hooks config once at the start
         let hooks_config = HooksConfig::load();
+
+        // Refresh stored permission rules each turn so `/permissions` edits take effect.
+        {
+            let fresh = PermissionStore::load();
+            *self.permission_store.write() = fresh;
+        }
+
+        let working_dir_pb = {
+            let s = self.session.lock().await;
+            std::path::PathBuf::from(&s.working_dir)
+        };
+        let session_id = {
+            let s = self.session.lock().await;
+            s.id.clone()
+        };
+
+        // UserPromptSubmit hook (may veto).
+        if let Err(reason) = hooks::user_prompt_submit(
+            &hooks_config,
+            &user_message,
+            working_dir_pb.clone(),
+            Some(session_id.clone()),
+        ).await {
+            let _ = self.event_tx.send(AgentEvent::Error(format!(
+                "UserPromptSubmit hook vetoed this turn: {reason}"
+            )));
+            return Ok(());
+        }
 
         // 1. Add user message to history
         {
@@ -175,9 +272,9 @@ impl AgentLoop {
             session.history.add_user(user_message.clone());
         }
 
-        // 2. Enter the loop
         let max_iterations = self.config.agent.max_tool_iterations;
         let mut iteration = 0;
+        let mut failure_tracker = ConsecutiveFailureTracker::new(3);
 
         loop {
             iteration += 1;
@@ -188,14 +285,12 @@ impl AgentLoop {
                 break;
             }
 
+            if self.cancel_token().is_cancelled() {
+                let _ = self.event_tx.send(AgentEvent::Error("Turn cancelled by user.".to_string()));
+                break;
+            }
+
             // 3. Check context budget — auto-compact when at 90%+
-            //
-            // Behaviour matches Claude Code: at 80% we send a ContextWarning
-            // event (TUI shows it in the header bar), at 90% we auto-compact
-            // the entire conversation using the SAME model the user is
-            // talking to. The full conversation is sent to the summarizer —
-            // no per-message truncation. After compaction the conversation
-            // is replaced by a single summary message (keep_last = 0).
             {
                 let (needs_compact, ctx_window) = {
                     let session = self.session.lock().await;
@@ -217,27 +312,35 @@ impl AgentLoop {
                 };
 
                 if needs_compact {
-                    // No hard minimum — user-configured policy. Default 0
-                    // means "replace the whole thing with a summary".
+                    hooks::pre_compact(
+                        &hooks_config,
+                        working_dir_pb.clone(),
+                        Some(session_id.clone()),
+                    ).await;
+
                     let keep_last = compaction::DEFAULT_KEEP_LAST;
 
-                    // Let the user know BEFORE we hit the wall.
-                    let _ = self.event_tx.send(AgentEvent::Token(
-                        "\n[context window full — auto-compacting conversation with the current model…]\n".to_string(),
-                    ));
-
-                    // Feed the FULL conversation (not just the prefix) to
-                    // the summarizer so nothing is silently dropped. We
-                    // then replace the prefix with the summary, keeping
-                    // the last `keep_last` messages verbatim.
-                    let (messages_all, model_id) = {
+                    // Always route compaction through the CURRENTLY-ACTIVE
+                    // provider+model. Reading `session.model_id` (which is
+                    // set at session creation and not updated on /model
+                    // switch) caused "invalid model" errors when the user
+                    // changed provider mid-conversation.
+                    let (messages_all, model_id, provider_name) = {
                         let session = self.session.lock().await;
                         let router = self.provider_router.read().await;
+                        let pname = router.active().map(|p| p.name().to_string()).unwrap_or_default();
                         (
                             session.history.messages().to_vec(),
                             router.active_model_id().to_string(),
+                            pname,
                         )
                     };
+                    let total_before = messages_all.len();
+
+                    let _ = self.event_tx.send(AgentEvent::Token(format!(
+                        "\n[context window full — auto-compacting {} message(s) via {provider_name} ({model_id})…]\n",
+                        total_before
+                    )));
 
                     let (to_summarize_slice, _) =
                         compaction::split_for_compaction(&messages_all, keep_last);
@@ -245,35 +348,51 @@ impl AgentLoop {
 
                     let summary_result = {
                         let router = self.provider_router.read().await;
-                        if let Ok(provider) = router.active() {
-                            compaction::summarize_messages(
-                                &to_summarize,
-                                provider,
-                                &model_id,
-                                ctx_window,
-                            )
-                            .await
-                        } else {
-                            Ok("(auto-compact: provider unavailable)".to_string())
+                        match router.active() {
+                            Ok(provider) => {
+                                compaction::summarize_messages(
+                                    &to_summarize, provider, &model_id, ctx_window,
+                                ).await
+                            }
+                            Err(e) => Err(e),
                         }
                     };
 
                     match summary_result {
                         Ok(summary) => {
-                            let mut session = self.session.lock().await;
-                            session.history.summarize_old(summary, keep_last);
-                            let _ = self.event_tx.send(AgentEvent::Token(
-                                "[context auto-compacted — conversation replaced with AI summary]\n"
-                                    .to_string(),
-                            ));
+                            let preview: String = summary.chars().take(400).collect();
+                            let summary_word_count = summary.split_whitespace().count();
+                            let removed = total_before.saturating_sub(keep_last);
+                            {
+                                let mut session = self.session.lock().await;
+                                session.history.summarize_old(summary, keep_last);
+                            }
+                            let _ = self.event_tx.send(AgentEvent::HistoryCompacted {
+                                kept: keep_last,
+                                removed,
+                                summary_preview: preview,
+                                succeeded: true,
+                            });
+                            let _ = self.event_tx.send(AgentEvent::Token(format!(
+                                "[context auto-compacted — {removed} message(s) replaced by an AI summary ({} words)]\n",
+                                summary_word_count,
+                            )));
                         }
                         Err(e) => {
-                            // Fall back to hard truncation so the next
-                            // request doesn't exceed the window.
-                            let mut session = self.session.lock().await;
-                            session.history.compact(keep_last);
+                            let removed = total_before.saturating_sub(keep_last);
+                            {
+                                let mut session = self.session.lock().await;
+                                session.history.compact(keep_last);
+                            }
+                            let _ = self.event_tx.send(AgentEvent::HistoryCompacted {
+                                kept: keep_last,
+                                removed,
+                                summary_preview: String::new(),
+                                succeeded: false,
+                            });
                             let _ = self.event_tx.send(AgentEvent::Error(format!(
-                                "Auto-compact failed ({e}); fell back to truncation."
+                                "Auto-compact summarizer failed ({e}); fell back to plain truncation. \
+                                 {removed} message(s) removed from context."
                             )));
                         }
                     }
@@ -286,7 +405,6 @@ impl AgentLoop {
                 let router = self.provider_router.read().await;
                 let provider = router.active()?;
 
-                // Build graph info string (brief lock, released before await)
                 let graph_info = self.graph.read()
                     .ok()
                     .and_then(|g| g.as_ref().map(|cg| format!(
@@ -296,11 +414,37 @@ impl AgentLoop {
                         cg.meta.file_count, cg.meta.age_description()
                     )));
 
-                let system = system_prompt::build_system_prompt(
+                let mut system = system_prompt::build_system_prompt(
                     &std::path::PathBuf::from(&session.working_dir),
                     &self.config.general.system_prompt_extra,
                     graph_info.as_deref(),
                 );
+
+                let mode = *self.permission_mode.read();
+                if mode != PermissionMode::Default {
+                    system.push_str(&format!(
+                        "\n\n## Permission Mode\n\
+                         The current permission mode is `{}`. ",
+                        mode.as_label()
+                    ));
+                    match mode {
+                        PermissionMode::Plan => system.push_str(
+                            "You may ONLY use ReadOnly tools (read_file, search_files, \
+                             list_directory, git_status, git_diff, etc.). Any attempt \
+                             to mutate state will be denied. Use `exit_plan_mode` when \
+                             you have a complete plan to present to the user.",
+                        ),
+                        PermissionMode::AcceptEdits => system.push_str(
+                            "File mutations (write_file / edit_file / create_file) \
+                             auto-approve. Destructive, Shell, and Network tools still \
+                             require explicit user approval.",
+                        ),
+                        PermissionMode::Bypass => system.push_str(
+                            "All tools auto-approve. Proceed efficiently.",
+                        ),
+                        _ => {}
+                    }
+                }
 
                 let tools = if provider.supports_tools() {
                     Some(self.tools.all_definitions())
@@ -308,10 +452,7 @@ impl AgentLoop {
                     None
                 };
 
-                // Effort-based temperature override
                 let temperature = effort_temperature(session.effort_level);
-
-                // Normalize messages to strip orphaned tool pairs
                 let normalized_messages = normalize_messages(session.history.messages());
 
                 ChatRequest {
@@ -322,14 +463,22 @@ impl AgentLoop {
                     temperature,
                     system: Some(system),
                     stop_sequences: Vec::new(),
+                    thinking: *self.thinking.read(),
                 }
             };
 
-            // 5. Send ThinkingStart
             let _ = self.event_tx.send(AgentEvent::ThinkingStart);
 
-            // 6. Stream tokens with retry logic (exponential backoff)
-            let (response, did_stream) = self.call_provider_with_retry(request).await?;
+            let cancel = self.cancel_token();
+            let call_result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let _ = self.event_tx.send(AgentEvent::Error("Turn cancelled by user.".to_string()));
+                    break;
+                }
+                r = self.call_provider_with_retry(request) => r,
+            };
+            let (response, did_stream) = call_result?;
 
             // 7. Record usage
             {
@@ -344,9 +493,6 @@ impl AgentLoop {
                 }
             }
 
-            // 8. If the provider didn't stream any text tokens (e.g. non-streaming
-            //    provider or tool-only response), send the full response text
-            //    so the TUI can display it. Guard against double-emission.
             if !did_stream {
                 if let Some(text) = response.content.text() {
                     if !text.is_empty() {
@@ -355,110 +501,32 @@ impl AgentLoop {
                 }
             }
 
-            // 9. Add assistant response to history
             {
                 let mut session = self.session.lock().await;
                 session.history.add_assistant(response.content.clone());
             }
 
-            // 10. Check if we need to execute tools
             let tool_calls = response.content.tool_calls().to_vec();
 
             if tool_calls.is_empty() {
-                // No tool calls — we're done
                 let _ = self.event_tx.send(AgentEvent::Done);
-
-                // Run Stop hooks
-                let working_dir = {
-                    let session = self.session.lock().await;
-                    std::path::PathBuf::from(&session.working_dir)
-                };
-                hooks::run_stop_hooks(&hooks_config, working_dir).await;
-
+                hooks::run_stop_hooks(
+                    &hooks_config,
+                    working_dir_pb.clone(),
+                    Some(session_id.clone()),
+                ).await;
                 break;
             }
 
-            // 11. Execute each tool call
-            let executor = ToolExecutor::new(self.config.agent.max_output_per_tool);
-            let working_dir = {
-                let session = self.session.lock().await;
-                std::path::PathBuf::from(&session.working_dir)
-            };
-            let ctx = ToolContext {
-                working_dir: working_dir.clone(),
-                home_dir: dirs::home_dir().unwrap_or_default(),
-                session_id: {
-                    let session = self.session.lock().await;
-                    session.id.clone()
-                },
-                trust_mode: self.config.general.trust_mode,
-            };
-
-            for tc in &tool_calls {
-                let _ = self.event_tx.send(AgentEvent::ToolStart {
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                });
-
-                // Run PreToolUse hooks
-                hooks::pre_tool_use(&hooks_config, &tc.name, &tc.input, working_dir.clone()).await;
-
-                let perm_tx = self.permission_tx.clone();
-                let trust_mode = self.config.general.trust_mode;
-
-                let output = executor
-                    .execute(
-                        tc,
-                        &ctx,
-                        &self.tools,
-                        |name, desc, level| async move {
-                            if trust_mode {
-                                return PermissionResponse::Allow;
-                            }
-                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                            let req = PermissionRequest {
-                                tool_name: name,
-                                description: desc,
-                                level,
-                                response_tx: resp_tx,
-                            };
-                            let _ = perm_tx.send(req);
-                            resp_rx.await.unwrap_or(PermissionResponse::Deny)
-                        },
-                    )
-                    .await;
-
-                // Run PostToolUse hooks
-                hooks::post_tool_use(
-                    &hooks_config,
-                    &tc.name,
-                    &tc.input,
-                    &output.content,
-                    output.is_error,
-                    working_dir.clone(),
-                ).await;
-
-                let _ = self.event_tx.send(AgentEvent::ToolEnd {
-                    name: tc.name.clone(),
-                    output: output.content.clone(),
-                    is_error: output.is_error,
-                });
-
-                // Add tool result to history
-                {
-                    let mut session = self.session.lock().await;
-                    session.history.add_tool_result(ToolResult {
-                        tool_use_id: tc.id.clone(),
-                        content: output.content,
-                        is_error: output.is_error,
-                    });
-                }
-            }
-
-            // Loop back — the LLM will see tool results and continue
+            self.execute_tool_calls(
+                &tool_calls,
+                &hooks_config,
+                &mut failure_tracker,
+                &working_dir_pb,
+                &session_id,
+            ).await;
         }
 
-        // Auto-save session
         if self.config.general.auto_save_sessions {
             let session = self.session.lock().await;
             let _ = session.save();
@@ -467,18 +535,225 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Make an API call with exponential backoff retry logic.
-    /// Retries up to 10 times for transient/rate-limit errors.
-    /// Returns (response, did_stream_tokens).
+    async fn execute_tool_calls(
+        &self,
+        tool_calls: &[ToolCall],
+        hooks_config: &HooksConfig,
+        failure_tracker: &mut ConsecutiveFailureTracker,
+        working_dir_pb: &std::path::PathBuf,
+        session_id: &str,
+    ) {
+        let executor = Arc::new(ToolExecutor::new(self.config.agent.max_output_per_tool));
+        let ctx = Arc::new(self.build_tool_ctx(working_dir_pb.clone(), session_id.to_string()));
+
+        let mut safe: Vec<(usize, ToolCall)> = Vec::new();
+        let mut serial: Vec<(usize, ToolCall)> = Vec::new();
+        for (i, tc) in tool_calls.iter().enumerate() {
+            match self.tools.get(&tc.name) {
+                Some(t) if t.is_concurrency_safe() => safe.push((i, tc.clone())),
+                _ => serial.push((i, tc.clone())),
+            }
+        }
+
+        let mut results: Vec<(usize, ToolCall, ToolOutput)> = Vec::with_capacity(tool_calls.len());
+
+        if !safe.is_empty() {
+            let mut futs = Vec::with_capacity(safe.len());
+            for (idx, tc) in safe.into_iter() {
+                let _ = self.event_tx.send(AgentEvent::ToolStart {
+                    name: tc.name.clone(),
+                    input: tc.input.clone(),
+                });
+
+                let executor = executor.clone();
+                let ctx = ctx.clone();
+                let tools = self.tools.clone();
+                let store_arc = self.permission_store.clone();
+                let cancel = self.cancel_token();
+                let event_tx = self.event_tx.clone();
+                let perm_tx = self.permission_tx.clone();
+                let hooks_cfg = hooks_config.clone();
+                let working_dir = working_dir_pb.clone();
+                let sid = session_id.to_string();
+
+                futs.push(tokio::spawn(async move {
+                    let output = Self::execute_single(
+                        executor.as_ref(),
+                        &tc,
+                        ctx.as_ref(),
+                        tools.as_ref(),
+                        &store_arc,
+                        &cancel,
+                        &hooks_cfg,
+                        working_dir,
+                        sid,
+                        event_tx.clone(),
+                        perm_tx,
+                    ).await;
+
+                    let _ = event_tx.send(AgentEvent::ToolEnd {
+                        name: tc.name.clone(),
+                        output: output.content.clone(),
+                        is_error: output.is_error,
+                    });
+
+                    (idx, tc, output)
+                }));
+            }
+
+            for f in futs {
+                if let Ok(triple) = f.await {
+                    results.push(triple);
+                }
+            }
+        }
+
+        for (idx, tc) in serial.into_iter() {
+            if self.cancel_token().is_cancelled() {
+                results.push((
+                    idx,
+                    tc,
+                    ToolOutput::error("Cancelled before execution".to_string()),
+                ));
+                continue;
+            }
+            let _ = self.event_tx.send(AgentEvent::ToolStart {
+                name: tc.name.clone(),
+                input: tc.input.clone(),
+            });
+            let output = Self::execute_single(
+                executor.as_ref(),
+                &tc,
+                ctx.as_ref(),
+                self.tools.as_ref(),
+                &self.permission_store,
+                &self.cancel_token(),
+                hooks_config,
+                working_dir_pb.clone(),
+                session_id.to_string(),
+                self.event_tx.clone(),
+                self.permission_tx.clone(),
+            ).await;
+            let _ = self.event_tx.send(AgentEvent::ToolEnd {
+                name: tc.name.clone(),
+                output: output.content.clone(),
+                is_error: output.is_error,
+            });
+            results.push((idx, tc, output));
+        }
+
+        results.sort_by_key(|(i, _, _)| *i);
+        for (_, tc, output) in results {
+            {
+                let mut session = self.session.lock().await;
+                session.history.add_tool_result(ToolResult {
+                    tool_use_id: tc.id.clone(),
+                    content: output.content.clone(),
+                    is_error: output.is_error,
+                });
+            }
+
+            if let Some(fail_count) = failure_tracker.record(&tc.name, &tc.input, output.is_error) {
+                let file_path = tc.input["path"].as_str().unwrap_or("(unknown)");
+                let nudge = format!(
+                    "[SYSTEM] The tool '{}' has failed {} consecutive times on '{}'. \
+                     STOP retrying the same approach. Instead:\n\
+                     1. Use read_file to get the CURRENT file contents\n\
+                     2. Use write_file to replace the ENTIRE file with the corrected version\n\
+                     Do NOT attempt edit_file on this file again.",
+                    tc.name, fail_count, file_path
+                );
+                let _ = self.event_tx.send(AgentEvent::Token(
+                    format!("\n⚠️  Circuit breaker triggered: {} failed {} times on {}. Forcing fallback to write_file.\n",
+                        tc.name, fail_count, file_path)
+                ));
+                let mut session = self.session.lock().await;
+                session.history.add_user(nudge);
+                failure_tracker.reset();
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(tool = %tc.name, id = %tc.id))]
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_single(
+        executor: &ToolExecutor,
+        tc: &ToolCall,
+        ctx: &ToolContext,
+        tools: &ToolRegistry,
+        store: &Arc<parking_lot::RwLock<PermissionStore>>,
+        cancel: &CancellationToken,
+        hooks_config: &HooksConfig,
+        working_dir: std::path::PathBuf,
+        session_id: String,
+        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        perm_tx: mpsc::UnboundedSender<PermissionRequest>,
+    ) -> ToolOutput {
+        match hooks::pre_tool_use(
+            hooks_config,
+            &tc.name,
+            &tc.input,
+            working_dir.clone(),
+            Some(session_id.clone()),
+        ).await {
+            PreToolOutcome::Proceed => {}
+            PreToolOutcome::Veto { reason, hook } => {
+                let msg = format!(
+                    "PreToolUse hook vetoed '{}' (hook: `{}`): {}",
+                    tc.name, hook, reason
+                );
+                let _ = event_tx.send(AgentEvent::Error(msg.clone()));
+                return ToolOutput::error(msg);
+            }
+        }
+
+        let trust_mode = ctx.trust_mode;
+        let store_snapshot = store.read().clone();
+        let output = executor
+            .execute(
+                tc,
+                ctx,
+                tools,
+                &store_snapshot,
+                cancel,
+                |name, desc, level| async move {
+                    if trust_mode {
+                        return PermissionResponse::Allow;
+                    }
+                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                    let req = PermissionRequest {
+                        tool_name: name,
+                        description: desc,
+                        level,
+                        response_tx: resp_tx,
+                    };
+                    let _ = perm_tx.send(req);
+                    resp_rx.await.unwrap_or(PermissionResponse::Deny)
+                },
+            )
+            .await;
+
+        hooks::post_tool_use(
+            hooks_config,
+            &tc.name,
+            &tc.input,
+            &output.content,
+            output.is_error,
+            working_dir,
+            Some(session_id),
+        ).await;
+
+        output
+    }
+
     async fn call_provider_with_retry(&self, request: ChatRequest) -> Result<(ChatResponse, bool)> {
         const MAX_RETRIES: u32 = 10;
         const BASE_MS: u64 = 500;
-        const CAP_MS: u64 = 120_000; // 2 minutes max delay
+        const CAP_MS: u64 = 120_000;
 
         let mut attempt = 0u32;
 
         loop {
-            // Stream tokens concurrently while waiting for the full response
             let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
             let event_tx_clone = self.event_tx.clone();
             let did_stream = Arc::new(AtomicBool::new(false));
@@ -497,8 +772,14 @@ impl AgentLoop {
             let chat_result = {
                 let router = self.provider_router.read().await;
                 let provider = router.active()?;
-                provider.chat(request.clone(), stream_tx).await
-                // router read guard + stream_tx dropped here
+                let cancel = self.cancel_token();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        Err(ForgeError::Provider("cancelled by user".into()))
+                    }
+                    r = provider.chat(request.clone(), stream_tx) => r,
+                }
             };
 
             let _ = forwarder.await;
@@ -506,9 +787,11 @@ impl AgentLoop {
             match chat_result {
                 Ok(response) => return Ok((response, did_stream.load(Ordering::Acquire))),
                 Err(err) => {
+                    if self.cancel_token().is_cancelled() {
+                        return Err(err);
+                    }
                     let kind = categorize_error(&err);
 
-                    // Non-retryable errors fail immediately
                     if kind == ErrorKind::Auth || kind == ErrorKind::NotRetryable {
                         let _ = self.event_tx.send(AgentEvent::Error(err.to_string()));
                         return Err(err);
@@ -539,9 +822,15 @@ impl AgentLoop {
                     };
 
                     let _ = self.event_tx.send(AgentEvent::Error(retry_msg));
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    let cancel_backoff = self.cancel_token();
+                    tokio::select! {
+                        biased;
+                        _ = cancel_backoff.cancelled() => {
+                            return Err(ForgeError::Provider("cancelled by user during backoff".into()));
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
+                    }
 
-                    // Re-send ThinkingStart after retry
                     let _ = self.event_tx.send(AgentEvent::ThinkingStart);
                 }
             }

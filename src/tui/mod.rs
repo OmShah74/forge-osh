@@ -214,6 +214,18 @@ pub struct AppState {
     pub shared_graph: SharedGraph,
     /// Progress messages received from the background graph build thread
     pub graph_build_rx: Option<std::sync::mpsc::Receiver<GraphBuildMsg>>,
+
+    // ── Agent-loop shared handles (populated post-boot) ─────────────────
+    /// Cancellation token shared with the active AgentLoop. Ctrl+C / Esc calls
+    /// `.read().cancel()` here to abort in-flight provider streams and tool
+    /// runs; `.write()` to swap in a fresh token before the next turn.
+    pub agent_cancel: Option<std::sync::Arc<parking_lot::RwLock<tokio_util::sync::CancellationToken>>>,
+    /// Live permission-mode state — toggled by /plan, /accept-edits, /bypass.
+    pub permission_mode_state: Option<std::sync::Arc<parking_lot::RwLock<crate::types::PermissionMode>>>,
+    /// Live thinking-config state — toggled by /think, /think-budget.
+    pub thinking_state: Option<std::sync::Arc<parking_lot::RwLock<crate::types::ThinkingConfig>>>,
+    /// Session-scoped file state cache.
+    pub file_cache: Option<std::sync::Arc<crate::session::FileStateCache>>,
 }
 
 impl AppState {
@@ -257,6 +269,10 @@ impl AppState {
             coordinator: None,
             shared_graph,
             graph_build_rx: None,
+            agent_cancel: None,
+            permission_mode_state: None,
+            thinking_state: None,
+            file_cache: None,
         }
     }
 
@@ -658,8 +674,25 @@ async fn handle_slash_command(
         }
 
         // ── /resume — resume a past session ───────────────────────────────
+        // Opens the interactive session browser (identical to /sessions).
+        // Pressing Enter on a session loads it into the live agent — the
+        // main event loop's `session_load_pending` handler replaces the
+        // Session contents, restores history, and re-runs token accounting.
         "/resume" => {
-            cmd_resume(state, session).await;
+            match crate::session::checkpoint::Checkpoint::list() {
+                Ok(sessions) if sessions.is_empty() => {
+                    state.push_system(
+                        "No saved sessions found. Sessions are saved automatically \
+                         when auto_save_sessions is enabled; use /save to snapshot now."
+                    );
+                }
+                Ok(sessions) => {
+                    state.modal = Some(Modal::SessionBrowser(SessionBrowserState::new(sessions)));
+                }
+                Err(e) => {
+                    state.push_system(format!("Failed to list sessions: {e}"));
+                }
+            }
         }
 
         // ── /permissions — view/edit permission rules ──────────────────────
@@ -690,6 +723,91 @@ async fn handle_slash_command(
                     }
                     _ => state.push_system("Invalid effort level. Use a number 1-5."),
                 }
+            }
+        }
+
+        // ── /mode — permission mode selector ─────────────────────────────
+        // Also available as individual shortcuts: /plan, /accept-edits, /bypass.
+        "/mode" => {
+            let mode_state = match state.permission_mode_state.clone() {
+                Some(m) => m,
+                None => { state.push_system("Permission mode not wired yet."); return true; }
+            };
+            let current = *mode_state.read();
+            if arg.is_empty() {
+                state.push_system(format!(
+                    "Current permission mode: {}\n\
+                    Available: default | plan | accept-edits | bypass\n\
+                    Usage: /mode <name>  (or shortcuts /plan /accept-edits /bypass /default)",
+                    current.as_label()
+                ));
+            } else if let Some(new_mode) = crate::types::PermissionMode::parse(arg) {
+                *mode_state.write() = new_mode;
+                state.trust_mode = new_mode == crate::types::PermissionMode::Bypass;
+                state.push_system(format!("Permission mode → {}", new_mode.as_label()));
+            } else {
+                state.push_system(format!("Unknown mode '{arg}'. Valid: default | plan | accept-edits | bypass"));
+            }
+        }
+        "/plan" => {
+            if let Some(m) = &state.permission_mode_state {
+                *m.write() = crate::types::PermissionMode::Plan;
+                state.trust_mode = false;
+                state.push_system("Permission mode → plan. Only ReadOnly tools allowed. Use /default to exit.");
+            }
+        }
+        "/accept-edits" | "/accept_edits" => {
+            if let Some(m) = &state.permission_mode_state {
+                *m.write() = crate::types::PermissionMode::AcceptEdits;
+                state.trust_mode = false;
+                state.push_system("Permission mode → accept-edits. File mutations auto-approve; destructive/shell still prompt.");
+            }
+        }
+        "/bypass" => {
+            if let Some(m) = &state.permission_mode_state {
+                *m.write() = crate::types::PermissionMode::Bypass;
+                state.trust_mode = true;
+                state.push_system("Permission mode → bypass. ALL tools auto-approve. Use /default to restore prompts.");
+            }
+        }
+        "/default" | "/normal" => {
+            if let Some(m) = &state.permission_mode_state {
+                *m.write() = crate::types::PermissionMode::Default;
+                state.trust_mode = false;
+                state.push_system("Permission mode → default.");
+            }
+        }
+
+        // ── /think — configure extended thinking budget ──────────────────
+        "/think" => {
+            let thinking_state = match state.thinking_state.clone() {
+                Some(t) => t,
+                None => { state.push_system("Thinking config not wired yet."); return true; }
+            };
+            if arg.is_empty() {
+                let cur = *thinking_state.read();
+                let label = match cur {
+                    crate::types::ThinkingConfig::Disabled => "disabled".to_string(),
+                    crate::types::ThinkingConfig::Enabled  => "enabled (provider-default budget)".to_string(),
+                    crate::types::ThinkingConfig::Budget{tokens} => format!("enabled with {tokens} token budget"),
+                };
+                state.push_system(format!(
+                    "Extended thinking: {label}\n\
+                    Usage: /think off | on | <tokens>\n\
+                    Note: thinking is currently only honoured by Anthropic providers."
+                ));
+            } else {
+                let new = match arg.to_lowercase().as_str() {
+                    "off" | "disable" | "disabled" | "no" | "0" => crate::types::ThinkingConfig::Disabled,
+                    "on" | "enable" | "enabled" | "yes" => crate::types::ThinkingConfig::Enabled,
+                    other => match other.parse::<u32>() {
+                        Ok(n) if n >= 1024 => crate::types::ThinkingConfig::Budget { tokens: n },
+                        Ok(_)              => { state.push_system("Budget must be >= 1024 tokens."); return true; }
+                        Err(_)             => { state.push_system("Invalid value. Use off | on | <tokens>."); return true; }
+                    }
+                };
+                *thinking_state.write() = new;
+                state.push_system(format!("Extended thinking → {new:?}"));
             }
         }
 
@@ -1262,6 +1380,8 @@ fn tab_complete_slash(state: &mut AppState) {
         "/keys", "/theme", "/trust", "/vim", "/fast", "/compact", "/undo",
         "/new", "/save", "/session", "/sessions", "/history", "/commit", "/diff", "/export",
         "/status", "/doctor", "/add-dir", "/resume", "/permissions",
+        "/mode", "/plan", "/accept-edits", "/bypass", "/default",
+        "/think",
         "/effort", "/copy", "/init", "/find", "/config", "/stats",
         "/forge-graph", "/multithread",
     ];
@@ -1554,7 +1674,7 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
         // ── status ───────────────────────────────────────────────────────────
         "status" | "info" => {
             let msg = {
-                let guard = state.shared_graph.read().unwrap();
+                let guard = match state.shared_graph.read() { Ok(g) => g, Err(p) => p.into_inner() };
                 match guard.as_ref() {
                     None => "No forge-graph loaded.\nRun /forge-graph to build one for this project.".to_string(),
                     Some(g) => format!(
@@ -1597,7 +1717,7 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
         s if s.starts_with("query ") => {
             let name = s.trim_start_matches("query ").trim().to_string();
             let msg = {
-                let guard = state.shared_graph.read().unwrap();
+                let guard = match state.shared_graph.read() { Ok(g) => g, Err(p) => p.into_inner() };
                 match guard.as_ref() {
                     None => "No graph loaded. Run /forge-graph first.".to_string(),
                     Some(g) => {
@@ -1625,7 +1745,7 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
 
             // If existing artifact and not "rebuild", load it
             if arg.is_empty() {
-                let guard = state.shared_graph.read().unwrap();
+                let guard = match state.shared_graph.read() { Ok(g) => g, Err(p) => p.into_inner() };
                 if guard.is_some() {
                     drop(guard);
                     state.push_system(
@@ -1705,6 +1825,39 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
     }
 }
 
+/// Drain the oldest rendered messages from the TUI so the visible
+/// conversation pane reflects the actual post-compaction history.
+///
+/// We keep the `rendered_splash_prefix` (the startup banner rendered as a
+/// Splash role) and the last `approx_keep_rendered` logged items — the
+/// latter is a best-effort mapping from "history messages kept" to
+/// "rendered lines kept" (each history turn usually generates ~2 rendered
+/// items: user + assistant; tool turns add more, so we use 2× as a safe
+/// lower bound and let extras stay visible).
+fn drain_rendered_for_compaction(state: &mut AppState, history_keep_last: usize) {
+    // Preserve every Splash entry (startup banner) — they live at the top
+    // of state.messages and aren't real conversation.
+    let splash_end = state
+        .messages
+        .iter()
+        .take_while(|m| matches!(m.role, MessageRole::Splash))
+        .count();
+
+    let approx_keep_rendered = history_keep_last.saturating_mul(2);
+    let total_non_splash = state.messages.len().saturating_sub(splash_end);
+
+    if total_non_splash <= approx_keep_rendered {
+        return; // nothing to drop
+    }
+
+    // We want to keep the last `approx_keep_rendered` non-splash messages.
+    // Drain from `splash_end` up to `len - approx_keep_rendered`.
+    let drain_until = state.messages.len().saturating_sub(approx_keep_rendered);
+    if drain_until > splash_end {
+        state.messages.drain(splash_end..drain_until);
+    }
+}
+
 /// LLM-based compact: summarize old messages with the active provider,
 /// then replace them with the summary so the context window is freed.
 async fn compact_history_llm(
@@ -1715,13 +1868,11 @@ async fn compact_history_llm(
 ) {
     use crate::agent::compaction;
 
-    let (messages, model_id, total) = {
+    let messages = {
         let sess = session.lock().await;
-        let msgs = sess.history.messages().to_vec();
-        let total = msgs.len();
-        let model_id = sess.model_id.clone();
-        (msgs, model_id, total)
+        sess.history.messages().to_vec()
     };
+    let total = messages.len();
 
     // No hard minimum: keep=0 replaces everything with a summary. The user
     // can pass any keep_last they want.
@@ -1735,18 +1886,30 @@ async fn compact_history_llm(
     let (to_summarize, _) = compaction::split_for_compaction(&messages, keep);
     let to_summarize = to_summarize.to_vec();
 
-    state.push_system("Compacting with AI summary — please wait...");
-
-    let ctx_window = {
+    // IMPORTANT: route through the currently-active provider + model, not
+    // the session's persisted model_id (which can be stale after /model).
+    // Using `sess.model_id` was causing "invalid model" errors whenever the
+    // user switched provider mid-conversation.
+    let (ctx_window, active_model_id, provider_name) = {
         let router = provider_router.read().await;
-        router.active().map(|p| p.context_window()).unwrap_or(128_000)
+        let ctx = router.active().map(|p| p.context_window()).unwrap_or(128_000);
+        let model = router.active_model_id().to_string();
+        let pname = router.active().map(|p| p.name().to_string()).unwrap_or_default();
+        (ctx, model, pname)
     };
+
+    state.push_system(format!(
+        "Compacting {} message(s) via {provider_name} ({active_model_id}) — please wait...",
+        to_summarize.len()
+    ));
 
     let summary_result = {
         let router = provider_router.read().await;
         match router.active() {
             Ok(provider) => {
-                compaction::summarize_messages(&to_summarize, provider, &model_id, ctx_window).await
+                compaction::summarize_messages(
+                    &to_summarize, provider, &active_model_id, ctx_window,
+                ).await
             }
             Err(e) => Err(e),
         }
@@ -1754,37 +1917,74 @@ async fn compact_history_llm(
 
     match summary_result {
         Ok(summary) => {
-            let removed = total - keep;
+            let removed = total.saturating_sub(keep);
             {
                 let mut sess = session.lock().await;
                 sess.history.summarize_old(summary.clone(), keep);
             }
+            drain_rendered_for_compaction(state, keep);
 
-            // Trim the rendered view: keep only the most-recent rendered messages
-            let rendered_keep = state.messages.len().saturating_sub(removed.saturating_mul(2));
-            state.messages.drain(..rendered_keep);
+            // Refresh the context-window badge immediately. Without this the
+            // user sees "still 90% used" until the next turn's record_usage
+            // arrives, which feels like compaction did nothing.
+            refresh_context_display(state, session, provider_router).await;
 
+            let preview_end = summary.len().min(500);
             state.push_system(format!(
-                "Compacted: {removed} messages summarized by AI. {keep} messages kept in full.\n\
-                Summary: {}",
-                &summary[..summary.len().min(300)]
+                "Compacted: {removed} messages replaced by AI summary ({} words, {} chars). \
+                 {keep} message(s) kept verbatim.\n\
+                 --- Summary preview ---\n{}{}",
+                summary.split_whitespace().count(),
+                summary.len(),
+                &summary[..preview_end],
+                if summary.len() > preview_end { " …" } else { "" },
             ));
         }
         Err(e) => {
-            // Fall back to simple truncation if LLM call fails
-            let removed = total - keep;
+            // Fall back to plain truncation — we still free the window.
+            let removed = total.saturating_sub(keep);
             {
                 let mut sess = session.lock().await;
                 sess.history.compact(keep);
             }
-            let rendered_keep = state.messages.len().saturating_sub(removed.saturating_mul(2));
-            state.messages.drain(..rendered_keep);
+            drain_rendered_for_compaction(state, keep);
+            refresh_context_display(state, session, provider_router).await;
             state.push_system(format!(
-                "AI summary failed ({e}); fell back to simple truncation. \
-                Removed {removed} messages, {keep} remain."
+                "AI summary failed ({e}); fell back to plain truncation. \
+                 Removed {removed} messages from the context window, {keep} remain. \
+                 Tip: run /model to switch to a cheaper/faster provider for compaction \
+                 and retry /compact."
             ));
         }
     }
+}
+
+/// Recompute the context-window usage % from the CURRENT active provider's
+/// ctx_window and the CURRENT session cost tracker. Used right after a
+/// compaction so the TUI's header reflects the freed budget immediately
+/// rather than on the next turn.
+async fn refresh_context_display(
+    state: &mut AppState,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+) {
+    let ctx_window = {
+        let router = provider_router.read().await;
+        router.active().map(|p| p.context_window()).unwrap_or(128_000)
+    };
+    state.context_limit = ctx_window;
+
+    // After a successful summarize_old / compact, the freshest accurate
+    // estimate of "in context" is the TOKEN count of the new history
+    // (recomputed locally), not the stale `last_prompt_tokens` from the
+    // previous turn which referred to the pre-compaction prefix.
+    let live_estimate: u64 = {
+        let sess = session.lock().await;
+        crate::session::tokens::TokenCounter::count_messages(sess.history.messages()) as u64
+    };
+    state.context_pct = if ctx_window > 0 {
+        ((live_estimate as f64 / ctx_window as f64) * 100.0).min(100.0) as u8
+    } else { 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -1966,6 +2166,24 @@ pub async fn run_tui(
         }
     }
 
+    let file_cache = Arc::new(crate::session::FileStateCache::new());
+    let permission_store = Arc::new(parking_lot::RwLock::new(
+        crate::agent::permissions::PermissionStore::load(),
+    ));
+    let agent_cancel = std::sync::Arc::new(parking_lot::RwLock::new(
+        tokio_util::sync::CancellationToken::new(),
+    ));
+    let permission_mode_state = Arc::new(parking_lot::RwLock::new(
+        if config.general.trust_mode {
+            crate::types::PermissionMode::Bypass
+        } else {
+            crate::types::PermissionMode::Default
+        },
+    ));
+    let thinking_state = Arc::new(parking_lot::RwLock::new(
+        crate::types::ThinkingConfig::Disabled,
+    ));
+
     let agent_loop = Arc::new(AgentLoop {
         provider_router: provider_router.clone(),
         tools: tools.clone(),
@@ -1975,7 +2193,17 @@ pub async fn run_tui(
         permission_tx: perm_req_tx,
         permission_rx: Arc::new(Mutex::new(perm_resp_rx)),
         graph: shared_graph.clone(),
+        file_cache: file_cache.clone(),
+        permission_store: permission_store.clone(),
+        cancel: agent_cancel.clone(),
+        permission_mode: permission_mode_state.clone(),
+        thinking: thinking_state.clone(),
     });
+    // Expose to command handlers below via AppState fields.
+    state.agent_cancel = Some(agent_cancel.clone());
+    state.permission_mode_state = Some(permission_mode_state.clone());
+    state.thinking_state = Some(thinking_state.clone());
+    state.file_cache = Some(file_cache.clone());
 
     // -----------------------------------------------------------------------
     // Main event loop
@@ -2050,6 +2278,32 @@ pub async fn run_tui(
                             limit
                         ),
                     });
+                }
+                AgentEvent::HistoryCompacted { kept, removed, summary_preview, succeeded } => {
+                    // The agent loop already mutated `session.history`.
+                    // Here we (a) drain the rendered conversation pane so
+                    // the user visibly sees the log shrink, (b) refresh the
+                    // context-% bar immediately against the fresh history,
+                    // and (c) push a friendly system message showing what
+                    // was kept.
+                    drain_rendered_for_compaction(&mut state, kept);
+                    refresh_context_display(&mut state, &session, &provider_router).await;
+                    if succeeded {
+                        let preview_end = summary_preview.len().min(500);
+                        state.push_system(format!(
+                            "Auto-compacted: {removed} message(s) replaced by AI summary. \
+                             {kept} kept verbatim.\n--- Summary preview ---\n{}{}",
+                            &summary_preview[..preview_end],
+                            if summary_preview.len() > preview_end { " …" } else { "" },
+                        ));
+                    } else {
+                        state.push_system(format!(
+                            "Auto-compact fell back to plain truncation: {removed} message(s) \
+                             removed from the context window, {kept} remain. Summary was not \
+                             generated — consider switching to a cheaper model for compaction \
+                             via /model and running /compact manually."
+                        ));
+                    }
                 }
                 AgentEvent::Done => {
                     state.spinner.stop();
@@ -2136,14 +2390,19 @@ pub async fn run_tui(
         // ---- Drain graph build progress messages ----
         if state.graph_build_rx.is_some() {
             let mut done = false;
-            // Collect messages without holding borrow on state.graph_build_rx
-            let msgs: Vec<GraphBuildMsg> = {
-                let rx = state.graph_build_rx.as_ref().unwrap();
-                let mut collected = Vec::new();
-                while let Ok(m) = rx.try_recv() {
-                    collected.push(m);
+            // Collect messages without holding borrow on state.graph_build_rx.
+            // `.is_some()` above means `as_ref()` yields Some; we double-check
+            // rather than unwrap-panicking so a hypothetical racey clear
+            // cannot crash the UI.
+            let msgs: Vec<GraphBuildMsg> = match state.graph_build_rx.as_ref() {
+                Some(rx) => {
+                    let mut collected = Vec::new();
+                    while let Ok(m) = rx.try_recv() {
+                        collected.push(m);
+                    }
+                    collected
                 }
-                collected
+                None => Vec::new(),
             };
             for msg in msgs {
                 match msg {
@@ -2323,6 +2582,16 @@ pub async fn run_tui(
                     // Update display names after switch
                     state.provider_id = pid.clone();
                     state.model_id = mid.clone();
+                    // CRITICAL: persist the switch into the Session so that
+                    // compaction, saved sessions, and resume all reference
+                    // the CURRENT provider+model. Without this, `sess.model_id`
+                    // stays pinned to the session's creation-time model and
+                    // subsequent /compact calls fail with "invalid model".
+                    {
+                        let mut sess = session.lock().await;
+                        sess.provider_id = pid.clone();
+                        sess.model_id = mid.clone();
+                    }
                     // Refresh context window from the NEW provider so the
                     // progress bar reflects the correct limit.
                     if let Ok(p) = router.active() {
@@ -2518,6 +2787,16 @@ pub async fn run_tui(
                             }
                             Action::Cancel => {
                                 if state.agent_busy {
+                                    // Cooperative cancel first — lets the agent
+                                    // flush an in-flight provider stream and
+                                    // mark the turn done cleanly. The harder
+                                    // task.abort() remains as a last resort.
+                                    if let Some(tok) = &state.agent_cancel {
+                                        tok.read().cancel();
+                                        // Swap in a fresh token for the next
+                                        // turn (CancellationToken is one-shot).
+                                        *tok.write() = tokio_util::sync::CancellationToken::new();
+                                    }
                                     if let Some(task) = state.agent_task.take() {
                                         task.abort();
                                     }
@@ -2978,7 +3257,16 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             if let Some(ref _confirm_id) = browser.confirm_delete {
                 // Waiting for second `d` or Esc to confirm/cancel delete
                 if key.code == KeyCode::Char('d') {
-                    let id = browser.confirm_delete.take().unwrap();
+                    // The `if let Some(..)` above guarantees confirm_delete
+                    // is Some at this point — but handle None defensively
+                    // rather than panicking on a hypothetical race.
+                    let id = match browser.confirm_delete.take() {
+                        Some(i) => i,
+                        None => {
+                            state.modal = Some(Modal::SessionBrowser(browser));
+                            return;
+                        }
+                    };
                     browser.sessions.retain(|s| s.id != id);
                     if browser.selected >= browser.sessions.len() && !browser.sessions.is_empty() {
                         browser.selected = browser.sessions.len() - 1;

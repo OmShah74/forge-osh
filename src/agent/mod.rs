@@ -10,4 +10,4 @@ pub mod system_prompt;
 pub mod worker;
 
 pub use coordinator::Coordinator;
-pub use r#loop::{AgentEvent, AgentLoop, PermissionRequest};
+pub use r#loop::{AgentEvent, AgentLoop, ConsecutiveFailureTracker, PermissionRequest};

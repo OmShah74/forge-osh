@@ -91,13 +91,34 @@ impl App {
                     .to_string()
             });
 
-        let session = if cli.resume {
-            // Try to load last session
+        let session = if let Some(resume_arg) = &cli.resume {
+            // --resume (no value)        → "__latest__" sentinel → load most recent
+            // --resume <id> / <partial>  → load that session (exact id or id prefix,
+            //                              falling back to name match)
             let sessions = Checkpoint::list()?;
-            if let Some(last) = sessions.first() {
-                Checkpoint::load(&last.id)?
+            let target: Option<String> = if resume_arg == "__latest__" {
+                sessions.first().map(|s| s.id.clone())
             } else {
-                create_new_session(&provider_router, &cli.session, &working_dir).await
+                // exact id → prefix id → name
+                sessions.iter().find(|s| s.id == *resume_arg).map(|s| s.id.clone())
+                    .or_else(|| sessions.iter().find(|s| s.id.starts_with(resume_arg.as_str())).map(|s| s.id.clone()))
+                    .or_else(|| sessions.iter().find(|s| s.name == *resume_arg).map(|s| s.id.clone()))
+            };
+
+            match target {
+                Some(id) => {
+                    let mut loaded = Checkpoint::load(&id)?;
+                    // Honour any user-supplied working directory override
+                    // (--dir) so resumed sessions don't cling to a stale cwd.
+                    if cli.dir.is_some() {
+                        loaded.working_dir = working_dir.clone();
+                    }
+                    loaded
+                }
+                None => {
+                    eprintln!("No matching session for '{resume_arg}', starting fresh.");
+                    create_new_session(&provider_router, &cli.session, &working_dir).await
+                }
             }
         } else if let Some(name) = &cli.session {
             // Try to load named session, or create new
@@ -157,6 +178,11 @@ impl App {
         let (perm_tx, _perm_rx) = mpsc::unbounded_channel::<PermissionRequest>();
         let (_, perm_resp_rx) = mpsc::unbounded_channel::<PermissionResponse>();
 
+        use crate::agent::permissions::PermissionStore;
+        use crate::session::FileStateCache;
+        use crate::types::{PermissionMode, ThinkingConfig};
+        use tokio_util::sync::CancellationToken;
+
         let agent = AgentLoop {
             provider_router: self.provider_router.clone(),
             tools: self.tools.clone(),
@@ -166,6 +192,13 @@ impl App {
             permission_tx: perm_tx,
             permission_rx: Arc::new(Mutex::new(perm_resp_rx)),
             graph: self.shared_graph.clone(),
+            file_cache: Arc::new(FileStateCache::new()),
+            permission_store: Arc::new(parking_lot::RwLock::new(PermissionStore::load())),
+            cancel: Arc::new(parking_lot::RwLock::new(CancellationToken::new())),
+            permission_mode: Arc::new(parking_lot::RwLock::new(
+                if self.config.general.trust_mode { PermissionMode::Bypass } else { PermissionMode::Default },
+            )),
+            thinking: Arc::new(parking_lot::RwLock::new(ThinkingConfig::Disabled)),
         };
 
         // Spawn agent

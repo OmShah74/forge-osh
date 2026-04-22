@@ -1,6 +1,6 @@
 [package]
 name = "forge_agent"
-version = "1.0.14"
+version = "1.0.15"
 edition = "2021"
 authors = ["osh"]
 description = "A universal Rust-based CLI coding agent"
@@ -19,7 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 # Async
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
 futures = "0.3"
 async-trait = "0.1"
 async-stream = "0.3"
@@ -53,10 +53,17 @@ tempfile = "3"
 # Text processing
 regex = "1"
 similar = { version = "2", features = ["unicode"] }
+strsim = "0.11"
 unicode-segmentation = "1"
 strip-ansi-escapes = "0.2"
 html2text = "0.12"
 tiktoken-rs = "0.6"
+
+# Concurrency
+parking_lot = "0.12"
+
+# Runtime validation
+jsonschema = { version = "0.17", default-features = false }
 
 # Security
 sha2 = "0.10"

@@ -16,7 +16,11 @@
       "Bash(export CARGO_TARGET_DIR=\"C:/forge-build\")",
       "Bash(export PATH=\"/c/msys64/mingw64/bin:$PATH\")",
       "Bash(CARGO_TARGET_DIR=C:/forge-build cargo build --release)",
-      "Bash(export PATH=\"/c/Users/OM SHAH/.cargo/bin:/c/msys64/mingw64/bin:$PATH\")"
+      "Bash(export PATH=\"/c/Users/OM SHAH/.cargo/bin:/c/msys64/mingw64/bin:$PATH\")",
+      "Bash(export CARGO_TARGET_DIR=\"/c/cargo-target/forge-osh\")",
+      "Bash(export PATH=\"/c/msys64/ucrt64/bin:/c/msys64/mingw64/bin:$PATH\")",
+      "Bash(export PATH=\"/c/Users/OM SHAH/.cargo/bin:/c/msys64/ucrt64/bin:/c/msys64/mingw64/bin:$PATH\")",
+      "Bash(perl -i -pe 's/TASK_REGISTRY\\\\.lock\\\\\\(\\\\\\)\\\\.unwrap\\\\\\(\\\\\\)/TASK_REGISTRY.lock\\(\\)/g' \"C:/Users/OM SHAH/Desktop/forge-osh/src/tools/tasks.rs\")"
     ]
   }
 }

@@ -34,6 +34,7 @@ pub struct GitStatusTool;
 #[async_trait]
 impl Tool for GitStatusTool {
     fn name(&self) -> &str { "git_status" }
+    fn is_concurrency_safe(&self) -> bool { true }
     fn description(&self) -> &str { "Show the working tree status (like `git status --short`)." }
     fn parameters_schema(&self) -> Value {
         json!({
@@ -63,6 +64,7 @@ pub struct GitDiffTool;
 #[async_trait]
 impl Tool for GitDiffTool {
     fn name(&self) -> &str { "git_diff" }
+    fn is_concurrency_safe(&self) -> bool { true }
     fn description(&self) -> &str {
         "Show changes. Use 'staged' for staged changes, 'commit' to diff between commits."
     }
@@ -117,6 +119,7 @@ pub struct GitLogTool;
 #[async_trait]
 impl Tool for GitLogTool {
     fn name(&self) -> &str { "git_log" }
+    fn is_concurrency_safe(&self) -> bool { true }
     fn description(&self) -> &str { "Show commit history." }
     fn parameters_schema(&self) -> Value {
         json!({
@@ -417,6 +420,7 @@ pub struct GitBlameTool;
 #[async_trait]
 impl Tool for GitBlameTool {
     fn name(&self) -> &str { "git_blame" }
+    fn is_concurrency_safe(&self) -> bool { true }
     fn description(&self) -> &str { "Show who last modified each line of a file (git blame)." }
     fn parameters_schema(&self) -> Value {
         json!({
@@ -454,6 +458,7 @@ pub struct GitShowTool;
 #[async_trait]
 impl Tool for GitShowTool {
     fn name(&self) -> &str { "git_show" }
+    fn is_concurrency_safe(&self) -> bool { true }
     fn description(&self) -> &str { "Show a commit, tag, or other git object (git show <ref>)." }
     fn parameters_schema(&self) -> Value {
         json!({

@@ -1,6 +1,9 @@
 pub mod checkpoint;
+pub mod file_cache;
 pub mod history;
 pub mod tokens;
+
+pub use file_cache::FileStateCache;
 
 use serde::{Deserialize, Serialize};
 

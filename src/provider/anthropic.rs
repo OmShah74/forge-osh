@@ -158,6 +158,31 @@ impl Provider for AnthropicProvider {
             }
         }
 
+        // Extended thinking (Claude 3.7+ / 4+). The thinking block is
+        // advisory — if the model does not support it the server simply
+        // ignores the field. Anthropic requires `temperature = 1.0` when
+        // thinking is enabled, so we override.
+        match request.thinking {
+            ThinkingConfig::Disabled => {}
+            ThinkingConfig::Enabled => {
+                // Anthropic needs a budget; default to half of max_tokens,
+                // floored at 1024 (the API minimum).
+                let budget = (request.max_tokens / 2).max(1024);
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                });
+                body["temperature"] = json!(1.0);
+            }
+            ThinkingConfig::Budget { tokens } => {
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "budget_tokens": tokens.max(1024),
+                });
+                body["temperature"] = json!(1.0);
+            }
+        }
+
         if !request.stop_sequences.is_empty() {
             body["stop_sequences"] = json!(request.stop_sequences);
         }

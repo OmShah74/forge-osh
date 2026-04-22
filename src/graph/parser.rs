@@ -11,6 +11,19 @@ use regex::Regex;
 
 use crate::graph::types::*;
 
+/// `re!(r"...")` — lazily compiles a regex literal to a static `&'static Regex`.
+///
+/// Each call site gets its own `OnceLock<Regex>`; the pattern is compiled on the
+/// first invocation and reused thereafter. Because the pattern is a compile-time
+/// literal, any compile failure is a deterministic programmer bug that surfaces
+/// on first parse, not a runtime panic on malformed input.
+macro_rules! re {
+    ($pattern:expr) => {{
+        static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        RE.get_or_init(|| Regex::new($pattern).expect("invalid regex literal in parser.rs"))
+    }};
+}
+
 // ---------------------------------------------------------------------------
 // Output types (used by the builder)
 // ---------------------------------------------------------------------------
@@ -257,12 +270,12 @@ fn parse_parent_list(raw: &str) -> Vec<String> {
 
 fn parse_rust(path: &str, lines: &[String], language: Language) -> ParsedFile {
     // Regex for use statements
-    let use_re = Regex::new(r"^\s*use\s+(.+?);").unwrap();
+    let use_re = re!(r"^\s*use\s+(.+?);");
     // Regex for approximate call sites: word followed by `(`
-    let call_re = Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(").unwrap();
+    let call_re = re!(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(");
     // Regex for `let mut` and bare assignments (mutation detection)
-    let let_mut_re = Regex::new(r"\blet\s+mut\s+([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
-    let assign_re  = Regex::new(r"^\s*([a-zA-Z_][a-zA-Z0-9_.]*)(?:\[.*?\])?\s*=\s*[^=]").unwrap();
+    let let_mut_re = re!(r"\blet\s+mut\s+([a-zA-Z_][a-zA-Z0-9_]*)");
+    let assign_re  = re!(r"^\s*([a-zA-Z_][a-zA-Z0-9_.]*)(?:\[.*?\])?\s*=\s*[^=]");
 
     let mut defs: Vec<ParsedDef>      = Vec::new();
     let mut imports: Vec<ParsedImport> = Vec::new();
@@ -541,12 +554,12 @@ fn is_rust_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_python(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let def_re   = Regex::new(r"^(\s*)(?:(async)\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
-    let class_re = Regex::new(r"^(\s*)class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\(([^)]*)\))?").unwrap();
-    let imp_re   = Regex::new(r"^\s*import\s+(.+)").unwrap();
-    let from_re  = Regex::new(r"^\s*from\s+\S+\s+import\s+(.+)").unwrap();
-    let call_re  = Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(").unwrap();
-    let const_re = Regex::new(r"^([A-Z][A-Z0-9_]+)\s*=\s*.+").unwrap();
+    let def_re   = re!(r"^(\s*)(?:(async)\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)");
+    let class_re = re!(r"^(\s*)class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\(([^)]*)\))?");
+    let imp_re   = re!(r"^\s*import\s+(.+)");
+    let from_re  = re!(r"^\s*from\s+\S+\s+import\s+(.+)");
+    let call_re  = re!(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(");
+    let const_re = re!(r"^([A-Z][A-Z0-9_]+)\s*=\s*.+");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -681,24 +694,24 @@ fn is_python_keyword(s: &str) -> bool {
 
 fn parse_js_ts(path: &str, lines: &[String], language: Language) -> ParsedFile {
     // Functions: function foo(), async function foo()
-    let fn_re    = Regex::new(r"^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s*\*?\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
+    let fn_re    = re!(r"^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s*\*?\s+([a-zA-Z_$][a-zA-Z0-9_$]*)");
     // Arrow / const fn: const foo = (async )? (...) =>
-    let arr_re   = Regex::new(r"^(?:export\s+)?(?:const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*(?:async\s+)?\(.*\)\s*=>").unwrap();
+    let arr_re   = re!(r"^(?:export\s+)?(?:const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*(?:async\s+)?\(.*\)\s*=>");
     // Class: class Foo extends Bar implements Baz, Qux {
-    let cls_re   = Regex::new(r"^(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)(?:\s+extends\s+([A-Za-z_$][A-Za-z0-9_$.]*))?(?:\s+implements\s+([^{]+))?").unwrap();
+    let cls_re   = re!(r"^(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)(?:\s+extends\s+([A-Za-z_$][A-Za-z0-9_$.]*))?(?:\s+implements\s+([^{]+))?");
     // Interface (TS)
-    let intf_re  = Regex::new(r"^(?:export\s+)?interface\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([^{]+))?").unwrap();
+    let intf_re  = re!(r"^(?:export\s+)?interface\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([^{]+))?");
     // Type alias (TS)
-    let type_re  = Regex::new(r"^(?:export\s+)?type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=").unwrap();
+    let type_re  = re!(r"^(?:export\s+)?type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=");
     // Enum (TS)
-    let enum_re  = Regex::new(r"^(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
+    let enum_re  = re!(r"^(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)");
     // Method inside class: methodName(...) or async methodName(...)
-    let mth_re   = Regex::new(r"^\s+(?:async\s+|static\s+|private\s+|protected\s+|public\s+|readonly\s+|override\s+|abstract\s+)*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(").unwrap();
+    let mth_re   = re!(r"^\s+(?:async\s+|static\s+|private\s+|protected\s+|public\s+|readonly\s+|override\s+|abstract\s+)*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(");
     // Import
-    let imp_re   = Regex::new(r#"^import\s+.*?\s+from\s+['"](.+?)['"]"#).unwrap();
-    let req_re   = Regex::new(r#"require\(['"](.+?)['"]\)"#).unwrap();
+    let imp_re   = re!(r#"^import\s+.*?\s+from\s+['"](.+?)['"]"#);
+    let req_re   = re!(r#"require\(['"](.+?)['"]\)"#);
     // Calls
-    let call_re  = Regex::new(r"\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(").unwrap();
+    let call_re  = re!(r"\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -851,10 +864,10 @@ fn is_js_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_go(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let func_re  = Regex::new(r"^func\s+(?:\([^)]*\)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
-    let type_re  = Regex::new(r"^type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface|func|[A-Za-z])").unwrap();
-    let imp_re   = Regex::new(r#"^\s+"?([^"]+)"?\s*$"#).unwrap();
-    let call_re  = Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(").unwrap();
+    let func_re  = re!(r"^func\s+(?:\([^)]*\)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)");
+    let type_re  = re!(r"^type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface|func|[A-Za-z])");
+    let imp_re   = re!(r#"^\s+"?([^"]+)"?\s*$"#);
+    let call_re  = re!(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -940,15 +953,15 @@ fn is_go_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_java(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let imp_re   = Regex::new(r"^\s*import\s+([\w.]+(?:\.\*)?)\s*;").unwrap();
-    let cls_re   = Regex::new(r"(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+|static\s+)*(?:class|record)\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s+extends\s+([A-Za-z_][\w.]*))?(?:\s+implements\s+([^{]+))?").unwrap();
-    let intf_re  = Regex::new(r"(?:public\s+)?interface\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s+extends\s+([^{]+))?").unwrap();
-    let enum_re  = Regex::new(r"(?:public\s+|private\s+|protected\s+)?enum\s+([A-Za-z_]\w*)").unwrap();
-    let mth_re   = Regex::new(r"^\s+(?:public\s+|private\s+|protected\s+)?(?:static\s+|final\s+|abstract\s+|synchronized\s+|native\s+|default\s+)*(?:<[^>]*>\s+)?(?:[\w<>\[\], ]+?)\s+([a-zA-Z_]\w*)\s*\(").unwrap();
-    let pkg_re   = Regex::new(r"^\s*package\s+([\w.]+)\s*;").unwrap();
-    let call_re  = Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
-    let const_re = Regex::new(r"^\s+(?:public\s+|private\s+|protected\s+)?static\s+final\s+\S+\s+([A-Z][A-Z0-9_]+)\s*=").unwrap();
-    let annot_re = Regex::new(r"^\s*@(\w+)").unwrap();
+    let imp_re   = re!(r"^\s*import\s+([\w.]+(?:\.\*)?)\s*;");
+    let cls_re   = re!(r"(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+|static\s+)*(?:class|record)\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s+extends\s+([A-Za-z_][\w.]*))?(?:\s+implements\s+([^{]+))?");
+    let intf_re  = re!(r"(?:public\s+)?interface\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s+extends\s+([^{]+))?");
+    let enum_re  = re!(r"(?:public\s+|private\s+|protected\s+)?enum\s+([A-Za-z_]\w*)");
+    let mth_re   = re!(r"^\s+(?:public\s+|private\s+|protected\s+)?(?:static\s+|final\s+|abstract\s+|synchronized\s+|native\s+|default\s+)*(?:<[^>]*>\s+)?(?:[\w<>\[\], ]+?)\s+([a-zA-Z_]\w*)\s*\(");
+    let pkg_re   = re!(r"^\s*package\s+([\w.]+)\s*;");
+    let call_re  = re!(r"\b([a-zA-Z_]\w*)\s*\(");
+    let const_re = re!(r"^\s+(?:public\s+|private\s+|protected\s+)?static\s+final\s+\S+\s+([A-Z][A-Z0-9_]+)\s*=");
+    let annot_re = re!(r"^\s*@(\w+)");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -1121,16 +1134,16 @@ fn is_java_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_c_cpp(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let inc_re    = Regex::new(r#"^\s*#include\s+[<"]([^>"]+)[>"]"#).unwrap();
-    let define_re = Regex::new(r"^\s*#define\s+([A-Za-z_]\w*)").unwrap();
-    let struct_re = Regex::new(r"^\s*(?:typedef\s+)?struct\s+([A-Za-z_]\w*)").unwrap();
-    let class_re  = Regex::new(r"^\s*(?:template\s*<[^>]*>\s*)?class\s+([A-Za-z_]\w*)(?:\s*:\s*(?:public|protected|private)\s+([A-Za-z_][\w:]*))?").unwrap();
-    let enum_re   = Regex::new(r"^\s*(?:typedef\s+)?enum\s+(?:class\s+)?([A-Za-z_]\w*)").unwrap();
-    let ns_re     = Regex::new(r"^\s*namespace\s+([A-Za-z_]\w*)").unwrap();
+    let inc_re    = re!(r#"^\s*#include\s+[<"]([^>"]+)[>"]"#);
+    let define_re = re!(r"^\s*#define\s+([A-Za-z_]\w*)");
+    let struct_re = re!(r"^\s*(?:typedef\s+)?struct\s+([A-Za-z_]\w*)");
+    let class_re  = re!(r"^\s*(?:template\s*<[^>]*>\s*)?class\s+([A-Za-z_]\w*)(?:\s*:\s*(?:public|protected|private)\s+([A-Za-z_][\w:]*))?");
+    let enum_re   = re!(r"^\s*(?:typedef\s+)?enum\s+(?:class\s+)?([A-Za-z_]\w*)");
+    let ns_re     = re!(r"^\s*namespace\s+([A-Za-z_]\w*)");
     // Functions: return_type name(params) { — heuristic: look for word(word) { at low indent
-    let fn_re     = Regex::new(r"^(?:static\s+|inline\s+|extern\s+|virtual\s+|const\s+|unsigned\s+|signed\s+)*(?:\w[\w*&: ]*?)\s+\*?([a-zA-Z_]\w*)\s*\([^;]*$").unwrap();
-    let typedef_re = Regex::new(r"^\s*typedef\s+.*\s+(\w+)\s*;").unwrap();
-    let call_re   = Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
+    let fn_re     = re!(r"^(?:static\s+|inline\s+|extern\s+|virtual\s+|const\s+|unsigned\s+|signed\s+)*(?:\w[\w*&: ]*?)\s+\*?([a-zA-Z_]\w*)\s*\([^;]*$");
+    let typedef_re = re!(r"^\s*typedef\s+.*\s+(\w+)\s*;");
+    let call_re   = re!(r"\b([a-zA-Z_]\w*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -1281,16 +1294,16 @@ fn is_c_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_csharp(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let using_re = Regex::new(r"^\s*using\s+([\w.]+)\s*;").unwrap();
-    let ns_re    = Regex::new(r"^\s*namespace\s+([\w.]+)").unwrap();
-    let cls_re   = Regex::new(r"(?:public\s+|private\s+|protected\s+|internal\s+)?(?:abstract\s+|sealed\s+|static\s+|partial\s+)*class\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?").unwrap();
-    let intf_re  = Regex::new(r"(?:public\s+|internal\s+)?interface\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?").unwrap();
-    let enum_re  = Regex::new(r"(?:public\s+|private\s+|internal\s+)?enum\s+([A-Za-z_]\w*)").unwrap();
-    let struct_re = Regex::new(r"(?:public\s+|private\s+|internal\s+)?(?:readonly\s+)?struct\s+([A-Za-z_]\w*)").unwrap();
-    let mth_re   = Regex::new(r"^\s+(?:public\s+|private\s+|protected\s+|internal\s+)?(?:static\s+|virtual\s+|override\s+|abstract\s+|async\s+|sealed\s+)*(?:[\w<>\[\]?, ]+?)\s+([a-zA-Z_]\w*)\s*\(").unwrap();
-    let prop_re  = Regex::new(r"^\s+(?:public\s+|private\s+|protected\s+|internal\s+)?(?:static\s+|virtual\s+|override\s+|abstract\s+)*(?:[\w<>\[\]?, ]+?)\s+([A-Z][a-zA-Z_]\w*)\s*\{").unwrap();
-    let const_re = Regex::new(r"^\s+(?:public\s+|private\s+)?const\s+\S+\s+([A-Za-z_]\w*)\s*=").unwrap();
-    let call_re  = Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
+    let using_re = re!(r"^\s*using\s+([\w.]+)\s*;");
+    let ns_re    = re!(r"^\s*namespace\s+([\w.]+)");
+    let cls_re   = re!(r"(?:public\s+|private\s+|protected\s+|internal\s+)?(?:abstract\s+|sealed\s+|static\s+|partial\s+)*class\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?");
+    let intf_re  = re!(r"(?:public\s+|internal\s+)?interface\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?");
+    let enum_re  = re!(r"(?:public\s+|private\s+|internal\s+)?enum\s+([A-Za-z_]\w*)");
+    let struct_re = re!(r"(?:public\s+|private\s+|internal\s+)?(?:readonly\s+)?struct\s+([A-Za-z_]\w*)");
+    let mth_re   = re!(r"^\s+(?:public\s+|private\s+|protected\s+|internal\s+)?(?:static\s+|virtual\s+|override\s+|abstract\s+|async\s+|sealed\s+)*(?:[\w<>\[\]?, ]+?)\s+([a-zA-Z_]\w*)\s*\(");
+    let prop_re  = re!(r"^\s+(?:public\s+|private\s+|protected\s+|internal\s+)?(?:static\s+|virtual\s+|override\s+|abstract\s+)*(?:[\w<>\[\]?, ]+?)\s+([A-Z][a-zA-Z_]\w*)\s*\{");
+    let const_re = re!(r"^\s+(?:public\s+|private\s+)?const\s+\S+\s+([A-Za-z_]\w*)\s*=");
+    let call_re  = re!(r"\b([a-zA-Z_]\w*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -1484,14 +1497,14 @@ fn is_csharp_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_ruby(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let req_re    = Regex::new(r#"^\s*require(?:_relative)?\s+['"]([^'"]+)['"]"#).unwrap();
-    let class_re  = Regex::new(r"^(\s*)class\s+([A-Za-z_]\w*)(?:\s*<\s*([A-Za-z_][\w:]*))?").unwrap();
-    let module_re = Regex::new(r"^(\s*)module\s+([A-Za-z_]\w*)").unwrap();
-    let def_re    = Regex::new(r"^(\s*)def\s+(self\.)?([a-zA-Z_]\w*[!?=]?)").unwrap();
-    let const_re  = Regex::new(r"^\s*([A-Z][A-Z0-9_]+)\s*=").unwrap();
-    let attr_re   = Regex::new(r"^\s*attr_(?:accessor|reader|writer)\s+:(\w+)").unwrap();
-    let include_re = Regex::new(r"^\s*include\s+([A-Za-z_]\w*)").unwrap();
-    let call_re   = Regex::new(r"\b([a-zA-Z_]\w*)\s*[\(]").unwrap();
+    let req_re    = re!(r#"^\s*require(?:_relative)?\s+['"]([^'"]+)['"]"#);
+    let class_re  = re!(r"^(\s*)class\s+([A-Za-z_]\w*)(?:\s*<\s*([A-Za-z_][\w:]*))?");
+    let module_re = re!(r"^(\s*)module\s+([A-Za-z_]\w*)");
+    let def_re    = re!(r"^(\s*)def\s+(self\.)?([a-zA-Z_]\w*[!?=]?)");
+    let const_re  = re!(r"^\s*([A-Z][A-Z0-9_]+)\s*=");
+    let attr_re   = re!(r"^\s*attr_(?:accessor|reader|writer)\s+:(\w+)");
+    let include_re = re!(r"^\s*include\s+([A-Za-z_]\w*)");
+    let call_re   = re!(r"\b([a-zA-Z_]\w*)\s*[\(]");
 
     let mut defs: Vec<ParsedDef>  = Vec::new();
     let mut imports = Vec::new();
@@ -1627,15 +1640,15 @@ fn is_ruby_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_kotlin(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let imp_re    = Regex::new(r"^\s*import\s+([\w.]+)").unwrap();
-    let cls_re    = Regex::new(r"(?:open\s+|abstract\s+|sealed\s+|data\s+|inner\s+)*class\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*(?:\(.*?\))?\s*:\s*([^{]+))?").unwrap();
-    let intf_re   = Regex::new(r"interface\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?").unwrap();
-    let obj_re    = Regex::new(r"(?:companion\s+)?object\s+([A-Za-z_]\w*)").unwrap();
-    let fun_re    = Regex::new(r"^\s*(?:(?:public|private|protected|internal|override|open|abstract|suspend|inline|infix|operator|tailrec)\s+)*fun\s+(?:<[^>]*>\s+)?([a-zA-Z_]\w*)\s*\(").unwrap();
-    let enum_re   = Regex::new(r"enum\s+class\s+([A-Za-z_]\w*)").unwrap();
-    let const_re  = Regex::new(r"^\s*(?:const\s+)?val\s+([A-Z][A-Z0-9_]+)\s*[=:]").unwrap();
-    let prop_re   = Regex::new(r"^\s+(?:(?:public|private|protected|override|open|lateinit|lazy)\s+)*(?:val|var)\s+([a-zA-Z_]\w*)\s*[=:]").unwrap();
-    let call_re   = Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
+    let imp_re    = re!(r"^\s*import\s+([\w.]+)");
+    let cls_re    = re!(r"(?:open\s+|abstract\s+|sealed\s+|data\s+|inner\s+)*class\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*(?:\(.*?\))?\s*:\s*([^{]+))?");
+    let intf_re   = re!(r"interface\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?");
+    let obj_re    = re!(r"(?:companion\s+)?object\s+([A-Za-z_]\w*)");
+    let fun_re    = re!(r"^\s*(?:(?:public|private|protected|internal|override|open|abstract|suspend|inline|infix|operator|tailrec)\s+)*fun\s+(?:<[^>]*>\s+)?([a-zA-Z_]\w*)\s*\(");
+    let enum_re   = re!(r"enum\s+class\s+([A-Za-z_]\w*)");
+    let const_re  = re!(r"^\s*(?:const\s+)?val\s+([A-Z][A-Z0-9_]+)\s*[=:]");
+    let prop_re   = re!(r"^\s+(?:(?:public|private|protected|override|open|lateinit|lazy)\s+)*(?:val|var)\s+([a-zA-Z_]\w*)\s*[=:]");
+    let call_re   = re!(r"\b([a-zA-Z_]\w*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -1813,15 +1826,15 @@ fn is_kotlin_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_swift(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let imp_re    = Regex::new(r"^\s*import\s+(\w+)").unwrap();
-    let cls_re    = Regex::new(r"(?:open\s+|public\s+|internal\s+|private\s+|fileprivate\s+)?(?:final\s+)?class\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?").unwrap();
-    let struct_re = Regex::new(r"(?:public\s+|internal\s+|private\s+)?struct\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?").unwrap();
-    let proto_re  = Regex::new(r"(?:public\s+|internal\s+)?protocol\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?").unwrap();
-    let enum_re   = Regex::new(r"(?:public\s+|internal\s+|private\s+)?(?:indirect\s+)?enum\s+([A-Za-z_]\w*)").unwrap();
-    let func_re   = Regex::new(r"^\s*(?:(?:public|private|internal|open|fileprivate|override|static|class|mutating|@objc|@discardableResult)\s+)*func\s+([a-zA-Z_]\w*)\s*[<(]").unwrap();
-    let init_re   = Regex::new(r"^\s*(?:(?:public|private|internal|required|convenience|override)\s+)*init[?(]").unwrap();
-    let prop_re   = Regex::new(r"^\s+(?:(?:public|private|internal|open|static|lazy|weak|unowned)\s+)*(?:let|var)\s+([a-zA-Z_]\w*)\s*[=:]").unwrap();
-    let call_re   = Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
+    let imp_re    = re!(r"^\s*import\s+(\w+)");
+    let cls_re    = re!(r"(?:open\s+|public\s+|internal\s+|private\s+|fileprivate\s+)?(?:final\s+)?class\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?");
+    let struct_re = re!(r"(?:public\s+|internal\s+|private\s+)?struct\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?(?:\s*:\s*([^{]+))?");
+    let proto_re  = re!(r"(?:public\s+|internal\s+)?protocol\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?");
+    let enum_re   = re!(r"(?:public\s+|internal\s+|private\s+)?(?:indirect\s+)?enum\s+([A-Za-z_]\w*)");
+    let func_re   = re!(r"^\s*(?:(?:public|private|internal|open|fileprivate|override|static|class|mutating|@objc|@discardableResult)\s+)*func\s+([a-zA-Z_]\w*)\s*[<(]");
+    let init_re   = re!(r"^\s*(?:(?:public|private|internal|required|convenience|override)\s+)*init[?(]");
+    let prop_re   = re!(r"^\s+(?:(?:public|private|internal|open|static|lazy|weak|unowned)\s+)*(?:let|var)\s+([a-zA-Z_]\w*)\s*[=:]");
+    let call_re   = re!(r"\b([a-zA-Z_]\w*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -1999,15 +2012,15 @@ fn is_swift_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_php(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let use_re     = Regex::new(r"^\s*use\s+([\w\\]+)").unwrap();
-    let require_re = Regex::new(r#"^\s*(?:require|require_once|include|include_once)\s+['"]([^'"]+)['"]"#).unwrap();
-    let cls_re     = Regex::new(r"(?:abstract\s+|final\s+)?class\s+([A-Za-z_]\w*)(?:\s+extends\s+([A-Za-z_][\w\\]*))?(?:\s+implements\s+([^{]+))?").unwrap();
-    let intf_re    = Regex::new(r"interface\s+([A-Za-z_]\w*)(?:\s+extends\s+([^{]+))?").unwrap();
-    let trait_re   = Regex::new(r"trait\s+([A-Za-z_]\w*)").unwrap();
-    let fn_re      = Regex::new(r"^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*function\s+([a-zA-Z_]\w*)\s*\(").unwrap();
-    let const_re   = Regex::new(r"^\s*(?:(?:public|private|protected)\s+)?const\s+([A-Za-z_]\w*)\s*=").unwrap();
-    let ns_re      = Regex::new(r"^\s*namespace\s+([\w\\]+)").unwrap();
-    let call_re    = Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
+    let use_re     = re!(r"^\s*use\s+([\w\\]+)");
+    let require_re = re!(r#"^\s*(?:require|require_once|include|include_once)\s+['"]([^'"]+)['"]"#);
+    let cls_re     = re!(r"(?:abstract\s+|final\s+)?class\s+([A-Za-z_]\w*)(?:\s+extends\s+([A-Za-z_][\w\\]*))?(?:\s+implements\s+([^{]+))?");
+    let intf_re    = re!(r"interface\s+([A-Za-z_]\w*)(?:\s+extends\s+([^{]+))?");
+    let trait_re   = re!(r"trait\s+([A-Za-z_]\w*)");
+    let fn_re      = re!(r"^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*function\s+([a-zA-Z_]\w*)\s*\(");
+    let const_re   = re!(r"^\s*(?:(?:public|private|protected)\s+)?const\s+([A-Za-z_]\w*)\s*=");
+    let ns_re      = re!(r"^\s*namespace\s+([\w\\]+)");
+    let call_re    = re!(r"\b([a-zA-Z_]\w*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -2159,11 +2172,11 @@ fn is_php_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_lua(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let req_re    = Regex::new(r#"require\s*\(?\s*['"]([^'"]+)['"]"#).unwrap();
-    let func_re   = Regex::new(r"^\s*(?:local\s+)?function\s+([a-zA-Z_][\w.]*)(?::(\w+))?\s*\(").unwrap();
-    let local_fn  = Regex::new(r"^\s*local\s+function\s+([a-zA-Z_]\w*)\s*\(").unwrap();
-    let assign_fn = Regex::new(r"^\s*(?:local\s+)?([a-zA-Z_][\w.]*)\s*=\s*function\s*\(").unwrap();
-    let call_re   = Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap();
+    let req_re    = re!(r#"require\s*\(?\s*['"]([^'"]+)['"]"#);
+    let func_re   = re!(r"^\s*(?:local\s+)?function\s+([a-zA-Z_][\w.]*)(?::(\w+))?\s*\(");
+    let local_fn  = re!(r"^\s*local\s+function\s+([a-zA-Z_]\w*)\s*\(");
+    let assign_fn = re!(r"^\s*(?:local\s+)?([a-zA-Z_][\w.]*)\s*=\s*function\s*\(");
+    let call_re   = re!(r"\b([a-zA-Z_]\w*)\s*\(");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -2260,15 +2273,15 @@ fn is_lua_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_scala(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let imp_re    = Regex::new(r"^\s*import\s+([\w.{}, _*]+)").unwrap();
-    let cls_re    = Regex::new(r"(?:abstract\s+|sealed\s+|final\s+)?(?:case\s+)?class\s+([A-Za-z_]\w*)(?:\s*\[.*?\])?(?:\s*\(.*?\))?(?:\s+extends\s+(\w[\w.]*))?(?:\s+with\s+(.+?))?(?:\s*\{|$)").unwrap();
-    let trait_re  = Regex::new(r"(?:sealed\s+)?trait\s+([A-Za-z_]\w*)(?:\s*\[.*?\])?(?:\s+extends\s+([^{]+))?").unwrap();
-    let obj_re    = Regex::new(r"(?:case\s+)?object\s+([A-Za-z_]\w*)(?:\s+extends\s+(\w[\w.]*))?(?:\s+with\s+(.+?))?(?:\s*\{|$)").unwrap();
-    let def_re    = Regex::new(r"^\s*(?:(?:override|private|protected|final|lazy|implicit|abstract)\s+)*def\s+([a-zA-Z_]\w*)\s*[\[(]?").unwrap();
-    let val_re    = Regex::new(r"^\s*(?:(?:override|private|protected|final|lazy|implicit)\s+)*(?:val|var)\s+([a-zA-Z_]\w*)\s*[=:]").unwrap();
-    let type_re   = Regex::new(r"^\s*type\s+([A-Za-z_]\w*)").unwrap();
-    let pkg_re    = Regex::new(r"^\s*package\s+([\w.]+)").unwrap();
-    let call_re   = Regex::new(r"\b([a-zA-Z_]\w*)\s*[\(]").unwrap();
+    let imp_re    = re!(r"^\s*import\s+([\w.{}, _*]+)");
+    let cls_re    = re!(r"(?:abstract\s+|sealed\s+|final\s+)?(?:case\s+)?class\s+([A-Za-z_]\w*)(?:\s*\[.*?\])?(?:\s*\(.*?\))?(?:\s+extends\s+(\w[\w.]*))?(?:\s+with\s+(.+?))?(?:\s*\{|$)");
+    let trait_re  = re!(r"(?:sealed\s+)?trait\s+([A-Za-z_]\w*)(?:\s*\[.*?\])?(?:\s+extends\s+([^{]+))?");
+    let obj_re    = re!(r"(?:case\s+)?object\s+([A-Za-z_]\w*)(?:\s+extends\s+(\w[\w.]*))?(?:\s+with\s+(.+?))?(?:\s*\{|$)");
+    let def_re    = re!(r"^\s*(?:(?:override|private|protected|final|lazy|implicit|abstract)\s+)*def\s+([a-zA-Z_]\w*)\s*[\[(]?");
+    let val_re    = re!(r"^\s*(?:(?:override|private|protected|final|lazy|implicit)\s+)*(?:val|var)\s+([a-zA-Z_]\w*)\s*[=:]");
+    let type_re   = re!(r"^\s*type\s+([A-Za-z_]\w*)");
+    let pkg_re    = re!(r"^\s*package\s+([\w.]+)");
+    let call_re   = re!(r"\b([a-zA-Z_]\w*)\s*[\(]");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();
@@ -2450,10 +2463,10 @@ fn is_scala_keyword(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_bash(path: &str, lines: &[String], language: Language) -> ParsedFile {
-    let source_re = Regex::new(r#"^\s*(?:source|\.) (?:['"])?([^'";\s]+)"#).unwrap();
-    let fn_re1    = Regex::new(r"^\s*function\s+([a-zA-Z_]\w*)\s*\(?").unwrap();
-    let fn_re2    = Regex::new(r"^\s*([a-zA-Z_]\w*)\s*\(\s*\)\s*\{?").unwrap();
-    let call_re   = Regex::new(r"\b([a-zA-Z_]\w*)\s").unwrap();
+    let source_re = re!(r#"^\s*(?:source|\.) (?:['"])?([^'";\s]+)"#);
+    let fn_re1    = re!(r"^\s*function\s+([a-zA-Z_]\w*)\s*\(?");
+    let fn_re2    = re!(r"^\s*([a-zA-Z_]\w*)\s*\(\s*\)\s*\{?");
+    let call_re   = re!(r"\b([a-zA-Z_]\w*)\s");
 
     let mut defs    = Vec::new();
     let mut imports = Vec::new();

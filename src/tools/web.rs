@@ -11,6 +11,7 @@ pub struct WebFetchTool;
 #[async_trait]
 impl Tool for WebFetchTool {
     fn name(&self) -> &str { "web_fetch" }
+    fn is_concurrency_safe(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Fetch a URL and return its content as plain text. HTML is converted to readable text."
