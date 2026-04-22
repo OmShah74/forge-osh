@@ -23,6 +23,7 @@ pub struct SearchFilesTool;
 #[async_trait]
 impl Tool for SearchFilesTool {
     fn name(&self) -> &str { "search_files" }
+    fn is_concurrency_safe(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Search for text patterns in files using regex or fixed strings. Returns matching lines with \
@@ -326,6 +327,7 @@ pub struct FindFilesTool;
 #[async_trait]
 impl Tool for FindFilesTool {
     fn name(&self) -> &str { "find_files" }
+    fn is_concurrency_safe(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Find files by name or glob pattern. Respects .gitignore. Returns paths relative to the search directory."
@@ -426,6 +428,8 @@ mod tests {
             home_dir: dir.to_path_buf(),
             session_id: "test".to_string(),
             trust_mode: true,
+        permission_mode: crate::types::PermissionMode::Default,
+        file_cache: None,
         }
     }
 

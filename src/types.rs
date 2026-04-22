@@ -73,6 +73,37 @@ pub struct ToolDefinition {
 // Chat request / response
 // ---------------------------------------------------------------------------
 
+/// Extended thinking configuration. Providers that do not support thinking
+/// (OpenAI, Ollama) simply ignore this field; Anthropic translates
+/// `Budget(n)` into its `thinking = { type: enabled, budget_tokens: n }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThinkingConfig {
+    /// Extended thinking off.
+    Disabled,
+    /// Let the model/provider decide the budget.
+    Enabled,
+    /// Ask the model to reserve at most `tokens` for extended thinking.
+    Budget { tokens: u32 },
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self { ThinkingConfig::Disabled }
+}
+
+impl ThinkingConfig {
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, ThinkingConfig::Disabled)
+    }
+
+    /// The explicit budget in tokens, if any.
+    pub fn budget(&self) -> Option<u32> {
+        match self {
+            ThinkingConfig::Budget { tokens } => Some(*tokens),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub model: String,
@@ -82,6 +113,7 @@ pub struct ChatRequest {
     pub temperature: f32,
     pub system: Option<String>,
     pub stop_sequences: Vec<String>,
+    pub thinking: ThinkingConfig,
 }
 
 impl Default for ChatRequest {
@@ -94,6 +126,7 @@ impl Default for ChatRequest {
             temperature: 0.7,
             system: None,
             stop_sequences: Vec::new(),
+            thinking: ThinkingConfig::Disabled,
         }
     }
 }
@@ -197,16 +230,96 @@ pub enum PermissionResponse {
     TrustMode,
 }
 
+/// How the permission system should behave for this session.
+///
+/// - `Default`: standard behaviour — ReadOnly tools auto-allow, others prompt
+///   unless a stored PermissionStore rule says otherwise.
+/// - `Plan`: the agent may only use ReadOnly tools; any Mutating/Destructive/
+///   Shell/Network call is denied automatically. Used by `enter_plan_mode`.
+/// - `AcceptEdits`: ReadOnly and Mutating tools auto-allow; Destructive / Shell
+///   / Network still prompt. Matches Claude Code's "accept edits" mode.
+/// - `Bypass`: every tool is auto-allowed. Dangerous — equivalent to the old
+///   `trust_mode = true` flag, preserved for backwards compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionMode {
+    Default,
+    Plan,
+    AcceptEdits,
+    Bypass,
+}
+
+impl Default for PermissionMode {
+    fn default() -> Self { PermissionMode::Default }
+}
+
+impl PermissionMode {
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            PermissionMode::Default => "default",
+            PermissionMode::Plan => "plan",
+            PermissionMode::AcceptEdits => "accept-edits",
+            PermissionMode::Bypass => "bypass",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "default" | "normal" => Some(PermissionMode::Default),
+            "plan" => Some(PermissionMode::Plan),
+            "accept-edits" | "accept_edits" | "acceptedits" | "accept" => Some(PermissionMode::AcceptEdits),
+            "bypass" | "trust" | "yolo" => Some(PermissionMode::Bypass),
+            _ => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tool context
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub working_dir: std::path::PathBuf,
     pub home_dir: std::path::PathBuf,
     pub session_id: String,
+    /// Kept for backwards compatibility with call sites that only care
+    /// about "is everything blessed?" (equivalent to `mode == Bypass`).
     pub trust_mode: bool,
+    /// Fine-grained permission mode. `Bypass` implies `trust_mode == true`.
+    pub permission_mode: PermissionMode,
+    /// Optional shared file-state cache. Tools that mutate files should call
+    /// `check_unchanged` through this before writing; ReadOnly file tools
+    /// should `record_read` after a successful read. Absent in tests that
+    /// synthesise minimal contexts — tools must degrade to "no cache" rather
+    /// than panicking.
+    #[doc(hidden)]
+    pub file_cache: Option<std::sync::Arc<crate::session::FileStateCache>>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("working_dir", &self.working_dir)
+            .field("home_dir", &self.home_dir)
+            .field("session_id", &self.session_id)
+            .field("trust_mode", &self.trust_mode)
+            .field("permission_mode", &self.permission_mode)
+            .field("file_cache", &self.file_cache.as_ref().map(|c| c.len()))
+            .finish()
+    }
+}
+
+impl ToolContext {
+    pub fn new(working_dir: std::path::PathBuf, session_id: String, mode: PermissionMode) -> Self {
+        Self {
+            working_dir,
+            home_dir: dirs::home_dir().unwrap_or_default(),
+            session_id,
+            trust_mode: mode == PermissionMode::Bypass,
+            permission_mode: mode,
+            file_cache: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

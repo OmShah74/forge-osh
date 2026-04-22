@@ -17,6 +17,7 @@ pub struct NotebookReadTool;
 #[async_trait]
 impl Tool for NotebookReadTool {
     fn name(&self) -> &str { "notebook_read" }
+    fn is_concurrency_safe(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Read a Jupyter notebook (.ipynb) file and return its cells as formatted text. \

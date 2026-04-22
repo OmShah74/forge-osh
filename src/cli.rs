@@ -24,9 +24,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub session: Option<String>,
 
-    /// Resume last session
-    #[arg(short, long)]
-    pub resume: bool,
+    /// Resume a session by ID. Omit the value (`--resume`) to resume the most
+    /// recently saved session. Pass an explicit id to resume that session:
+    /// `--resume e1fa0…`.
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "__latest__")]
+    pub resume: Option<String>,
 
     /// Working directory
     #[arg(short, long)]

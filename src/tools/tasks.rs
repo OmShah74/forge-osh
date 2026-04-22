@@ -4,9 +4,10 @@
 //! and track in-session tasks with status (pending → in_progress → completed).
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::fs;
 
 use crate::types::*;
@@ -228,7 +229,7 @@ impl Tool for TaskCreateTool {
         };
         let description = input["description"].as_str().unwrap_or("").to_string();
 
-        let mut registry = TASK_REGISTRY.lock().unwrap();
+        let mut registry = TASK_REGISTRY.lock();
         let id = format!("task-{}", registry.len() + 1);
         let now = chrono::Utc::now();
 
@@ -288,7 +289,7 @@ impl Tool for TaskUpdateTool {
         };
         let output_msg = input["output"].as_str().map(String::from);
 
-        let mut registry = TASK_REGISTRY.lock().unwrap();
+        let mut registry = TASK_REGISTRY.lock();
         match registry.iter_mut().find(|t| t.id == id) {
             Some(task) => {
                 task.status = TaskStatus::from_str(status_str);
@@ -312,6 +313,7 @@ pub struct TaskGetTool;
 #[async_trait]
 impl Tool for TaskGetTool {
     fn name(&self) -> &str { "task_get" }
+    fn is_concurrency_safe(&self) -> bool { true }
     fn description(&self) -> &str { "Get details of a specific task by ID." }
 
     fn parameters_schema(&self) -> Value {
@@ -332,7 +334,7 @@ impl Tool for TaskGetTool {
             None => return ToolOutput::error("Missing 'id' parameter"),
         };
 
-        let registry = TASK_REGISTRY.lock().unwrap();
+        let registry = TASK_REGISTRY.lock();
         match registry.iter().find(|t| t.id == id) {
             Some(task) => {
                 let mut lines = vec![
@@ -362,6 +364,7 @@ pub struct TaskListTool;
 #[async_trait]
 impl Tool for TaskListTool {
     fn name(&self) -> &str { "task_list" }
+    fn is_concurrency_safe(&self) -> bool { true }
     fn description(&self) -> &str { "List all tasks in the current session." }
 
     fn parameters_schema(&self) -> Value {
@@ -381,7 +384,7 @@ impl Tool for TaskListTool {
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let filter = input["status_filter"].as_str().unwrap_or("all");
-        let registry = TASK_REGISTRY.lock().unwrap();
+        let registry = TASK_REGISTRY.lock();
 
         let tasks: Vec<&TaskEntry> = registry.iter()
             .filter(|t| filter == "all" || t.status.to_string() == filter)

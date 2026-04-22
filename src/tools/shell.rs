@@ -393,6 +393,8 @@ mod tests {
             home_dir: dirs::home_dir().unwrap_or_default(),
             session_id: "test".to_string(),
             trust_mode: true,
+        permission_mode: crate::types::PermissionMode::Default,
+        file_cache: None,
         }
     }
 

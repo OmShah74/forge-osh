@@ -50,9 +50,16 @@ impl ConversationHistory {
         self.messages.len()
     }
 
-    /// Replace old messages with a summary, keeping the last `keep_last` messages
+    /// Replace the prefix of `messages` with a single summary message,
+    /// keeping the last `keep_last` messages verbatim.
+    ///
+    /// With `keep_last = 0` every existing message is replaced by the
+    /// summary (the typical auto-compact case). The previous off-by-one
+    /// guard `<= keep_last + 1` caused a 1-message conversation to silently
+    /// skip compaction — now we only bail when there is strictly nothing
+    /// older than `keep_last` to drop.
     pub fn summarize_old(&mut self, summary: String, keep_last: usize) {
-        if self.messages.len() <= keep_last + 1 {
+        if self.messages.len() <= keep_last {
             return;
         }
         let keep_from = self.messages.len().saturating_sub(keep_last);

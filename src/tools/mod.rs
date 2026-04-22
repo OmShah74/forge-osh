@@ -8,6 +8,7 @@ pub mod powershell;
 pub mod search;
 pub mod shell;
 pub mod tasks;
+pub mod validate;
 pub mod web;
 pub mod worktree;
 
@@ -28,6 +29,15 @@ pub trait Tool: Send + Sync {
     /// Default delegates to `permission_level()`. Override to enable input-aware classification.
     fn effective_permission_level(&self, _input: &serde_json::Value) -> PermissionLevel {
         self.permission_level()
+    }
+
+    /// Whether this tool is safe to run concurrently with other
+    /// concurrency-safe tools in the same turn. ReadOnly tools that do no
+    /// shared-filesystem mutation (`read_file`, `search_files`, `find_files`,
+    /// `list_directory`, `git_status`, `git_diff`, `web_fetch`, etc.) should
+    /// override this to return `true`. Default: `false` (run serially).
+    fn is_concurrency_safe(&self) -> bool {
+        false
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolOutput;

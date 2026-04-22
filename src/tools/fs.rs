@@ -23,6 +23,7 @@ pub struct ReadFileTool;
 #[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str { "read_file" }
+    fn is_concurrency_safe(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Read the contents of a file. Optionally specify start and end line numbers."
@@ -122,6 +123,11 @@ impl Tool for ReadFileTool {
                     .map(|(i, line)| format!("{:>4} | {}", start + i + 1, line))
                     .collect();
 
+                // Record the read so later edits can detect external mutation.
+                if let Some(ref cache) = ctx.file_cache {
+                    cache.record_read(&path);
+                }
+
                 ToolOutput::success(format!(
                     "File: {} ({} lines total, showing {}-{})\n\n{}",
                     path.display(),
@@ -173,6 +179,13 @@ impl Tool for WriteFileTool {
 
         let path = resolve_path(path_str, ctx);
 
+        // Refuse to silently overwrite content the agent hasn't observed yet.
+        if let Some(ref cache) = ctx.file_cache {
+            if let Err(msg) = cache.check_unchanged(&path) {
+                return ToolOutput::error(msg);
+            }
+        }
+
         // Read old content before overwriting so we can show a diff
         let old_content = if path.exists() {
             fs::read_to_string(&path).await.unwrap_or_default()
@@ -194,6 +207,10 @@ impl Tool for WriteFileTool {
             Ok(_) => {
                 let action = if old_content.is_empty() { "Created" } else { "Updated" };
                 let diff = generate_diff(&old_content, content);
+                // Refresh the fingerprint so the next edit isn't blocked.
+                if let Some(ref cache) = ctx.file_cache {
+                    cache.record_write(&path);
+                }
                 ToolOutput::success(format!(
                     "{} {} ({} bytes)\n\n{}",
                     action, path.display(), content.len(), diff
@@ -208,12 +225,162 @@ impl Tool for WriteFileTool {
 
 pub struct EditFileTool;
 
+// ─── Helpers for robust string matching ───────────────────────────────────
+
+/// Normalize all line endings to `\n` (handles \r\n and bare \r).
+fn normalize_endings(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Strip leading/trailing whitespace from every line while preserving line count.
+fn normalize_whitespace_per_line(s: &str) -> String {
+    s.lines()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Find the closest matching regions in `content` for a given `needle`.
+/// Returns `(start_line_1indexed, similarity_score, matched_snippet)`.
+fn find_closest_matches(content: &str, needle: &str, max_results: usize) -> Vec<(usize, f64, String)> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let needle_lines: Vec<&str> = needle.lines().collect();
+    let needle_len = needle_lines.len().max(1);
+
+    // Normalize needle for comparison
+    let needle_norm: Vec<String> = needle_lines.iter().map(|l| l.trim().to_string()).collect();
+    let needle_joined = needle_norm.join("\n");
+
+    let mut candidates: Vec<(usize, f64, String)> = Vec::new();
+
+    for start in 0..content_lines.len().saturating_sub(needle_len.saturating_sub(1)) {
+        let end = (start + needle_len).min(content_lines.len());
+        let window: Vec<&str> = content_lines[start..end].to_vec();
+        let window_norm: Vec<String> = window.iter().map(|l| l.trim().to_string()).collect();
+        let window_joined = window_norm.join("\n");
+
+        let similarity = strsim::normalized_levenshtein(&window_joined, &needle_joined);
+
+        if similarity > 0.55 {
+            let snippet = content_lines[start..end].join("\n");
+            candidates.push((start + 1, similarity, snippet));
+        }
+    }
+
+    // Sort by descending similarity
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(max_results);
+    candidates
+}
+
+/// Attempt to apply an edit using various matching strategies.
+/// Returns Ok(new_content) on success, or Err(diagnostic_message) on failure.
+fn apply_edit_robust(content: &str, old_str: &str, new_str: &str, edit_index: usize) -> Result<(String, String), String> {
+    // Strategy 1: Exact match (original behavior)
+    let count = content.matches(old_str).count();
+    if count == 1 {
+        let result = content.replacen(old_str, new_str, 1);
+        return Ok((result, format!("  Edit {}: applied (exact match)", edit_index)));
+    }
+    if count > 1 {
+        return Err(format!(
+            "Edit {}: old_str found {} times (must be unique). Include more surrounding \
+             context lines in old_str to narrow it down to exactly one match.",
+            edit_index, count
+        ));
+    }
+
+    // Strategy 2: CRLF-normalized match
+    let norm_content = normalize_endings(content);
+    let norm_old = normalize_endings(old_str);
+    let norm_new = normalize_endings(new_str);
+    let norm_count = norm_content.matches(&norm_old).count();
+    if norm_count == 1 {
+        let result = norm_content.replacen(&norm_old, &norm_new, 1);
+        return Ok((result, format!("  Edit {}: applied (auto-fixed line endings \\r\\n → \\n)", edit_index)));
+    }
+
+    // Strategy 3: Whitespace-normalized match (trim each line)
+    let ws_content = normalize_whitespace_per_line(&norm_content);
+    let ws_old = normalize_whitespace_per_line(&norm_old);
+    if !ws_old.is_empty() {
+        let ws_count = ws_content.matches(&ws_old).count();
+        if ws_count == 1 {
+            // Find the position in the whitespace-normalized version
+            if let Some(ws_pos) = ws_content.find(&ws_old) {
+                // Map back to the original: count how many newlines before ws_pos
+                let line_start = ws_content[..ws_pos].matches('\n').count();
+                let line_count = ws_old.matches('\n').count() + 1;
+                let orig_lines: Vec<&str> = norm_content.lines().collect();
+                let end_line = (line_start + line_count).min(orig_lines.len());
+
+                // Replace those lines in the normalized content
+                let mut result_lines: Vec<&str> = Vec::new();
+                result_lines.extend_from_slice(&orig_lines[..line_start]);
+                for line in norm_new.lines() {
+                    result_lines.push(line);
+                }
+                result_lines.extend_from_slice(&orig_lines[end_line..]);
+                let result = result_lines.join("\n");
+                // Preserve trailing newline if original had one
+                let result = if norm_content.ends_with('\n') && !result.ends_with('\n') {
+                    result + "\n"
+                } else {
+                    result
+                };
+                return Ok((result, format!(
+                    "  Edit {}: applied (auto-fixed whitespace differences at line {})",
+                    edit_index, line_start + 1
+                )));
+            }
+        }
+    }
+
+    // All strategies failed — build rich diagnostic error
+    let candidates = find_closest_matches(&norm_content, old_str, 3);
+
+    let mut err_msg = format!("Edit {}: old_str not found in file.\n", edit_index);
+
+    if !candidates.is_empty() {
+        err_msg.push_str("\n── Closest matches found ──\n");
+        for (line, score, snippet) in &candidates {
+            let preview: String = snippet
+                .lines()
+                .take(5)
+                .map(|l| format!("    │ {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            err_msg.push_str(&format!(
+                "  Line {line} ({:.0}% similar):\n{preview}\n\n",
+                score * 100.0
+            ));
+        }
+        err_msg.push_str(
+            "TIP: Your old_str has whitespace, line-ending, or content differences \
+             from what is actually in the file. Copy the EXACT text from a fresh \
+             read_file call. If edit_file keeps failing, use write_file to replace \
+             the entire file contents instead."
+        );
+    } else {
+        err_msg.push_str(
+            "\nThe text you provided does not exist anywhere in the file (no close matches found).\n\
+             The file may have been modified since you last read it.\n\n\
+             RECOVERY: Use read_file to get the current content, then either:\n\
+             1. Retry edit_file with the EXACT text from the file, OR\n\
+             2. Use write_file with the complete corrected file contents."
+        );
+    }
+
+    Err(err_msg)
+}
+
 #[async_trait]
 impl Tool for EditFileTool {
     fn name(&self) -> &str { "edit_file" }
 
     fn description(&self) -> &str {
-        "Apply targeted edits to a file using search-and-replace. The old_str must uniquely identify the location."
+        "Apply targeted edits to a file using search-and-replace. The old_str must uniquely \
+         identify the location. Automatically handles line-ending and whitespace normalization."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -255,6 +422,13 @@ impl Tool for EditFileTool {
             return ToolOutput::error(format!("File not found: {}", path.display()));
         }
 
+        // Refuse to edit if the on-disk content has changed since the last read.
+        if let Some(ref cache) = ctx.file_cache {
+            if let Err(msg) = cache.check_unchanged(&path) {
+                return ToolOutput::error(msg);
+            }
+        }
+
         // Snapshot before editing (enables /undo)
         file_history::take_snapshot(&path).await;
 
@@ -276,34 +450,30 @@ impl Tool for EditFileTool {
                 None => return ToolOutput::error(format!("Edit {}: missing new_str", i + 1)),
             };
 
-            let count = content.matches(old_str).count();
-            if count == 0 {
-                return ToolOutput::error(format!(
-                    "Edit {}: old_str not found in file:\n{}",
-                    i + 1,
-                    old_str
-                ));
+            match apply_edit_robust(&content, old_str, new_str, i + 1) {
+                Ok((new_content, change_msg)) => {
+                    content = new_content;
+                    changes.push(change_msg);
+                }
+                Err(err_msg) => {
+                    return ToolOutput::error(err_msg);
+                }
             }
-            if count > 1 {
-                return ToolOutput::error(format!(
-                    "Edit {}: old_str found {} times (must be unique). Provide more context.",
-                    i + 1,
-                    count
-                ));
-            }
-
-            content = content.replacen(old_str, new_str, 1);
-            changes.push(format!("  Edit {}: replaced {} chars", i + 1, old_str.len()));
         }
 
         match fs::write(&path, &content).await {
             Ok(_) => {
                 // Generate a simple diff summary
                 let diff = generate_diff(&original, &content);
+                let change_notes = changes.join("\n");
+                if let Some(ref cache) = ctx.file_cache {
+                    cache.record_write(&path);
+                }
                 ToolOutput::success(format!(
-                    "Applied {} edit(s) to {}\n\n{}",
+                    "Applied {} edit(s) to {}\n{}\n\n{}",
                     edits.len(),
                     path.display(),
+                    change_notes,
                     diff
                 ))
             }
@@ -380,6 +550,9 @@ impl Tool for CreateFileTool {
         match fs::write(&path, content).await {
             Ok(_) => {
                 let diff = generate_diff("", content);
+                if let Some(ref cache) = ctx.file_cache {
+                    cache.record_write(&path);
+                }
                 ToolOutput::success(format!(
                     "Created {} ({} bytes)\n\n{}",
                     path.display(), content.len(), diff
@@ -432,12 +605,22 @@ impl Tool for DeleteFileTool {
 
         if path.is_dir() {
             match fs::remove_dir_all(&path).await {
-                Ok(_) => ToolOutput::success(format!("Deleted directory: {}", path.display())),
+                Ok(_) => {
+                    if let Some(ref cache) = ctx.file_cache {
+                        cache.invalidate(&path);
+                    }
+                    ToolOutput::success(format!("Deleted directory: {}", path.display()))
+                }
                 Err(e) => ToolOutput::error(format!("Failed to delete directory: {e}")),
             }
         } else {
             match fs::remove_file(&path).await {
-                Ok(_) => ToolOutput::success(format!("Deleted file: {}", path.display())),
+                Ok(_) => {
+                    if let Some(ref cache) = ctx.file_cache {
+                        cache.invalidate(&path);
+                    }
+                    ToolOutput::success(format!("Deleted file: {}", path.display()))
+                }
                 Err(e) => ToolOutput::error(format!("Failed to delete file: {e}")),
             }
         }
@@ -451,6 +634,7 @@ pub struct ListDirectoryTool;
 #[async_trait]
 impl Tool for ListDirectoryTool {
     fn name(&self) -> &str { "list_directory" }
+    fn is_concurrency_safe(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "List contents of a directory with optional recursive traversal and filtering."
@@ -654,6 +838,8 @@ mod tests {
             home_dir: dir.to_path_buf(),
             session_id: "test".to_string(),
             trust_mode: true,
+        permission_mode: crate::types::PermissionMode::Default,
+        file_cache: None,
         }
     }
 

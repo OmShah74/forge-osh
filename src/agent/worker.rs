@@ -176,6 +176,7 @@ impl Worker {
                     temperature: 0.7,
                     system: Some(system),
                     stop_sequences: Vec::new(),
+                    thinking: ThinkingConfig::Disabled,
                 }
             };
 
@@ -238,6 +239,8 @@ impl Worker {
                 home_dir: dirs::home_dir().unwrap_or_default(),
                 session_id: self.id.clone(),
                 trust_mode: true, // Workers always run in trust mode
+                permission_mode: crate::types::PermissionMode::Bypass,
+        file_cache: None,
             };
 
             for tc in &tool_calls {
@@ -247,11 +250,15 @@ impl Worker {
                     name: tc.name.clone(),
                 });
 
+                let store = crate::agent::permissions::PermissionStore::load();
+                let cancel = tokio_util::sync::CancellationToken::new();
                 let output = executor
                     .execute(
                         tc,
                         &ctx,
                         &self.tools,
+                        &store,
+                        &cancel,
                         |_name, _desc, _level| async move {
                             // Workers always auto-approve (coordinator authorized them)
                             PermissionResponse::Allow
