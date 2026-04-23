@@ -6,12 +6,15 @@ pub mod renderer;
 pub mod spinner;
 pub mod themes;
 
-use std::sync::Arc;
 use crate::agent::Coordinator;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -19,8 +22,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::agent::{AgentEvent, AgentLoop, PermissionRequest};
-use crate::config::{self, Config};
 use crate::config::keyring::KeyStore;
+use crate::config::{self, Config};
 use crate::graph::{CodeGraph, GraphBuildMsg, SharedGraph};
 use crate::provider::router::ProviderRouter;
 use crate::session::Session;
@@ -43,8 +46,13 @@ pub struct RenderedMessage {
 pub enum MessageRole {
     User,
     Assistant,
-    ToolCall { name: String },
-    ToolResult { is_error: bool, tool_name: String },
+    ToolCall {
+        name: String,
+    },
+    ToolResult {
+        is_error: bool,
+        tool_name: String,
+    },
     System,
     /// ASCII-art splash shown once at startup
     Splash,
@@ -135,15 +143,23 @@ pub struct SessionBrowserState {
 
 impl SessionBrowserState {
     pub fn new(sessions: Vec<crate::session::checkpoint::SessionSummary>) -> Self {
-        Self { sessions, selected: 0, confirm_delete: None }
+        Self {
+            sessions,
+            selected: 0,
+            confirm_delete: None,
+        }
     }
 
     pub fn move_up(&mut self) {
-        if self.selected > 0 { self.selected -= 1; }
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.sessions.len() { self.selected += 1; }
+        if self.selected + 1 < self.sessions.len() {
+            self.selected += 1;
+        }
     }
 
     pub fn selected_id(&self) -> Option<&str> {
@@ -219,13 +235,19 @@ pub struct AppState {
     /// Cancellation token shared with the active AgentLoop. Ctrl+C / Esc calls
     /// `.read().cancel()` here to abort in-flight provider streams and tool
     /// runs; `.write()` to swap in a fresh token before the next turn.
-    pub agent_cancel: Option<std::sync::Arc<parking_lot::RwLock<tokio_util::sync::CancellationToken>>>,
+    pub agent_cancel:
+        Option<std::sync::Arc<parking_lot::RwLock<tokio_util::sync::CancellationToken>>>,
     /// Live permission-mode state — toggled by /plan, /accept-edits, /bypass.
-    pub permission_mode_state: Option<std::sync::Arc<parking_lot::RwLock<crate::types::PermissionMode>>>,
+    pub permission_mode_state:
+        Option<std::sync::Arc<parking_lot::RwLock<crate::types::PermissionMode>>>,
     /// Live thinking-config state — toggled by /think, /think-budget.
     pub thinking_state: Option<std::sync::Arc<parking_lot::RwLock<crate::types::ThinkingConfig>>>,
     /// Session-scoped file state cache.
     pub file_cache: Option<std::sync::Arc<crate::session::FileStateCache>>,
+    /// Shared skill registry (populated post-boot from run_tui).
+    pub skill_registry: Option<crate::skills::SharedSkillRegistry>,
+    /// Currently-active skill name shown in the status bar (None = no scope).
+    pub active_skill_label: Option<String>,
 }
 
 impl AppState {
@@ -273,6 +295,8 @@ impl AppState {
             permission_mode_state: None,
             thinking_state: None,
             file_cache: None,
+            skill_registry: None,
+            active_skill_label: None,
         }
     }
 
@@ -333,7 +357,8 @@ async fn handle_slash_command(
     session: &Arc<Mutex<Session>>,
     provider_router: &Arc<RwLock<ProviderRouter>>,
     key_store: &Arc<Mutex<KeyStore>>,
-    _config: &Arc<Config>,
+    config: &Arc<Config>,
+    agent_loop: &Arc<AgentLoop>,
 ) -> bool {
     // Delegate /forge-graph before reaching the big match
     if text.trim_start().starts_with("/forge-graph") {
@@ -408,7 +433,9 @@ async fn handle_slash_command(
                 // Direct model switch: /model <model-id>
                 // First try catalog match, then fall back to using the ID directly (custom model)
                 let models = crate::config::models::models_for_provider(&pid);
-                let found = models.iter().find(|m| m.id == arg || m.name.to_lowercase().contains(&arg.to_lowercase()));
+                let found = models
+                    .iter()
+                    .find(|m| m.id == arg || m.name.to_lowercase().contains(&arg.to_lowercase()));
                 if let Some(m) = found {
                     let model_id = m.id.clone();
                     let model_name = m.name.clone();
@@ -505,14 +532,19 @@ async fn handle_slash_command(
             state.trust_mode = !state.trust_mode;
             state.push_system(format!(
                 "Trust mode: {}",
-                if state.trust_mode { "ON  (all tool permissions auto-approved)" } else { "OFF  (tool permissions will be prompted)" }
+                if state.trust_mode {
+                    "ON  (all tool permissions auto-approved)"
+                } else {
+                    "OFF  (tool permissions will be prompted)"
+                }
             ));
         }
 
         "/compact" => {
             // LLM-based compact: summarize old messages using the active provider.
             let keep = if !arg.is_empty() {
-                arg.parse().unwrap_or(crate::agent::compaction::DEFAULT_KEEP_LAST)
+                arg.parse()
+                    .unwrap_or(crate::agent::compaction::DEFAULT_KEEP_LAST)
             } else {
                 crate::agent::compaction::DEFAULT_KEEP_LAST
             };
@@ -530,7 +562,9 @@ async fn handle_slash_command(
                 let mut sess = session.lock().await;
                 sess.history.clear();
             }
-            state.messages.retain(|m| matches!(m.role, MessageRole::Splash));
+            state
+                .messages
+                .retain(|m| matches!(m.role, MessageRole::Splash));
             state.push_system("New conversation started. History cleared.");
         }
 
@@ -556,19 +590,18 @@ async fn handle_slash_command(
             ));
         }
 
-        "/sessions" | "/history" => {
-            match crate::session::checkpoint::Checkpoint::list() {
-                Ok(sessions) if sessions.is_empty() => {
-                    state.push_system("No saved sessions found. Use /save to save the current session.");
-                }
-                Ok(sessions) => {
-                    state.modal = Some(Modal::SessionBrowser(SessionBrowserState::new(sessions)));
-                }
-                Err(e) => {
-                    state.push_system(format!("Failed to list sessions: {e}"));
-                }
+        "/sessions" | "/history" => match crate::session::checkpoint::Checkpoint::list() {
+            Ok(sessions) if sessions.is_empty() => {
+                state
+                    .push_system("No saved sessions found. Use /save to save the current session.");
             }
-        }
+            Ok(sessions) => {
+                state.modal = Some(Modal::SessionBrowser(SessionBrowserState::new(sessions)));
+            }
+            Err(e) => {
+                state.push_system(format!("Failed to list sessions: {e}"));
+            }
+        },
 
         // ── /commit — AI-generated commit message ──────────────────────────
         "/commit" => {
@@ -581,13 +614,21 @@ async fn handle_slash_command(
                 let sess = session.lock().await;
                 sess.working_dir.clone()
             };
-            let staged = if arg == "staged" || arg == "--staged" { "--staged" } else { "" };
+            let staged = if arg == "staged" || arg == "--staged" {
+                "--staged"
+            } else {
+                ""
+            };
             let args: Vec<&str> = if staged.is_empty() {
                 vec!["diff", "--stat"]
             } else {
                 vec!["diff", "--staged", "--stat"]
             };
-            match std::process::Command::new("git").args(&args).current_dir(&working_dir).output() {
+            match std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&working_dir)
+                .output()
+            {
                 Ok(out) => {
                     let diff = String::from_utf8_lossy(&out.stdout).to_string();
                     if diff.trim().is_empty() {
@@ -609,11 +650,17 @@ async fn handle_slash_command(
         "/status" => {
             let sess = session.lock().await;
             let router = provider_router.read().await;
-            let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
-            let cumulative: u64 = sess.cost_tracker.total_input_tokens + sess.cost_tracker.total_output_tokens;
+            let ctx_window = router
+                .active()
+                .map(|p| p.context_window())
+                .unwrap_or(128_000);
+            let cumulative: u64 =
+                sess.cost_tracker.total_input_tokens + sess.cost_tracker.total_output_tokens;
             let used_tokens: u64 = sess.cost_tracker.context_tokens_estimate();
             let ctx_pct = (used_tokens as f64 / ctx_window as f64 * 100.0).min(100.0);
-            let tools_loaded = crate::tools::ToolRegistry::with_builtins().tool_names().len();
+            let tools_loaded = crate::tools::ToolRegistry::with_builtins()
+                .tool_names()
+                .len();
             let permissions = crate::agent::permissions::PermissionStore::load();
 
             state.push_system(format!(
@@ -628,16 +675,21 @@ async fn handle_slash_command(
                 ├─ Trust mode:   {}\n\
                 ├─ Permission rules: {}\n\
                 └─ Session:      {} ({})",
-                state.provider_name, state.provider_id,
+                state.provider_name,
+                state.provider_id,
                 state.model_name,
-                used_tokens, ctx_window, ctx_pct,
-                cumulative, sess.cost_tracker.call_count(),
+                used_tokens,
+                ctx_window,
+                ctx_pct,
+                cumulative,
+                sess.cost_tracker.call_count(),
                 state.format_cost,
                 sess.history.message_count(),
                 tools_loaded,
                 if state.trust_mode { "ON" } else { "OFF" },
                 permissions.rules.len(),
-                sess.name, &sess.id[..8],
+                sess.name,
+                &sess.id[..8],
             ));
         }
 
@@ -649,7 +701,9 @@ async fn handle_slash_command(
         // ── /add-dir — add a directory to the session scope ────────────────
         "/add-dir" => {
             if arg.is_empty() {
-                state.push_system("Usage: /add-dir <path>  — adds a directory to the session working context");
+                state.push_system(
+                    "Usage: /add-dir <path>  — adds a directory to the session working context",
+                );
             } else {
                 let path = std::path::PathBuf::from(arg);
                 let abs = if path.is_absolute() {
@@ -678,22 +732,20 @@ async fn handle_slash_command(
         // Pressing Enter on a session loads it into the live agent — the
         // main event loop's `session_load_pending` handler replaces the
         // Session contents, restores history, and re-runs token accounting.
-        "/resume" => {
-            match crate::session::checkpoint::Checkpoint::list() {
-                Ok(sessions) if sessions.is_empty() => {
-                    state.push_system(
-                        "No saved sessions found. Sessions are saved automatically \
-                         when auto_save_sessions is enabled; use /save to snapshot now."
-                    );
-                }
-                Ok(sessions) => {
-                    state.modal = Some(Modal::SessionBrowser(SessionBrowserState::new(sessions)));
-                }
-                Err(e) => {
-                    state.push_system(format!("Failed to list sessions: {e}"));
-                }
+        "/resume" => match crate::session::checkpoint::Checkpoint::list() {
+            Ok(sessions) if sessions.is_empty() => {
+                state.push_system(
+                    "No saved sessions found. Sessions are saved automatically \
+                         when auto_save_sessions is enabled; use /save to snapshot now.",
+                );
             }
-        }
+            Ok(sessions) => {
+                state.modal = Some(Modal::SessionBrowser(SessionBrowserState::new(sessions)));
+            }
+            Err(e) => {
+                state.push_system(format!("Failed to list sessions: {e}"));
+            }
+        },
 
         // ── /permissions — view/edit permission rules ──────────────────────
         "/permissions" => {
@@ -731,7 +783,10 @@ async fn handle_slash_command(
         "/mode" => {
             let mode_state = match state.permission_mode_state.clone() {
                 Some(m) => m,
-                None => { state.push_system("Permission mode not wired yet."); return true; }
+                None => {
+                    state.push_system("Permission mode not wired yet.");
+                    return true;
+                }
             };
             let current = *mode_state.read();
             if arg.is_empty() {
@@ -746,14 +801,18 @@ async fn handle_slash_command(
                 state.trust_mode = new_mode == crate::types::PermissionMode::Bypass;
                 state.push_system(format!("Permission mode → {}", new_mode.as_label()));
             } else {
-                state.push_system(format!("Unknown mode '{arg}'. Valid: default | plan | accept-edits | bypass"));
+                state.push_system(format!(
+                    "Unknown mode '{arg}'. Valid: default | plan | accept-edits | bypass"
+                ));
             }
         }
         "/plan" => {
             if let Some(m) = &state.permission_mode_state {
                 *m.write() = crate::types::PermissionMode::Plan;
                 state.trust_mode = false;
-                state.push_system("Permission mode → plan. Only ReadOnly tools allowed. Use /default to exit.");
+                state.push_system(
+                    "Permission mode → plan. Only ReadOnly tools allowed. Use /default to exit.",
+                );
             }
         }
         "/accept-edits" | "/accept_edits" => {
@@ -782,14 +841,21 @@ async fn handle_slash_command(
         "/think" => {
             let thinking_state = match state.thinking_state.clone() {
                 Some(t) => t,
-                None => { state.push_system("Thinking config not wired yet."); return true; }
+                None => {
+                    state.push_system("Thinking config not wired yet.");
+                    return true;
+                }
             };
             if arg.is_empty() {
                 let cur = *thinking_state.read();
                 let label = match cur {
                     crate::types::ThinkingConfig::Disabled => "disabled".to_string(),
-                    crate::types::ThinkingConfig::Enabled  => "enabled (provider-default budget)".to_string(),
-                    crate::types::ThinkingConfig::Budget{tokens} => format!("enabled with {tokens} token budget"),
+                    crate::types::ThinkingConfig::Enabled => {
+                        "enabled (provider-default budget)".to_string()
+                    }
+                    crate::types::ThinkingConfig::Budget { tokens } => {
+                        format!("enabled with {tokens} token budget")
+                    }
                 };
                 state.push_system(format!(
                     "Extended thinking: {label}\n\
@@ -798,13 +864,21 @@ async fn handle_slash_command(
                 ));
             } else {
                 let new = match arg.to_lowercase().as_str() {
-                    "off" | "disable" | "disabled" | "no" | "0" => crate::types::ThinkingConfig::Disabled,
+                    "off" | "disable" | "disabled" | "no" | "0" => {
+                        crate::types::ThinkingConfig::Disabled
+                    }
                     "on" | "enable" | "enabled" | "yes" => crate::types::ThinkingConfig::Enabled,
                     other => match other.parse::<u32>() {
                         Ok(n) if n >= 1024 => crate::types::ThinkingConfig::Budget { tokens: n },
-                        Ok(_)              => { state.push_system("Budget must be >= 1024 tokens."); return true; }
-                        Err(_)             => { state.push_system("Invalid value. Use off | on | <tokens>."); return true; }
-                    }
+                        Ok(_) => {
+                            state.push_system("Budget must be >= 1024 tokens.");
+                            return true;
+                        }
+                        Err(_) => {
+                            state.push_system("Invalid value. Use off | on | <tokens>.");
+                            return true;
+                        }
+                    },
                 };
                 *thinking_state.write() = new;
                 state.push_system(format!("Extended thinking → {new:?}"));
@@ -814,7 +888,10 @@ async fn handle_slash_command(
         // ── /copy — copy last response to clipboard ────────────────────────
         "/copy" => {
             // Find last assistant message
-            let last_response = state.messages.iter().rev()
+            let last_response = state
+                .messages
+                .iter()
+                .rev()
                 .find(|m| matches!(m.role, MessageRole::Assistant))
                 .map(|m| m.content.clone());
 
@@ -824,13 +901,18 @@ async fn handle_slash_command(
                     let copied = try_copy_to_clipboard(&text);
                     if copied {
                         state.push_system(format!(
-                            "Copied last response to clipboard ({} chars).", text.len()
+                            "Copied last response to clipboard ({} chars).",
+                            text.len()
                         ));
                     } else {
                         state.push_system(format!(
                             "Clipboard not available. Last response ({} chars):\n\n{}",
                             text.len(),
-                            if text.len() > 500 { &text[..500] } else { &text }
+                            if text.len() > 500 {
+                                &text[..500]
+                            } else {
+                                &text
+                            }
                         ));
                     }
                 }
@@ -860,7 +942,10 @@ async fn handle_slash_command(
                         if workers.is_empty() {
                             state.push_system("Multithread mode: ON  |  No active workers.");
                         } else {
-                            let mut lines = vec![format!("Multithread mode: ON  |  {} active worker(s):", workers.len())];
+                            let mut lines = vec![format!(
+                                "Multithread mode: ON  |  {} active worker(s):",
+                                workers.len()
+                            )];
                             for (id, desc) in &workers {
                                 lines.push(format!("  • {id} — {desc}"));
                             }
@@ -918,7 +1003,9 @@ async fn handle_slash_command(
         // ── /find — search project files for text ─────────────────────────
         "/find" => {
             if arg.is_empty() {
-                state.push_system("Usage: /find <text>  — search all project files for matching text");
+                state.push_system(
+                    "Usage: /find <text>  — search all project files for matching text",
+                );
             } else {
                 cmd_find(state, session, arg).await;
             }
@@ -932,6 +1019,385 @@ async fn handle_slash_command(
         // ── /stats — detailed session statistics ──────────────────────────
         "/stats" => {
             cmd_stats(state, session).await;
+        }
+
+        "/skills" => {
+            if !config.agent.skills_enabled {
+                state
+                    .push_system("Skills are disabled in config (`agent.skills_enabled = false`).");
+                return true;
+            }
+            let working_dir = { session.lock().await.working_dir.clone() };
+            if let Some(shared) = state.skill_registry.clone() {
+                crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+            }
+            let registry = crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+            if registry.skills.is_empty() {
+                state.push_system(format!(
+                    "No skills found.\n\
+                     Create a skill file at either:\n  \
+                       • Project:  {}\n  \
+                       • User:     {}\n\
+                     Then run `/skill new <name>` to scaffold one.",
+                    project_skills_dir_display(&working_dir),
+                    user_skills_dir_display(),
+                ));
+            } else {
+                let mut by_source: std::collections::BTreeMap<&str, Vec<_>> =
+                    std::collections::BTreeMap::new();
+                for s in &registry.skills {
+                    by_source.entry(s.source.label()).or_default().push(s);
+                }
+                let mut lines = vec![
+                    format!("Available skills ({}):", registry.skills.len()),
+                    String::new(),
+                ];
+                for (src, skills) in &by_source {
+                    lines.push(format!("[{}]", src));
+                    for s in skills {
+                        let active_marker = if state.active_skill_label.as_deref()
+                            == Some(s.name.as_str())
+                        {
+                            " ● ACTIVE"
+                        } else {
+                            ""
+                        };
+                        lines.push(format!(
+                            "  /skill {:<22}  {}{}",
+                            s.name, s.description, active_marker
+                        ));
+                        if let Some(when) = &s.when_to_use {
+                            lines.push(format!("  {:<23}  ↳ use when: {}", "", when));
+                        }
+                    }
+                    lines.push(String::new());
+                }
+                lines.push(
+                    "Subcommands: /skill <name> [args] | show | new | edit | delete | reload | path | off"
+                        .to_string(),
+                );
+                state.push_system(lines.join("\n"));
+            }
+        }
+
+        "/skill" => {
+            if !config.agent.skills_enabled {
+                state
+                    .push_system("Skills are disabled in config (`agent.skills_enabled = false`).");
+                return true;
+            }
+            if arg.is_empty() {
+                state.push_system(
+                    "Usage:\n  \
+                     /skill <name> [args]   — invoke a skill\n  \
+                     /skill show <name>     — display the skill body\n  \
+                     /skill new <name>      — scaffold a new project skill and open $EDITOR\n  \
+                     /skill edit <name>     — open an existing skill in $EDITOR\n  \
+                     /skill delete <name>   — remove a project skill (with confirmation)\n  \
+                     /skill reload          — re-scan skill directories\n  \
+                     /skill path            — print skill directory paths\n  \
+                     /skill off             — clear the currently-active skill scope",
+                );
+                return true;
+            }
+
+            // Reserved subcommand handling ---------------------------------
+            let mut parts = arg.splitn(2, ' ');
+            let head = parts.next().unwrap_or("").trim();
+            let rest = parts.next().unwrap_or("").trim().to_string();
+
+            match head {
+                "show" => {
+                    if rest.is_empty() {
+                        state.push_system("Usage: /skill show <name>");
+                        return true;
+                    }
+                    let working_dir = { session.lock().await.working_dir.clone() };
+                    let registry =
+                        crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+                    match registry.find(&rest) {
+                        None => state.push_system(format!("No skill named '{rest}'.")),
+                        Some(s) => {
+                            let path_line = s
+                                .canonical_path
+                                .as_ref()
+                                .map(|p| format!("  path: {}\n", p.display()))
+                                .unwrap_or_default();
+                            state.push_system(format!(
+                                "[skill: {} | {}]\n  desc: {}\n{}  allowed_tools: {}\n  mode: {}\n\n--- body ---\n{}",
+                                s.name,
+                                s.source.label(),
+                                s.description,
+                                path_line,
+                                if s.allowed_tools.is_empty() {
+                                    "(unrestricted)".to_string()
+                                } else {
+                                    s.allowed_tools.join(", ")
+                                },
+                                s.execution_mode.as_str(),
+                                s.content,
+                            ));
+                        }
+                    }
+                    return true;
+                }
+                "new" => {
+                    if rest.is_empty() {
+                        state.push_system("Usage: /skill new <name>");
+                        return true;
+                    }
+                    let working_dir = { session.lock().await.working_dir.clone() };
+                    match scaffold_project_skill(&working_dir, &rest) {
+                        Ok(path) => {
+                            if let Some(shared) = state.skill_registry.clone() {
+                                crate::skills::refresh_registry(
+                                    &shared,
+                                    std::path::Path::new(&working_dir),
+                                );
+                            }
+                            open_in_editor(&path);
+                            state.push_system(format!(
+                                "Created skill '{rest}' at {}.\n(Edit the file, then `/skill reload` and invoke with `/skill {rest}`.)",
+                                path.display()
+                            ));
+                        }
+                        Err(e) => state.push_system(format!("Failed to create skill: {e}")),
+                    }
+                    return true;
+                }
+                "edit" => {
+                    if rest.is_empty() {
+                        state.push_system("Usage: /skill edit <name>");
+                        return true;
+                    }
+                    let working_dir = { session.lock().await.working_dir.clone() };
+                    let registry =
+                        crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+                    match registry.find(&rest).and_then(|s| s.canonical_path.clone()) {
+                        Some(path) => {
+                            open_in_editor(&path);
+                            state.push_system(format!(
+                                "Opened {} in $EDITOR. After saving, run `/skill reload`.",
+                                path.display()
+                            ));
+                        }
+                        None => state.push_system(format!(
+                            "No editable skill file for '{rest}'. Bundled skills cannot be edited \
+                             directly — create a project skill with `/skill new {rest}` to override it."
+                        )),
+                    }
+                    return true;
+                }
+                "delete" | "rm" => {
+                    if rest.is_empty() {
+                        state.push_system("Usage: /skill delete <name>");
+                        return true;
+                    }
+                    let working_dir = { session.lock().await.working_dir.clone() };
+                    match delete_project_skill(&working_dir, &rest) {
+                        Ok(path) => {
+                            if let Some(shared) = state.skill_registry.clone() {
+                                crate::skills::refresh_registry(
+                                    &shared,
+                                    std::path::Path::new(&working_dir),
+                                );
+                            }
+                            state.push_system(format!("Deleted {}.", path.display()));
+                        }
+                        Err(e) => state.push_system(format!("Delete failed: {e}")),
+                    }
+                    return true;
+                }
+                "reload" | "refresh" => {
+                    let working_dir = { session.lock().await.working_dir.clone() };
+                    if let Some(shared) = state.skill_registry.clone() {
+                        crate::skills::refresh_registry(
+                            &shared,
+                            std::path::Path::new(&working_dir),
+                        );
+                        let n = shared.read().skills.len();
+                        state.push_system(format!("Skill registry reloaded: {n} skill(s)."));
+                    } else {
+                        state.push_system("Skill registry unavailable.");
+                    }
+                    return true;
+                }
+                "path" | "paths" | "where" => {
+                    let working_dir = { session.lock().await.working_dir.clone() };
+                    state.push_system(format!(
+                        "Skill directories:\n  \
+                           project:  {}\n  \
+                           user:     {}\n  \
+                           bundled:  compiled into the binary",
+                        project_skills_dir_display(&working_dir),
+                        user_skills_dir_display(),
+                    ));
+                    return true;
+                }
+                "off" | "clear" | "exit" => {
+                    let had_scope = {
+                        let mut sess = session.lock().await;
+                        let had = sess.active_skill_scope.is_some();
+                        sess.active_skill_scope = None;
+                        had
+                    };
+                    state.active_skill_label = None;
+                    if had_scope {
+                        state.push_system("Active skill scope cleared.");
+                    } else {
+                        state.push_system("No skill scope was active.");
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+
+            // Otherwise: treat `arg` as `<skill> [args...]` and invoke.
+            {
+                let skill_name_in = head;
+                let skill_args = if rest.is_empty() { None } else { Some(rest.as_str()) };
+                let (working_dir, session_id) = {
+                    let sess = session.lock().await;
+                    (sess.working_dir.clone(), sess.id.clone())
+                };
+                // Refresh the shared registry so freshly-edited skills are
+                // picked up without a /skill reload.
+                if let Some(shared) = state.skill_registry.clone() {
+                    crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+                }
+                let registry = crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+                match crate::skills::apply_skill(&registry, skill_name_in, skill_args, &session_id) {
+                    Ok(applied) => {
+                        let skill_name = applied.skill_name.clone();
+                        let materialized_prompt = applied.materialized_prompt.clone();
+                        {
+                            let mut sess = session.lock().await;
+                            if applied.mode == crate::skills::SkillExecutionMode::Inline {
+                                sess.active_skill_scope = Some(crate::skills::ActiveSkillScope {
+                                    skill_name: applied.skill_name.clone(),
+                                    allowed_tools: applied.allowed_tools.clone(),
+                                    model_override: applied.model_override.clone(),
+                                    hooks: applied.hooks.clone(),
+                                    execution_mode: applied.mode,
+                                });
+                            } else {
+                                sess.active_skill_scope = None;
+                            }
+                            sess.push_invoked_skill(crate::skills::SkillInvocationRecord {
+                                skill_name: applied.skill_name.clone(),
+                                source: applied.source,
+                                canonical_path: applied.canonical_path.clone(),
+                                materialized_prompt: applied.materialized_prompt.clone(),
+                                invoked_at: chrono::Utc::now(),
+                                worker_id: None,
+                            });
+                        }
+                        // Reflect scope in the status bar immediately for the
+                        // TUI-typed path (the agent-tool path emits an event).
+                        if applied.mode == crate::skills::SkillExecutionMode::Inline {
+                            state.active_skill_label = Some(applied.skill_name.clone());
+                        } else {
+                            state.active_skill_label = None;
+                        }
+                        state.messages.push(RenderedMessage {
+                            role: MessageRole::User,
+                            content: format!("/skill {}", arg),
+                        });
+                        state.agent_busy = true;
+                        state.scroll_top = 0;
+                        state.auto_scroll = true;
+                        let loop_clone = agent_loop.clone();
+                        if applied.mode == crate::skills::SkillExecutionMode::Fork {
+                            let session_clone = session.clone();
+                            state.agent_task = Some(tokio::spawn(async move {
+                                let working_dir = {
+                                    let sess = session_clone.lock().await;
+                                    sess.working_dir.clone()
+                                };
+                                let worker = crate::agent::worker::Worker::new(
+                                    format!("skill:{skill_name}"),
+                                    loop_clone.provider_router.clone(),
+                                    loop_clone.tools.clone(),
+                                    loop_clone.config.clone(),
+                                    loop_clone.graph.clone(),
+                                    working_dir,
+                                );
+                                let worker_id = worker.id.clone();
+                                let _ = loop_clone.event_tx.send(AgentEvent::WorkerSpawned {
+                                    worker_id: worker_id.clone(),
+                                    description: format!("skill:{skill_name}"),
+                                });
+
+                                let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+                                worker
+                                    .run(
+                                        materialized_prompt,
+                                        notify_tx,
+                                        loop_clone.event_tx.clone(),
+                                    )
+                                    .await;
+
+                                if let Some(notification) = notify_rx.recv().await {
+                                    match notification.status {
+                                        crate::agent::worker::WorkerStatus::Completed {
+                                            result,
+                                            duration_ms,
+                                            ..
+                                        } => {
+                                            let _ = loop_clone.event_tx.send(
+                                                AgentEvent::WorkerCompleted {
+                                                    worker_id: notification.worker_id,
+                                                    description: notification.description,
+                                                    result: result.clone(),
+                                                    duration_ms,
+                                                },
+                                            );
+                                            let mut sess = session_clone.lock().await;
+                                            sess.history.add_user(format!(
+                                                "[Skill Result: {}]\n{}",
+                                                skill_name, result
+                                            ));
+                                            if let Some(last) = sess.invoked_skills.last_mut() {
+                                                last.worker_id = Some(worker_id);
+                                            }
+                                        }
+                                        crate::agent::worker::WorkerStatus::Failed {
+                                            error,
+                                            duration_ms,
+                                        } => {
+                                            let _ = loop_clone.event_tx.send(
+                                                AgentEvent::WorkerFailed {
+                                                    worker_id: notification.worker_id,
+                                                    description: notification.description,
+                                                    error: error.clone(),
+                                                    duration_ms,
+                                                },
+                                            );
+                                            let mut sess = session_clone.lock().await;
+                                            sess.history.add_user(format!(
+                                                "[Skill Failure: {}]\n{}",
+                                                skill_name, error
+                                            ));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
+                                {
+                                    let mut sess = session_clone.lock().await;
+                                    sess.active_skill_scope = None;
+                                }
+                                let _ = loop_clone.event_tx.send(AgentEvent::Done);
+                            }));
+                        } else {
+                            state.agent_task = Some(tokio::spawn(async move {
+                                let _ = loop_clone.run(materialized_prompt).await;
+                            }));
+                        }
+                    }
+                    Err(err) => state.push_system(format!("Skill invocation failed: {err}")),
+                }
+            }
         }
 
         _ => {
@@ -1014,13 +1480,20 @@ async fn cmd_commit(state: &mut AppState, session: &Arc<Mutex<Session>>) {
         Follow conventional commits format if appropriate (feat/fix/refactor/docs/chore etc). \
         Return ONLY the commit message, nothing else.\n\n\
         Staged diff:\n```\n{}\n```",
-        if full_diff.len() > 4000 { &full_diff[..4000] } else { &full_diff }
+        if full_diff.len() > 4000 {
+            &full_diff[..4000]
+        } else {
+            &full_diff
+        }
     );
 
-    state.push_system(format!("Suggested: use the agent to generate the commit message by sending:\n> {}", &prompt[..prompt.len().min(200)]));
+    state.push_system(format!(
+        "Suggested: use the agent to generate the commit message by sending:\n> {}",
+        &prompt[..prompt.len().min(200)]
+    ));
     state.push_system(
         "Type your commit message (or ask the agent to write one by describing the changes). \
-        Then run: bash git commit -m \"<message>\""
+        Then run: bash git commit -m \"<message>\"",
     );
 }
 
@@ -1044,7 +1517,10 @@ async fn export_conversation(state: &mut AppState, session: &Arc<Mutex<Session>>
         format!("**Session:** {}  ", sess.name),
         format!("**Model:** {}  ", sess.model_id),
         format!("**Provider:** {}  ", sess.provider_id),
-        format!("**Exported:** {}  ", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")),
+        format!(
+            "**Exported:** {}  ",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        ),
         format!("**Messages:** {}  ", sess.history.message_count()),
         String::new(),
         "---".to_string(),
@@ -1060,12 +1536,25 @@ async fn export_conversation(state: &mut AppState, session: &Arc<Mutex<Session>>
                 lines.push(format!("### 🤖 Assistant\n{}\n", msg.content));
             }
             MessageRole::ToolCall { name } => {
-                lines.push(format!("### ⚙️ Tool: `{}`\n```json\n{}\n```\n", name, msg.content));
+                lines.push(format!(
+                    "### ⚙️ Tool: `{}`\n```json\n{}\n```\n",
+                    name, msg.content
+                ));
             }
-            MessageRole::ToolResult { is_error, tool_name } => {
+            MessageRole::ToolResult {
+                is_error,
+                tool_name,
+            } => {
                 let label = if *is_error { "❌ Error" } else { "✅ Result" };
-                let name_part = if tool_name.is_empty() { String::new() } else { format!(" ({})", tool_name) };
-                lines.push(format!("### {}{}\n```\n{}\n```\n", label, name_part, msg.content));
+                let name_part = if tool_name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", tool_name)
+                };
+                lines.push(format!(
+                    "### {}{}\n```\n{}\n```\n",
+                    label, name_part, msg.content
+                ));
             }
             MessageRole::System => {
                 lines.push(format!("*System: {}*\n", msg.content));
@@ -1081,7 +1570,9 @@ async fn export_conversation(state: &mut AppState, session: &Arc<Mutex<Session>>
 
     match std::fs::write(&export_path, &content) {
         Ok(_) => state.push_system(format!(
-            "Conversation exported to: {} ({} chars)", outfile, content.len()
+            "Conversation exported to: {} ({} chars)",
+            outfile,
+            content.len()
         )),
         Err(e) => state.push_system(format!("Export failed: {e}")),
     }
@@ -1095,7 +1586,10 @@ async fn cmd_doctor(
     session: &Arc<Mutex<Session>>,
     provider_router: &Arc<RwLock<ProviderRouter>>,
 ) {
-    let mut report = vec!["forge-osh Doctor — Environment Diagnostics".to_string(), String::new()];
+    let mut report = vec![
+        "forge-osh Doctor — Environment Diagnostics".to_string(),
+        String::new(),
+    ];
 
     // Working directory
     let working_dir = {
@@ -1103,7 +1597,8 @@ async fn cmd_doctor(
         sess.working_dir.clone()
     };
     let wd_exists = std::path::Path::new(&working_dir).exists();
-    report.push(format!("Working Directory: {} {}",
+    report.push(format!(
+        "Working Directory: {} {}",
         working_dir,
         if wd_exists { "✓" } else { "✗ NOT FOUND" }
     ));
@@ -1123,7 +1618,15 @@ async fn cmd_doctor(
     } else {
         ("sh", "-c")
     };
-    match std::process::Command::new(shell).arg(if cfg!(target_os="windows") { "/C echo test" } else { "-c" }).arg("echo test").output() {
+    match std::process::Command::new(shell)
+        .arg(if cfg!(target_os = "windows") {
+            "/C echo test"
+        } else {
+            "-c"
+        })
+        .arg("echo test")
+        .output()
+    {
         Ok(_) => report.push(format!("Shell ({}): ✓", shell)),
         Err(e) => report.push(format!("Shell ({}): ✗ {}", shell, e)),
     }
@@ -1134,7 +1637,8 @@ async fn cmd_doctor(
         (
             router.active_provider_id().to_string(),
             router.active_model_id().to_string(),
-            router.available_providers()
+            router
+                .available_providers()
                 .iter()
                 .map(|(id, _)| id.to_string())
                 .collect::<Vec<_>>()
@@ -1149,38 +1653,63 @@ async fn cmd_doctor(
     let ks = crate::config::keyring::KeyStore::new(&cfg_dir);
     let has_key = ks.list_providers().contains(&provider_id.to_string());
     let env_key = std::env::var(crate::config::keyring::provider_env_var(&provider_id)).is_ok();
-    report.push(format!("API key for '{}': {}",
+    report.push(format!(
+        "API key for '{}': {}",
         provider_id,
-        if has_key || env_key { "✓ found" } else { "✗ NOT SET (use /keys or set env var)" }
+        if has_key || env_key {
+            "✓ found"
+        } else {
+            "✗ NOT SET (use /keys or set env var)"
+        }
     ));
 
     // CLAUDE.md memory files
     let mem_path = std::path::PathBuf::from(&working_dir).join("CLAUDE.md");
-    report.push(format!("CLAUDE.md (project): {}",
-        if mem_path.exists() { format!("✓ found ({})", mem_path.display()) }
-        else { "not found (optional)".to_string() }
+    report.push(format!(
+        "CLAUDE.md (project): {}",
+        if mem_path.exists() {
+            format!("✓ found ({})", mem_path.display())
+        } else {
+            "not found (optional)".to_string()
+        }
     ));
 
     // Hooks config
     let hooks_path = crate::config::config_dir().join("hooks.json");
-    report.push(format!("hooks.json: {}",
-        if hooks_path.exists() { format!("✓ found ({})", hooks_path.display()) }
-        else { "not configured (optional)".to_string() }
+    report.push(format!(
+        "hooks.json: {}",
+        if hooks_path.exists() {
+            format!("✓ found ({})", hooks_path.display())
+        } else {
+            "not configured (optional)".to_string()
+        }
     ));
 
     // Permission rules
     let permissions = crate::agent::permissions::PermissionStore::load();
-    report.push(format!("Permission rules: {} stored", permissions.rules.len()));
+    report.push(format!(
+        "Permission rules: {} stored",
+        permissions.rules.len()
+    ));
 
     // Config dir
     let cfg_dir = crate::config::config_dir();
-    report.push(format!("Config directory: {} {}",
+    report.push(format!(
+        "Config directory: {} {}",
         cfg_dir.display(),
-        if cfg_dir.exists() { "✓" } else { "✗ NOT FOUND" }
+        if cfg_dir.exists() {
+            "✓"
+        } else {
+            "✗ NOT FOUND"
+        }
     ));
 
     report.push(String::new());
-    report.push(format!("Platform: {} ({})", std::env::consts::OS, std::env::consts::ARCH));
+    report.push(format!(
+        "Platform: {} ({})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
     report.push(format!("forge-osh v1.0.1  — Batch 1"));
 
     state.push_system(report.join("\n"));
@@ -1201,7 +1730,8 @@ async fn cmd_resume(state: &mut AppState, _session: &Arc<Mutex<Session>>) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let mtime = entry.metadata()
+                let mtime = entry
+                    .metadata()
                     .and_then(|m| m.modified())
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                 session_files.push((path, mtime));
@@ -1220,7 +1750,12 @@ async fn cmd_resume(state: &mut AppState, _session: &Arc<Mutex<Session>>) {
     for (i, (path, mtime)) in session_files.iter().take(10).enumerate() {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
         let datetime: chrono::DateTime<chrono::Local> = (*mtime).into();
-        lines.push(format!("  {}. {}  ({})", i + 1, name, datetime.format("%Y-%m-%d %H:%M")));
+        lines.push(format!(
+            "  {}. {}  ({})",
+            i + 1,
+            name,
+            datetime.format("%Y-%m-%d %H:%M")
+        ));
     }
     lines.push(String::new());
     lines.push("To resume: forge-osh --session <session-id>  or start a new session and use /compact to manage context.".to_string());
@@ -1241,7 +1776,7 @@ async fn cmd_permissions(state: &mut AppState, arg: &str) {
             "Usage:\n  /permissions add bash(git *)     — always allow git commands\n  \
             /permissions deny bash(rm -rf *)  — always deny rm -rf\n  \
             /permissions remove <index>        — remove rule by index\n  \
-            /permissions clear                 — remove all rules"
+            /permissions clear                 — remove all rules",
         );
         return;
     }
@@ -1254,7 +1789,9 @@ async fn cmd_permissions(state: &mut AppState, arg: &str) {
                     store.add_allow(&tool, &pattern);
                     state.push_system(format!("Added allow rule: {}({})", tool, pattern));
                 } else {
-                    state.push_system("Invalid rule format. Use: tool_name(pattern)  e.g. bash(git *)");
+                    state.push_system(
+                        "Invalid rule format. Use: tool_name(pattern)  e.g. bash(git *)",
+                    );
                 }
             }
         }
@@ -1264,7 +1801,9 @@ async fn cmd_permissions(state: &mut AppState, arg: &str) {
                     store.add_deny(&tool, &pattern);
                     state.push_system(format!("Added deny rule: {}({})", tool, pattern));
                 } else {
-                    state.push_system("Invalid rule format. Use: tool_name(pattern)  e.g. bash(rm -rf *)");
+                    state.push_system(
+                        "Invalid rule format. Use: tool_name(pattern)  e.g. bash(rm -rf *)",
+                    );
                 }
             }
         }
@@ -1318,7 +1857,10 @@ fn try_copy_to_clipboard(text: &str) -> bool {
     {
         // Use PowerShell to copy to clipboard on Windows
         if let Ok(mut child) = std::process::Command::new("powershell")
-            .args(["-Command", &format!("Set-Clipboard -Value '{}'", text.replace('\'', "''"))])
+            .args([
+                "-Command",
+                &format!("Set-Clipboard -Value '{}'", text.replace('\'', "''")),
+            ])
             .spawn()
         {
             let _ = child.wait();
@@ -1370,23 +1912,223 @@ fn try_copy_to_clipboard(text: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Complete or list slash commands when the user presses Tab.
+// ---------------------------------------------------------------------------
+// Skill UX helpers
+// ---------------------------------------------------------------------------
+
+fn project_skills_dir_display(working_dir: &str) -> String {
+    std::path::PathBuf::from(working_dir)
+        .join(".claude")
+        .join("skills")
+        .display()
+        .to_string()
+}
+
+fn user_skills_dir_display() -> String {
+    crate::config::config_dir()
+        .join("skills")
+        .display()
+        .to_string()
+}
+
+fn sanitize_skill_name(input: &str) -> String {
+    input
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' | '-' | '_' => c,
+            ' ' => '-',
+            _ => '-',
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn scaffold_project_skill(
+    working_dir: &str,
+    raw_name: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let name = sanitize_skill_name(raw_name);
+    if name.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "skill name must contain at least one alphanumeric character",
+        ));
+    }
+    let dir = std::path::PathBuf::from(working_dir)
+        .join(".claude")
+        .join("skills")
+        .join(&name);
+    let path = dir.join("SKILL.md");
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("skill already exists at {}", path.display()),
+        ));
+    }
+    std::fs::create_dir_all(&dir)?;
+    let template = format!(
+        "---\n\
+         name: {name}\n\
+         description: One-line description shown in /skills.\n\
+         when_to_use: Describe the triggers the agent should look for.\n\
+         allowed_tools:\n  \
+           - read_file\n  \
+           - search_files\n\
+         execution_mode: inline\n\
+         user_invocable: true\n\
+         ---\n\n\
+         # {name}\n\n\
+         Describe the workflow here. This body becomes the materialized prompt\n\
+         injected when the skill is invoked. Use ${{ARGS}} to reference arguments\n\
+         passed via `/skill {name} <args>`.\n"
+    );
+    std::fs::write(&path, template)?;
+    Ok(path)
+}
+
+fn delete_project_skill(
+    working_dir: &str,
+    raw_name: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let name = sanitize_skill_name(raw_name);
+    let dir = std::path::PathBuf::from(working_dir)
+        .join(".claude")
+        .join("skills")
+        .join(&name);
+    if !dir.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "no project skill named '{name}' at {}",
+                dir.display()
+            ),
+        ));
+    }
+    std::fs::remove_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn open_in_editor(path: &std::path::Path) {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| {
+            if cfg!(target_os = "windows") {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+    // Best-effort; the TUI is still in raw mode, so opening a full-screen
+    // editor will visually interfere. For CLI-editors like vim this is
+    // acceptable — the user expects it. We document the behaviour in /help.
+    let _ = std::process::Command::new(&editor).arg(path).status();
+}
+
 fn tab_complete_slash(state: &mut AppState) {
     let text = state.input.text.clone();
-    if !text.starts_with('/') || text.contains(' ') {
+    if !text.starts_with('/') {
+        return;
+    }
+
+    // --- Skill-name completion: `/skill <partial>` or `/skill show <partial>` ---
+    if let Some(rest) = text.strip_prefix("/skill ") {
+        if let Some(shared) = state.skill_registry.clone() {
+            let (prefix_static, partial) =
+                if let Some(p) = rest.strip_prefix("show ") {
+                    ("/skill show ", p)
+                } else if let Some(p) = rest.strip_prefix("edit ") {
+                    ("/skill edit ", p)
+                } else if let Some(p) = rest.strip_prefix("delete ") {
+                    ("/skill delete ", p)
+                } else if rest.contains(' ') {
+                    // already past the skill-name token — don't touch
+                    return;
+                } else {
+                    ("/skill ", rest)
+                };
+            let partial = partial.trim();
+            let names: Vec<String> = shared
+                .read()
+                .skills
+                .iter()
+                .map(|s| s.name.clone())
+                .filter(|n| n.starts_with(partial))
+                .collect();
+            let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            match name_refs.len() {
+                0 => {}
+                1 => {
+                    state.input.text = format!("{}{}", prefix_static, name_refs[0]);
+                    state.input.cursor = state.input.text.len();
+                }
+                _ => {
+                    let common = common_prefix(&name_refs);
+                    if common.len() > partial.len() {
+                        state.input.text = format!("{}{}", prefix_static, common);
+                        state.input.cursor = state.input.text.len();
+                    }
+                    state.push_system(format!("Skills: {}", names.join("  ")));
+                }
+            }
+            return;
+        }
+    }
+
+    if text.contains(' ') {
         return;
     }
     const ALL_COMMANDS: &[&str] = &[
-        "/help", "/clear", "/quit", "/exit", "/cost", "/model", "/provider",
-        "/keys", "/theme", "/trust", "/vim", "/fast", "/compact", "/undo",
-        "/new", "/save", "/session", "/sessions", "/history", "/commit", "/diff", "/export",
-        "/status", "/doctor", "/add-dir", "/resume", "/permissions",
-        "/mode", "/plan", "/accept-edits", "/bypass", "/default",
+        "/help",
+        "/clear",
+        "/quit",
+        "/exit",
+        "/cost",
+        "/model",
+        "/provider",
+        "/keys",
+        "/theme",
+        "/trust",
+        "/vim",
+        "/fast",
+        "/compact",
+        "/undo",
+        "/new",
+        "/save",
+        "/session",
+        "/sessions",
+        "/history",
+        "/commit",
+        "/diff",
+        "/export",
+        "/status",
+        "/doctor",
+        "/add-dir",
+        "/resume",
+        "/permissions",
+        "/mode",
+        "/plan",
+        "/accept-edits",
+        "/bypass",
+        "/default",
         "/think",
-        "/effort", "/copy", "/init", "/find", "/config", "/stats",
-        "/forge-graph", "/multithread",
+        "/skills",
+        "/skill",
+        "/effort",
+        "/copy",
+        "/init",
+        "/find",
+        "/config",
+        "/stats",
+        "/forge-graph",
+        "/multithread",
     ];
     let prefix = text.as_str();
-    let matches: Vec<&str> = ALL_COMMANDS.iter().copied()
+    let matches: Vec<&str> = ALL_COMMANDS
+        .iter()
+        .copied()
         .filter(|c| c.starts_with(prefix) && c.len() > prefix.len())
         .collect();
 
@@ -1410,13 +2152,18 @@ fn tab_complete_slash(state: &mut AppState) {
 }
 
 fn common_prefix(strings: &[&str]) -> String {
-    if strings.is_empty() { return String::new(); }
+    if strings.is_empty() {
+        return String::new();
+    }
     let first = strings[0];
     let mut len = first.len();
     for s in &strings[1..] {
         len = len.min(s.len());
         for (i, (a, b)) in first.chars().zip(s.chars()).enumerate() {
-            if a != b { len = len.min(i); break; }
+            if a != b {
+                len = len.min(i);
+                break;
+            }
         }
     }
     first[..len].to_string()
@@ -1427,7 +2174,10 @@ fn common_prefix(strings: &[&str]) -> String {
 // ---------------------------------------------------------------------------
 
 async fn cmd_init(state: &mut AppState, session: &Arc<Mutex<Session>>) {
-    let working_dir = { let sess = session.lock().await; sess.working_dir.clone() };
+    let working_dir = {
+        let sess = session.lock().await;
+        sess.working_dir.clone()
+    };
     let root = std::path::Path::new(&working_dir);
     let out_path = root.join("CLAUDE.md");
 
@@ -1440,40 +2190,75 @@ async fn cmd_init(state: &mut AppState, session: &Arc<Mutex<Session>>) {
     }
 
     let mut parts: Vec<String> = Vec::new();
-    parts.push("# CLAUDE.md\n\nThis file provides guidance to forge-osh when working with this project.\n".into());
+    parts.push(
+        "# CLAUDE.md\n\nThis file provides guidance to forge-osh when working with this project.\n"
+            .into(),
+    );
 
     // Detect project type and build commands
-    let (lang, build_cmds): (&str, &[&str]) =
-        if root.join("Cargo.toml").exists()      { ("Rust",               &["cargo build", "cargo test", "cargo clippy", "cargo fmt"]) }
-        else if root.join("package.json").exists()  { ("JavaScript/TypeScript", &["npm install", "npm run build", "npm test"]) }
-        else if root.join("pyproject.toml").exists() || root.join("setup.py").exists()
-                                                    { ("Python",            &["pip install -e .", "pytest", "ruff check ."]) }
-        else if root.join("go.mod").exists()        { ("Go",               &["go build ./...", "go test ./...", "go vet ./..."]) }
-        else if root.join("pom.xml").exists()       { ("Java/Maven",       &["mvn compile", "mvn test"]) }
-        else if root.join("build.gradle").exists()  { ("Java/Gradle",      &["gradle build", "gradle test"]) }
-        else                                        { ("",                  &[]) };
+    let (lang, build_cmds): (&str, &[&str]) = if root.join("Cargo.toml").exists() {
+        (
+            "Rust",
+            &["cargo build", "cargo test", "cargo clippy", "cargo fmt"],
+        )
+    } else if root.join("package.json").exists() {
+        (
+            "JavaScript/TypeScript",
+            &["npm install", "npm run build", "npm test"],
+        )
+    } else if root.join("pyproject.toml").exists() || root.join("setup.py").exists() {
+        ("Python", &["pip install -e .", "pytest", "ruff check ."])
+    } else if root.join("go.mod").exists() {
+        ("Go", &["go build ./...", "go test ./...", "go vet ./..."])
+    } else if root.join("pom.xml").exists() {
+        ("Java/Maven", &["mvn compile", "mvn test"])
+    } else if root.join("build.gradle").exists() {
+        ("Java/Gradle", &["gradle build", "gradle test"])
+    } else {
+        ("", &[])
+    };
 
     // Try to read project name from manifest
     let project_name = if root.join("Cargo.toml").exists() {
-        std::fs::read_to_string(root.join("Cargo.toml")).ok()
-            .and_then(|s| s.lines().find(|l| l.starts_with("name")).and_then(|l| l.split('"').nth(1)).map(str::to_string))
+        std::fs::read_to_string(root.join("Cargo.toml"))
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("name"))
+                    .and_then(|l| l.split('"').nth(1))
+                    .map(str::to_string)
+            })
     } else if root.join("package.json").exists() {
-        std::fs::read_to_string(root.join("package.json")).ok()
+        std::fs::read_to_string(root.join("package.json"))
+            .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v["name"].as_str().map(str::to_string))
     } else {
         None
     };
 
-    let name_part = project_name.map(|n| format!("{} — ", n)).unwrap_or_default();
-    let lang_part = if lang.is_empty() { "a project".to_string() } else { format!("a {lang} project") };
-    parts.push(format!("## Project Overview\n\n{name_part}{lang_part}.\n\nDescribe what this project does here.\n"));
+    let name_part = project_name
+        .map(|n| format!("{} — ", n))
+        .unwrap_or_default();
+    let lang_part = if lang.is_empty() {
+        "a project".to_string()
+    } else {
+        format!("a {lang} project")
+    };
+    parts.push(format!(
+        "## Project Overview\n\n{name_part}{lang_part}.\n\nDescribe what this project does here.\n"
+    ));
 
     if !build_cmds.is_empty() {
-        parts.push(format!("## Build & Development Commands\n\n```bash\n{}\n```\n", build_cmds.join("\n")));
+        parts.push(format!(
+            "## Build & Development Commands\n\n```bash\n{}\n```\n",
+            build_cmds.join("\n")
+        ));
     }
 
-    parts.push("## Architecture\n\nDescribe the key modules, directories, and how they interact.\n".into());
+    parts.push(
+        "## Architecture\n\nDescribe the key modules, directories, and how they interact.\n".into(),
+    );
     parts.push("## Key Design Decisions\n\nDocument important architectural choices and their rationale.\n".into());
     parts.push("## Notes for forge-osh\n\nAdd any project-specific instructions here (e.g. test commands, coding style, off-limits files).\n".into());
 
@@ -1492,13 +2277,16 @@ async fn cmd_init(state: &mut AppState, session: &Arc<Mutex<Session>>) {
 // ---------------------------------------------------------------------------
 
 async fn cmd_find(state: &mut AppState, session: &Arc<Mutex<Session>>, pattern: &str) {
-    let working_dir = { let sess = session.lock().await; sess.working_dir.clone() };
+    let working_dir = {
+        let sess = session.lock().await;
+        sess.working_dir.clone()
+    };
     let pattern_lc = pattern.to_lowercase();
 
     const BINARY_EXTS: &[&str] = &[
-        "png","jpg","jpeg","gif","webp","bmp","ico","tiff","svg",
-        "exe","dll","so","dylib","wasm","pdf","zip","tar","gz",
-        "7z","rar","mp3","mp4","avi","mov","ttf","otf","woff",
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "svg", "exe", "dll", "so",
+        "dylib", "wasm", "pdf", "zip", "tar", "gz", "7z", "rar", "mp3", "mp4", "avi", "mov", "ttf",
+        "otf", "woff",
     ];
 
     let mut results: Vec<String> = Vec::new();
@@ -1507,31 +2295,51 @@ async fn cmd_find(state: &mut AppState, session: &Arc<Mutex<Session>>, pattern: 
     const MAX_MATCHES: usize = 60;
 
     use ignore::WalkBuilder;
-    let walker = WalkBuilder::new(&working_dir).hidden(false).git_ignore(true).build();
+    let walker = WalkBuilder::new(&working_dir)
+        .hidden(false)
+        .git_ignore(true)
+        .build();
 
     for entry in walker.filter_map(|e| e.ok()) {
-        if match_count >= MAX_MATCHES { break; }
+        if match_count >= MAX_MATCHES {
+            break;
+        }
         let path = entry.path();
-        if !path.is_file() { continue; }
+        if !path.is_file() {
+            continue;
+        }
 
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        if BINARY_EXTS.contains(&ext.as_str()) { continue; }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if BINARY_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let relative = path.strip_prefix(&working_dir)
+        let relative = path
+            .strip_prefix(&working_dir)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| path.display().to_string());
 
         let mut file_hits: Vec<String> = Vec::new();
         for (i, line) in content.lines().enumerate() {
-            if match_count >= MAX_MATCHES { break; }
+            if match_count >= MAX_MATCHES {
+                break;
+            }
             if line.to_lowercase().contains(&pattern_lc) {
                 let trimmed = line.trim();
-                let preview = if trimmed.len() > 120 { &trimmed[..120] } else { trimmed };
+                let preview = if trimmed.len() > 120 {
+                    &trimmed[..120]
+                } else {
+                    trimmed
+                };
                 file_hits.push(format!("  L{}: {}", i + 1, preview));
                 match_count += 1;
             }
@@ -1551,7 +2359,9 @@ async fn cmd_find(state: &mut AppState, session: &Arc<Mutex<Session>>, pattern: 
             results.join("\n")
         );
         if match_count >= MAX_MATCHES {
-            out.push_str(&format!("\n... (showing first {MAX_MATCHES} matches — narrow your search)"));
+            out.push_str(&format!(
+                "\n... (showing first {MAX_MATCHES} matches — narrow your search)"
+            ));
         }
         state.push_system(out);
     }
@@ -1609,7 +2419,7 @@ fn cmd_config(state: &mut AppState, arg: &str) {
             "Usage:\n  /config               — show all settings\n\
             /config set theme <name>    — dark/light/dracula/nord/solarized\n\
             /config set trust on|off    — toggle trust mode\n\
-            /config set vim on|off      — toggle vim normal mode"
+            /config set vim on|off      — toggle vim normal mode",
         ),
     }
 }
@@ -1622,9 +2432,18 @@ async fn cmd_stats(state: &mut AppState, session: &Arc<Mutex<Session>>) {
     let (user_msgs, assistant_msgs, tool_calls, total) = {
         let sess = session.lock().await;
         let msgs = sess.history.messages();
-        let user   = msgs.iter().filter(|m| matches!(m, crate::types::Message::User(_))).count();
-        let asst   = msgs.iter().filter(|m| matches!(m, crate::types::Message::Assistant(_))).count();
-        let tools  = msgs.iter().filter(|m| matches!(m, crate::types::Message::Tool(_))).count();
+        let user = msgs
+            .iter()
+            .filter(|m| matches!(m, crate::types::Message::User(_)))
+            .count();
+        let asst = msgs
+            .iter()
+            .filter(|m| matches!(m, crate::types::Message::Assistant(_)))
+            .count();
+        let tools = msgs
+            .iter()
+            .filter(|m| matches!(m, crate::types::Message::Tool(_)))
+            .count();
         (user, asst, tools, msgs.len())
     };
 
@@ -1634,7 +2453,9 @@ async fn cmd_stats(state: &mut AppState, session: &Arc<Mutex<Session>>) {
     } else {
         let mut entries: Vec<(&String, &usize)> = state.tool_stats.iter().collect();
         entries.sort_by(|a, b| b.1.cmp(a.1));
-        entries.iter().take(12)
+        entries
+            .iter()
+            .take(12)
             .map(|(name, count)| format!("  {:<25} {}", name, count))
             .collect::<Vec<_>>()
             .join("\n")
@@ -1656,9 +2477,7 @@ async fn cmd_stats(state: &mut AppState, session: &Arc<Mutex<Session>>) {
         \n\
         Tool calls this session:\n\
         {tool_summary}",
-        state.context_pct,
-        state.format_tokens,
-        state.format_cost,
+        state.context_pct, state.format_tokens, state.format_cost,
     ));
 }
 
@@ -1674,9 +2493,15 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
         // ── status ───────────────────────────────────────────────────────────
         "status" | "info" => {
             let msg = {
-                let guard = match state.shared_graph.read() { Ok(g) => g, Err(p) => p.into_inner() };
+                let guard = match state.shared_graph.read() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
                 match guard.as_ref() {
-                    None => "No forge-graph loaded.\nRun /forge-graph to build one for this project.".to_string(),
+                    None => {
+                        "No forge-graph loaded.\nRun /forge-graph to build one for this project."
+                            .to_string()
+                    }
                     Some(g) => format!(
                         "forge-graph status\n\
                         ├─ Root:    {}\n\
@@ -1697,7 +2522,10 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
 
         // ── clear ─────────────────────────────────────────────────────────────
         "clear" => {
-            let working_dir = { let s = session.lock().await; s.working_dir.clone() };
+            let working_dir = {
+                let s = session.lock().await;
+                s.working_dir.clone()
+            };
             let root = std::path::PathBuf::from(&working_dir);
             let exe_dir = CodeGraph::artifact_dir();
             let artifact = CodeGraph::artifact_path(&root, &exe_dir);
@@ -1717,7 +2545,10 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
         s if s.starts_with("query ") => {
             let name = s.trim_start_matches("query ").trim().to_string();
             let msg = {
-                let guard = match state.shared_graph.read() { Ok(g) => g, Err(p) => p.into_inner() };
+                let guard = match state.shared_graph.read() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
                 match guard.as_ref() {
                     None => "No graph loaded. Run /forge-graph first.".to_string(),
                     Some(g) => {
@@ -1738,14 +2569,20 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
                 return;
             }
 
-            let working_dir = { let s = session.lock().await; s.working_dir.clone() };
+            let working_dir = {
+                let s = session.lock().await;
+                s.working_dir.clone()
+            };
             let root = std::path::PathBuf::from(&working_dir);
             let exe_dir = CodeGraph::artifact_dir();
             let artifact = CodeGraph::artifact_path(&root, &exe_dir);
 
             // If existing artifact and not "rebuild", load it
             if arg.is_empty() {
-                let guard = match state.shared_graph.read() { Ok(g) => g, Err(p) => p.into_inner() };
+                let guard = match state.shared_graph.read() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
                 if guard.is_some() {
                     drop(guard);
                     state.push_system(
@@ -1868,9 +2705,12 @@ async fn compact_history_llm(
 ) {
     use crate::agent::compaction;
 
-    let messages = {
+    let (messages, invoked_skills) = {
         let sess = session.lock().await;
-        sess.history.messages().to_vec()
+        (
+            sess.history.messages().to_vec(),
+            sess.invoked_skills.clone(),
+        )
     };
     let total = messages.len();
 
@@ -1892,9 +2732,15 @@ async fn compact_history_llm(
     // user switched provider mid-conversation.
     let (ctx_window, active_model_id, provider_name) = {
         let router = provider_router.read().await;
-        let ctx = router.active().map(|p| p.context_window()).unwrap_or(128_000);
+        let ctx = router
+            .active()
+            .map(|p| p.context_window())
+            .unwrap_or(128_000);
         let model = router.active_model_id().to_string();
-        let pname = router.active().map(|p| p.name().to_string()).unwrap_or_default();
+        let pname = router
+            .active()
+            .map(|p| p.name().to_string())
+            .unwrap_or_default();
         (ctx, model, pname)
     };
 
@@ -1908,8 +2754,13 @@ async fn compact_history_llm(
         match router.active() {
             Ok(provider) => {
                 compaction::summarize_messages(
-                    &to_summarize, provider, &active_model_id, ctx_window,
-                ).await
+                    &to_summarize,
+                    &invoked_skills,
+                    provider,
+                    &active_model_id,
+                    ctx_window,
+                )
+                .await
             }
             Err(e) => Err(e),
         }
@@ -1937,7 +2788,11 @@ async fn compact_history_llm(
                 summary.split_whitespace().count(),
                 summary.len(),
                 &summary[..preview_end],
-                if summary.len() > preview_end { " …" } else { "" },
+                if summary.len() > preview_end {
+                    " …"
+                } else {
+                    ""
+                },
             ));
         }
         Err(e) => {
@@ -1970,7 +2825,10 @@ async fn refresh_context_display(
 ) {
     let ctx_window = {
         let router = provider_router.read().await;
-        router.active().map(|p| p.context_window()).unwrap_or(128_000)
+        router
+            .active()
+            .map(|p| p.context_window())
+            .unwrap_or(128_000)
     };
     state.context_limit = ctx_window;
 
@@ -1984,7 +2842,9 @@ async fn refresh_context_display(
     };
     state.context_pct = if ctx_window > 0 {
         ((live_estimate as f64 / ctx_window as f64) * 100.0).min(100.0) as u8
-    } else { 0 };
+    } else {
+        0
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -2031,6 +2891,7 @@ pub async fn run_tui(
     session: Arc<Mutex<Session>>,
     key_store: Arc<Mutex<KeyStore>>,
     shared_graph: SharedGraph,
+    skill_registry: crate::skills::SharedSkillRegistry,
 ) -> anyhow::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
@@ -2173,13 +3034,11 @@ pub async fn run_tui(
     let agent_cancel = std::sync::Arc::new(parking_lot::RwLock::new(
         tokio_util::sync::CancellationToken::new(),
     ));
-    let permission_mode_state = Arc::new(parking_lot::RwLock::new(
-        if config.general.trust_mode {
-            crate::types::PermissionMode::Bypass
-        } else {
-            crate::types::PermissionMode::Default
-        },
-    ));
+    let permission_mode_state = Arc::new(parking_lot::RwLock::new(if config.general.trust_mode {
+        crate::types::PermissionMode::Bypass
+    } else {
+        crate::types::PermissionMode::Default
+    }));
     let thinking_state = Arc::new(parking_lot::RwLock::new(
         crate::types::ThinkingConfig::Disabled,
     ));
@@ -2198,12 +3057,23 @@ pub async fn run_tui(
         cancel: agent_cancel.clone(),
         permission_mode: permission_mode_state.clone(),
         thinking: thinking_state.clone(),
+        skill_registry: skill_registry.clone(),
     });
     // Expose to command handlers below via AppState fields.
     state.agent_cancel = Some(agent_cancel.clone());
     state.permission_mode_state = Some(permission_mode_state.clone());
     state.thinking_state = Some(thinking_state.clone());
     state.file_cache = Some(file_cache.clone());
+    state.skill_registry = Some(skill_registry.clone());
+    // Seed the status-bar label from the session's persisted scope (in case
+    // the user resumed a session that was mid-skill).
+    {
+        let sess = session.lock().await;
+        state.active_skill_label = sess
+            .active_skill_scope
+            .as_ref()
+            .map(|s| s.skill_name.clone());
+    }
 
     // -----------------------------------------------------------------------
     // Main event loop
@@ -2228,7 +3098,9 @@ pub async fn run_tui(
         while let Ok(event) = agent_event_rx.try_recv() {
             match event {
                 AgentEvent::ThinkingStart => {
-                    state.spinner.start(format!("{} is thinking...", state.model_name));
+                    state
+                        .spinner
+                        .start(format!("{} is thinking...", state.model_name));
                     state.streaming_text.clear();
                     // Reset dedup hash so the new turn can produce legitimate text
                     state.last_committed_hash = 0;
@@ -2257,11 +3129,20 @@ pub async fn run_tui(
                     *state.tool_stats.entry(name.clone()).or_insert(0) += 1;
                     state.spinner.start(format!("Running {}...", name));
                 }
-                AgentEvent::ToolEnd { name, output, is_error } => {
+                AgentEvent::ToolEnd {
+                    name,
+                    output,
+                    is_error,
+                } => {
                     state.spinner.stop();
-                    if !state.auto_scroll { state.unread_count += 1; }
+                    if !state.auto_scroll {
+                        state.unread_count += 1;
+                    }
                     state.messages.push(RenderedMessage {
-                        role: MessageRole::ToolResult { is_error, tool_name: name },
+                        role: MessageRole::ToolResult {
+                            is_error,
+                            tool_name: name,
+                        },
                         content: output,
                     });
                 }
@@ -2279,7 +3160,12 @@ pub async fn run_tui(
                         ),
                     });
                 }
-                AgentEvent::HistoryCompacted { kept, removed, summary_preview, succeeded } => {
+                AgentEvent::HistoryCompacted {
+                    kept,
+                    removed,
+                    summary_preview,
+                    succeeded,
+                } => {
                     // The agent loop already mutated `session.history`.
                     // Here we (a) drain the rendered conversation pane so
                     // the user visibly sees the log shrink, (b) refresh the
@@ -2294,7 +3180,11 @@ pub async fn run_tui(
                             "Auto-compacted: {removed} message(s) replaced by AI summary. \
                              {kept} kept verbatim.\n--- Summary preview ---\n{}{}",
                             &summary_preview[..preview_end],
-                            if summary_preview.len() > preview_end { " …" } else { "" },
+                            if summary_preview.len() > preview_end {
+                                " …"
+                            } else {
+                                ""
+                            },
                         ));
                     } else {
                         state.push_system(format!(
@@ -2303,6 +3193,13 @@ pub async fn run_tui(
                              generated — consider switching to a cheaper model for compaction \
                              via /model and running /compact manually."
                         ));
+                    }
+                }
+                AgentEvent::SkillScopeChanged { name } => {
+                    state.active_skill_label = name.clone();
+                    match name {
+                        Some(n) => state.push_system(format!("Skill '{n}' is now active.")),
+                        None => state.push_system("Skill scope cleared."),
                     }
                 }
                 AgentEvent::Done => {
@@ -2320,7 +3217,8 @@ pub async fn run_tui(
                     // context-window fill level.
                     if state.context_limit > 0 {
                         let used = sess.cost_tracker.context_tokens_estimate();
-                        state.context_pct = ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100);
+                        state.context_pct =
+                            ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100);
                     }
                     // Persist so tokens & cost survive app close.
                     let _ = sess.save();
@@ -2336,13 +3234,21 @@ pub async fn run_tui(
                     });
                 }
                 // -- Multithread worker events -----------------------------------
-                AgentEvent::WorkerSpawned { worker_id, description } => {
+                AgentEvent::WorkerSpawned {
+                    worker_id,
+                    description,
+                } => {
                     state.messages.push(RenderedMessage {
                         role: MessageRole::System,
                         content: format!("⚡ Worker spawned: {description} [{worker_id}]"),
                     });
                 }
-                AgentEvent::WorkerCompleted { worker_id, description, result, duration_ms } => {
+                AgentEvent::WorkerCompleted {
+                    worker_id,
+                    description,
+                    result,
+                    duration_ms,
+                } => {
                     let duration_s = duration_ms as f64 / 1000.0;
                     let preview = if result.len() > 500 {
                         format!("{}…", &result[..500])
@@ -2357,7 +3263,12 @@ pub async fn run_tui(
                         ),
                     });
                 }
-                AgentEvent::WorkerFailed { worker_id, description, error, duration_ms } => {
+                AgentEvent::WorkerFailed {
+                    worker_id,
+                    description,
+                    error,
+                    duration_ms,
+                } => {
                     let duration_s = duration_ms as f64 / 1000.0;
                     state.messages.push(RenderedMessage {
                         role: MessageRole::System,
@@ -2376,7 +3287,11 @@ pub async fn run_tui(
                         });
                     }
                 }
-                AgentEvent::WorkerToolEnd { worker_id, name, is_error } => {
+                AgentEvent::WorkerToolEnd {
+                    worker_id,
+                    name,
+                    is_error,
+                } => {
                     if is_error && !state.fast_mode {
                         state.messages.push(RenderedMessage {
                             role: MessageRole::System,
@@ -2414,14 +3329,18 @@ pub async fn run_tui(
                             state.push_system(format!("[forge-graph] {s}"));
                         }
                     }
-                    GraphBuildMsg::Done { .. } => { done = true; }
+                    GraphBuildMsg::Done { .. } => {
+                        done = true;
+                    }
                     GraphBuildMsg::Error(e) => {
                         state.push_system(format!("forge-graph error: {e}"));
                         done = true;
                     }
                 }
             }
-            if done { state.graph_build_rx = None; }
+            if done {
+                state.graph_build_rx = None;
+            }
         }
 
         // ---- Drain coordinator worker notifications ----
@@ -2517,7 +3436,9 @@ pub async fn run_tui(
                     }
 
                     // Rebuild TUI display from loaded history
-                    state.messages.retain(|m| matches!(m.role, MessageRole::Splash));
+                    state
+                        .messages
+                        .retain(|m| matches!(m.role, MessageRole::Splash));
                     state.streaming_text.clear();
                     state.scroll_top = 0;
                     state.auto_scroll = true;
@@ -2540,7 +3461,9 @@ pub async fn run_tui(
                         let used = sess.cost_tracker.context_tokens_estimate();
                         state.context_pct = if state.context_limit > 0 {
                             ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100)
-                        } else { 0 };
+                        } else {
+                            0
+                        };
                     }
                     state.session_name = sess_name.clone();
                     state.provider_id = sess_provider.clone();
@@ -2600,7 +3523,9 @@ pub async fn run_tui(
                         let used = sess.cost_tracker.context_tokens_estimate();
                         state.context_pct = if state.context_limit > 0 {
                             ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100)
-                        } else { 0 };
+                        } else {
+                            0
+                        };
                     }
                     for (id, name) in router.available_providers() {
                         if id == pid {
@@ -2632,22 +3557,30 @@ pub async fn run_tui(
                     Event::Key(key) => {
                         // Skip key-release events (Windows sends both Press and Release)
                         if key.kind != KeyEventKind::Press {
-                            if !event::poll(Duration::ZERO)? { break; }
+                            if !event::poll(Duration::ZERO)? {
+                                break;
+                            }
                             continue;
                         }
 
                         // Modal input has priority over everything else
                         if state.modal.is_some() {
                             handle_modal_input(&mut state, key);
-                            if !event::poll(Duration::ZERO)? { break; }
+                            if !event::poll(Duration::ZERO)? {
+                                break;
+                            }
                             continue;
                         }
 
                         // Vim normal mode — hjkl scroll instead of text input
                         if state.vim_normal_mode {
                             match (key.modifiers, key.code) {
-                                (KeyModifiers::NONE, KeyCode::Char('j')) => { state.scroll_down(3); }
-                                (KeyModifiers::NONE, KeyCode::Char('k')) => { state.scroll_up(3); }
+                                (KeyModifiers::NONE, KeyCode::Char('j')) => {
+                                    state.scroll_down(3);
+                                }
+                                (KeyModifiers::NONE, KeyCode::Char('k')) => {
+                                    state.scroll_up(3);
+                                }
                                 (KeyModifiers::NONE, KeyCode::Char('d')) => {
                                     let h = state.visible_height / 2;
                                     state.scroll_down(h);
@@ -2681,7 +3614,9 @@ pub async fn run_tui(
                                 }
                                 _ => {}
                             }
-                            if !event::poll(Duration::ZERO)? { break; }
+                            if !event::poll(Duration::ZERO)? {
+                                break;
+                            }
                             continue;
                         }
 
@@ -2701,10 +3636,16 @@ pub async fn run_tui(
                                             &provider_router,
                                             &key_store,
                                             &config,
-                                        ).await;
-                                    } else if state.multithread_mode && text.starts_with("@worker ") {
+                                            &agent_loop,
+                                        )
+                                        .await;
+                                    } else if state.multithread_mode && text.starts_with("@worker ")
+                                    {
                                         // Multithread mode: @worker prefix spawns a parallel worker
-                                        let task_prompt = text.strip_prefix("@worker ").unwrap_or(&text).to_string();
+                                        let task_prompt = text
+                                            .strip_prefix("@worker ")
+                                            .unwrap_or(&text)
+                                            .to_string();
                                         state.messages.push(RenderedMessage {
                                             role: MessageRole::User,
                                             content: text.clone(),
@@ -2935,7 +3876,9 @@ pub async fn run_tui(
                     _ => {}
                 }
 
-                if !event::poll(Duration::ZERO)? { break; }
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
         }
     }
@@ -2994,14 +3937,19 @@ fn restore_history_to_display(state: &mut AppState, session: &Session) {
                 // Show tool calls compactly
                 for tc in content.tool_calls() {
                     state.messages.push(RenderedMessage {
-                        role: MessageRole::ToolCall { name: tc.name.clone() },
+                        role: MessageRole::ToolCall {
+                            name: tc.name.clone(),
+                        },
                         content: serde_json::to_string_pretty(&tc.input).unwrap_or_default(),
                     });
                 }
             }
             Message::Tool(result) => {
                 state.messages.push(RenderedMessage {
-                    role: MessageRole::ToolResult { is_error: result.is_error, tool_name: String::new() },
+                    role: MessageRole::ToolResult {
+                        is_error: result.is_error,
+                        tool_name: String::new(),
+                    },
                     content: result.content.clone(),
                 });
             }
@@ -3017,7 +3965,11 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
     let modal = state.modal.take();
 
     match modal {
-        Some(Modal::Confirmation { tool_name, description, response_tx }) => {
+        Some(Modal::Confirmation {
+            tool_name,
+            description,
+            response_tx,
+        }) => {
             let action = input::map_key_confirm(key);
             match action {
                 Action::Confirm => {
@@ -3085,13 +4037,11 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                                 input_buffer: String::new(),
                             });
                         } else {
-                            state.model_switch_pending = Some((provider_id.clone(), model_id.clone()));
+                            state.model_switch_pending =
+                                Some((provider_id.clone(), model_id.clone()));
                             state.messages.push(RenderedMessage {
                                 role: MessageRole::System,
-                                content: format!(
-                                    "Switching to {} ({})",
-                                    model_name, provider_name
-                                ),
+                                content: format!("Switching to {} ({})", model_name, provider_name),
                             });
                             // Optimistic update — will be confirmed by the pending switch handler
                             state.provider_id = provider_id;
@@ -3131,7 +4081,8 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
 
         Some(Modal::KeyManager(mut km)) => {
             let is_enter = key.code == KeyCode::Enter
-                || (key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL));
+                || (key.code == KeyCode::Char('m')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
 
             if km.editing {
                 if key.code == KeyCode::Esc {
@@ -3143,10 +4094,8 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                         if let Some(entry) = km.providers.get_mut(km.selected) {
                             entry.has_key = true;
                             entry.key_source = "stored".to_string();
-                            state.key_save_pending = Some((
-                                entry.provider_id.clone(),
-                                km.input_buffer.clone(),
-                            ));
+                            state.key_save_pending =
+                                Some((entry.provider_id.clone(), km.input_buffer.clone()));
                         }
                     }
                     km.editing = false;
@@ -3180,9 +4129,10 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                     let did_delete = if let Some(entry) = km.providers.get_mut(km.selected) {
                         if entry.key_source == "stored" || entry.key_source == "env+stored" {
                             state.key_delete_pending = Some(entry.provider_id.clone());
-                            let has_env = std::env::var(
-                                crate::config::keyring::provider_env_var(&entry.provider_id)
-                            ).is_ok();
+                            let has_env = std::env::var(crate::config::keyring::provider_env_var(
+                                &entry.provider_id,
+                            ))
+                            .is_ok();
                             entry.has_key = has_env;
                             entry.key_source = if has_env {
                                 "env".to_string()
@@ -3191,7 +4141,8 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             };
                             true
                         } else if entry.key_source == "env" {
-                            let env_var = crate::config::keyring::provider_env_var(&entry.provider_id);
+                            let env_var =
+                                crate::config::keyring::provider_env_var(&entry.provider_id);
                             state.push_system(format!(
                                 "Cannot delete key for '{}' — it is set via environment variable ({}).\n\
                                 Unset the env var to remove it.",
@@ -3200,7 +4151,8 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             false
                         } else {
                             state.push_system(format!(
-                                "No stored key for '{}' to delete.", entry.provider_id
+                                "No stored key for '{}' to delete.",
+                                entry.provider_id
                             ));
                             false
                         }
@@ -3219,7 +4171,10 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             }
         }
 
-        Some(Modal::CustomModelInput { provider_id, mut input_buffer }) => {
+        Some(Modal::CustomModelInput {
+            provider_id,
+            mut input_buffer,
+        }) => {
             if key.code == KeyCode::Esc {
                 // Close without switching
             } else if key.code == KeyCode::Enter
@@ -3239,20 +4194,30 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 // Close modal whether empty or not
             } else if key.code == KeyCode::Backspace {
                 input_buffer.pop();
-                state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
+                state.modal = Some(Modal::CustomModelInput {
+                    provider_id,
+                    input_buffer,
+                });
             } else if let KeyCode::Char(c) = key.code {
                 if !key.modifiers.contains(KeyModifiers::CONTROL) {
                     input_buffer.push(c);
                 }
-                state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
+                state.modal = Some(Modal::CustomModelInput {
+                    provider_id,
+                    input_buffer,
+                });
             } else {
-                state.modal = Some(Modal::CustomModelInput { provider_id, input_buffer });
+                state.modal = Some(Modal::CustomModelInput {
+                    provider_id,
+                    input_buffer,
+                });
             }
         }
 
         Some(Modal::SessionBrowser(mut browser)) => {
             let is_enter = key.code == KeyCode::Enter
-                || (key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL));
+                || (key.code == KeyCode::Char('m')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
 
             if let Some(ref _confirm_id) = browser.confirm_delete {
                 // Waiting for second `d` or Esc to confirm/cancel delete

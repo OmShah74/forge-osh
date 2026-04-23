@@ -1,6 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -11,6 +11,10 @@ use crate::error::{ForgeError, Result};
 use crate::graph::SharedGraph;
 use crate::provider::router::ProviderRouter;
 use crate::session::{FileStateCache, Session};
+use crate::skills::{
+    refresh_registry, ActiveSkillScope, SharedSkillRegistry, SkillExecutionMode, SkillHooks,
+    SkillInvocationRecord,
+};
 use crate::tools::executor::ToolExecutor;
 use crate::tools::ToolRegistry;
 use crate::types::*;
@@ -25,9 +29,19 @@ use super::system_prompt;
 pub enum AgentEvent {
     ThinkingStart,
     Token(String),
-    ToolStart { name: String, input: serde_json::Value },
-    ToolEnd { name: String, output: String, is_error: bool },
-    ContextWarning { used: u32, limit: u32 },
+    ToolStart {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolEnd {
+        name: String,
+        output: String,
+        is_error: bool,
+    },
+    ContextWarning {
+        used: u32,
+        limit: u32,
+    },
     /// Auto-compaction finished (success or graceful fallback). The TUI uses
     /// this to drain its rendered message log and refresh the context bar so
     /// the user SEES the window free up, not just the next turn.
@@ -40,11 +54,36 @@ pub enum AgentEvent {
     Done,
     Error(String),
     // -- Multithread worker events (only emitted when /multithread is ON) --
-    WorkerSpawned { worker_id: String, description: String },
-    WorkerCompleted { worker_id: String, description: String, result: String, duration_ms: u64 },
-    WorkerFailed { worker_id: String, description: String, error: String, duration_ms: u64 },
-    WorkerToolStart { worker_id: String, name: String },
-    WorkerToolEnd { worker_id: String, name: String, is_error: bool },
+    WorkerSpawned {
+        worker_id: String,
+        description: String,
+    },
+    WorkerCompleted {
+        worker_id: String,
+        description: String,
+        result: String,
+        duration_ms: u64,
+    },
+    WorkerFailed {
+        worker_id: String,
+        description: String,
+        error: String,
+        duration_ms: u64,
+    },
+    WorkerToolStart {
+        worker_id: String,
+        name: String,
+    },
+    WorkerToolEnd {
+        worker_id: String,
+        name: String,
+        is_error: bool,
+    },
+    /// The active skill scope has changed. `None` means scope cleared.
+    /// TUI uses this to reflect the current scope in the status bar.
+    SkillScopeChanged {
+        name: Option<String>,
+    },
 }
 
 /// The core agentic loop
@@ -71,6 +110,7 @@ pub struct AgentLoop {
     pub permission_mode: Arc<parking_lot::RwLock<PermissionMode>>,
     /// Current thinking config (Disabled / Enabled / Budget).
     pub thinking: Arc<parking_lot::RwLock<ThinkingConfig>>,
+    pub skill_registry: SharedSkillRegistry,
 }
 
 #[derive(Debug)]
@@ -87,11 +127,11 @@ pub struct PermissionRequest {
 
 #[derive(Debug, PartialEq)]
 enum ErrorKind {
-    Transient,      // Network glitch, service temporarily unavailable
-    RateLimit,      // 429 Too Many Requests
-    Overloaded,     // 529 / "overloaded" responses
-    Auth,           // 401/403 — do NOT retry
-    NotRetryable,   // Any other permanent error
+    Transient,    // Network glitch, service temporarily unavailable
+    RateLimit,    // 429 Too Many Requests
+    Overloaded,   // 529 / "overloaded" responses
+    Auth,         // 401/403 — do NOT retry
+    NotRetryable, // Any other permanent error
 }
 
 fn categorize_error(err: &ForgeError) -> ErrorKind {
@@ -140,12 +180,41 @@ fn backoff_ms(attempt: u32, base_ms: u64, cap_ms: u64, kind: &ErrorKind) -> u64 
 
 fn effort_temperature(effort: u8) -> f32 {
     match effort {
-        1 => 0.0, 2 => 0.3, 3 => 0.7, 4 => 1.0, 5 => 1.2, _ => 0.7,
+        1 => 0.0,
+        2 => 0.3,
+        3 => 0.7,
+        4 => 1.0,
+        5 => 1.2,
+        _ => 0.7,
     }
 }
 
 fn normalize_messages(messages: &[Message]) -> Vec<Message> {
     normalize_messages_pub(messages)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SkillInvocationMetadata {
+    success: bool,
+    mode: String,
+    skill_name: String,
+    applied_allowed_tools: Option<Vec<String>>,
+    model_override: Option<String>,
+    materialized_prompt: String,
+    source: String,
+    canonical_path: Option<String>,
+    #[serde(default)]
+    hooks: SkillHooksMetadata,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct SkillHooksMetadata {
+    #[serde(rename = "PreToolUse", default)]
+    pre_tool_use: Vec<crate::agent::hooks::HookEntry>,
+    #[serde(rename = "PostToolUse", default)]
+    post_tool_use: Vec<crate::agent::hooks::HookEntry>,
+    #[serde(rename = "Stop", default)]
+    stop: Vec<crate::agent::hooks::HookEntry>,
 }
 
 pub fn normalize_messages_pub(messages: &[Message]) -> Vec<Message> {
@@ -177,10 +246,18 @@ pub struct ConsecutiveFailureTracker {
 
 impl ConsecutiveFailureTracker {
     pub fn new(max: u32) -> Self {
-        Self { failures: HashMap::new(), max_consecutive: max }
+        Self {
+            failures: HashMap::new(),
+            max_consecutive: max,
+        }
     }
 
-    pub fn record(&mut self, tool_name: &str, input: &serde_json::Value, is_error: bool) -> Option<u32> {
+    pub fn record(
+        &mut self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        is_error: bool,
+    ) -> Option<u32> {
         let file_path = input["path"].as_str().unwrap_or("").to_string();
         let key = (tool_name.to_string(), file_path);
         if is_error {
@@ -196,7 +273,9 @@ impl ConsecutiveFailureTracker {
         None
     }
 
-    pub fn reset(&mut self) { self.failures.clear(); }
+    pub fn reset(&mut self) {
+        self.failures.clear();
+    }
 }
 
 impl AgentLoop {
@@ -223,6 +302,11 @@ impl AgentLoop {
 
     fn build_tool_ctx(&self, working_dir: std::path::PathBuf, session_id: String) -> ToolContext {
         let mode = *self.permission_mode.read();
+        let active_skill_scope = self
+            .session
+            .try_lock()
+            .ok()
+            .and_then(|session| session.active_skill_scope.clone());
         ToolContext {
             working_dir,
             home_dir: dirs::home_dir().unwrap_or_default(),
@@ -230,6 +314,8 @@ impl AgentLoop {
             trust_mode: mode == PermissionMode::Bypass || self.config.general.trust_mode,
             permission_mode: mode,
             file_cache: Some(self.file_cache.clone()),
+            active_skill_scope,
+            skill_registry: Some(self.skill_registry.clone()),
         }
     }
 
@@ -248,6 +334,9 @@ impl AgentLoop {
             let s = self.session.lock().await;
             std::path::PathBuf::from(&s.working_dir)
         };
+        if self.config.agent.skills_enabled {
+            refresh_registry(&self.skill_registry, &working_dir_pb);
+        }
         let session_id = {
             let s = self.session.lock().await;
             s.id.clone()
@@ -259,7 +348,9 @@ impl AgentLoop {
             &user_message,
             working_dir_pb.clone(),
             Some(session_id.clone()),
-        ).await {
+        )
+        .await
+        {
             let _ = self.event_tx.send(AgentEvent::Error(format!(
                 "UserPromptSubmit hook vetoed this turn: {reason}"
             )));
@@ -286,7 +377,9 @@ impl AgentLoop {
             }
 
             if self.cancel_token().is_cancelled() {
-                let _ = self.event_tx.send(AgentEvent::Error("Turn cancelled by user.".to_string()));
+                let _ = self
+                    .event_tx
+                    .send(AgentEvent::Error("Turn cancelled by user.".to_string()));
                 break;
             }
 
@@ -295,15 +388,22 @@ impl AgentLoop {
                 let (needs_compact, ctx_window) = {
                     let session = self.session.lock().await;
                     let router = self.provider_router.read().await;
-                    let ctx_window = router.active().map(|p| p.context_window()).unwrap_or(128_000);
+                    let ctx_window = router
+                        .active()
+                        .map(|p| p.context_window())
+                        .unwrap_or(128_000);
                     let ctx_mgr = ContextManager::new(ctx_window);
                     let needs = match ctx_mgr.check(&session.history) {
                         ContextStatus::NeedsSummarization { used, limit } => {
-                            let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
+                            let _ = self
+                                .event_tx
+                                .send(AgentEvent::ContextWarning { used, limit });
                             true
                         }
                         ContextStatus::Warning { used, limit } => {
-                            let _ = self.event_tx.send(AgentEvent::ContextWarning { used, limit });
+                            let _ = self
+                                .event_tx
+                                .send(AgentEvent::ContextWarning { used, limit });
                             false
                         }
                         _ => false,
@@ -316,7 +416,8 @@ impl AgentLoop {
                         &hooks_config,
                         working_dir_pb.clone(),
                         Some(session_id.clone()),
-                    ).await;
+                    )
+                    .await;
 
                     let keep_last = compaction::DEFAULT_KEEP_LAST;
 
@@ -325,12 +426,16 @@ impl AgentLoop {
                     // set at session creation and not updated on /model
                     // switch) caused "invalid model" errors when the user
                     // changed provider mid-conversation.
-                    let (messages_all, model_id, provider_name) = {
+                    let (messages_all, invoked_skills, model_id, provider_name) = {
                         let session = self.session.lock().await;
                         let router = self.provider_router.read().await;
-                        let pname = router.active().map(|p| p.name().to_string()).unwrap_or_default();
+                        let pname = router
+                            .active()
+                            .map(|p| p.name().to_string())
+                            .unwrap_or_default();
                         (
                             session.history.messages().to_vec(),
+                            session.invoked_skills.clone(),
                             router.active_model_id().to_string(),
                             pname,
                         )
@@ -351,8 +456,13 @@ impl AgentLoop {
                         match router.active() {
                             Ok(provider) => {
                                 compaction::summarize_messages(
-                                    &to_summarize, provider, &model_id, ctx_window,
-                                ).await
+                                    &to_summarize,
+                                    &invoked_skills,
+                                    provider,
+                                    &model_id,
+                                    ctx_window,
+                                )
+                                .await
                             }
                             Err(e) => Err(e),
                         }
@@ -405,19 +515,33 @@ impl AgentLoop {
                 let router = self.provider_router.read().await;
                 let provider = router.active()?;
 
-                let graph_info = self.graph.read()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|cg| format!(
-                        "{} nodes, {} edges, {} files — built {}. \
+                let graph_info = self.graph.read().ok().and_then(|g| {
+                    g.as_ref().map(|cg| {
+                        format!(
+                            "{} nodes, {} edges, {} files — built {}. \
                         Use graph_query tool for O(1) symbol lookup before reading files.",
-                        cg.meta.total_nodes, cg.meta.total_edges,
-                        cg.meta.file_count, cg.meta.age_description()
-                    )));
+                            cg.meta.total_nodes,
+                            cg.meta.total_edges,
+                            cg.meta.file_count,
+                            cg.meta.age_description()
+                        )
+                    })
+                });
 
+                let skills_guard = self.skill_registry.read();
+                let skills = if self.config.agent.skills_enabled {
+                    Some(&*skills_guard)
+                } else {
+                    None
+                };
                 let mut system = system_prompt::build_system_prompt(
                     &std::path::PathBuf::from(&session.working_dir),
                     &self.config.general.system_prompt_extra,
                     graph_info.as_deref(),
+                    skills,
+                    self.config.agent.max_skill_listed_in_prompt,
+                    self.config.agent.skills_enabled
+                        && self.config.agent.include_skills_in_system_prompt,
                 );
 
                 let mode = *self.permission_mode.read();
@@ -439,9 +563,9 @@ impl AgentLoop {
                              auto-approve. Destructive, Shell, and Network tools still \
                              require explicit user approval.",
                         ),
-                        PermissionMode::Bypass => system.push_str(
-                            "All tools auto-approve. Proceed efficiently.",
-                        ),
+                        PermissionMode::Bypass => {
+                            system.push_str("All tools auto-approve. Proceed efficiently.")
+                        }
                         _ => {}
                     }
                 }
@@ -456,7 +580,10 @@ impl AgentLoop {
                 let normalized_messages = normalize_messages(session.history.messages());
 
                 ChatRequest {
-                    model: router.active_model_id().to_string(),
+                    model: session
+                        .active_skill_scope()
+                        .and_then(|scope| scope.model_override.clone())
+                        .unwrap_or_else(|| router.active_model_id().to_string()),
                     messages: normalized_messages,
                     tools,
                     max_tokens: self.config.agent.max_tokens,
@@ -514,7 +641,28 @@ impl AgentLoop {
                     &hooks_config,
                     working_dir_pb.clone(),
                     Some(session_id.clone()),
-                ).await;
+                )
+                .await;
+                if let Some(scope) = self.session.lock().await.active_skill_scope.clone() {
+                    let skill_hooks = scope.hooks.as_hooks_config();
+                    hooks::run_stop_hooks(
+                        &skill_hooks,
+                        working_dir_pb.clone(),
+                        Some(session_id.clone()),
+                    )
+                    .await;
+                }
+                let had_scope = {
+                    let mut session = self.session.lock().await;
+                    let had = session.active_skill_scope.is_some();
+                    session.active_skill_scope = None;
+                    had
+                };
+                if had_scope {
+                    let _ = self
+                        .event_tx
+                        .send(AgentEvent::SkillScopeChanged { name: None });
+                }
                 break;
             }
 
@@ -524,7 +672,8 @@ impl AgentLoop {
                 &mut failure_tracker,
                 &working_dir_pb,
                 &session_id,
-            ).await;
+            )
+            .await;
         }
 
         if self.config.general.auto_save_sessions {
@@ -589,7 +738,8 @@ impl AgentLoop {
                         sid,
                         event_tx.clone(),
                         perm_tx,
-                    ).await;
+                    )
+                    .await;
 
                     let _ = event_tx.send(AgentEvent::ToolEnd {
                         name: tc.name.clone(),
@@ -633,7 +783,8 @@ impl AgentLoop {
                 session_id.to_string(),
                 self.event_tx.clone(),
                 self.permission_tx.clone(),
-            ).await;
+            )
+            .await;
             let _ = self.event_tx.send(AgentEvent::ToolEnd {
                 name: tc.name.clone(),
                 output: output.content.clone(),
@@ -652,6 +803,8 @@ impl AgentLoop {
                     is_error: output.is_error,
                 });
             }
+
+            self.apply_special_tool_effects(&tc, &output).await;
 
             if let Some(fail_count) = failure_tracker.record(&tc.name, &tc.input, output.is_error) {
                 let file_path = tc.input["path"].as_str().unwrap_or("(unknown)");
@@ -674,6 +827,131 @@ impl AgentLoop {
         }
     }
 
+    async fn apply_special_tool_effects(&self, tc: &ToolCall, output: &ToolOutput) {
+        if tc.name != "invoke_skill" {
+            return;
+        }
+        let Some(metadata_value) = output
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("skill_invocation"))
+            .cloned()
+        else {
+            return;
+        };
+
+        let Ok(meta) = serde_json::from_value::<SkillInvocationMetadata>(metadata_value) else {
+            return;
+        };
+        if !meta.success {
+            return;
+        }
+
+        let source = match meta.source.as_str() {
+            "project" => crate::skills::SkillSource::Project,
+            "user" => crate::skills::SkillSource::User,
+            _ => crate::skills::SkillSource::Bundled,
+        };
+
+        let scope = ActiveSkillScope {
+            skill_name: meta.skill_name.clone(),
+            allowed_tools: meta.applied_allowed_tools.clone().unwrap_or_default(),
+            model_override: meta.model_override.clone(),
+            hooks: SkillHooks {
+                pre_tool_use: meta.hooks.pre_tool_use.clone(),
+                post_tool_use: meta.hooks.post_tool_use.clone(),
+                stop: meta.hooks.stop.clone(),
+            },
+            execution_mode: if meta.mode == "fork" {
+                SkillExecutionMode::Fork
+            } else {
+                SkillExecutionMode::Inline
+            },
+        };
+
+        if meta.mode == "fork" {
+            // Fork mode: run the skill in an isolated worker without blocking
+            // the main loop. We push the invocation record immediately and
+            // splice the result/failure back into history via a spawned task.
+            {
+                let mut session = self.session.lock().await;
+                session.push_invoked_skill(SkillInvocationRecord {
+                    skill_name: meta.skill_name.clone(),
+                    source,
+                    canonical_path: meta.canonical_path.as_ref().map(std::path::PathBuf::from),
+                    materialized_prompt: meta.materialized_prompt.clone(),
+                    invoked_at: chrono::Utc::now(),
+                    worker_id: None,
+                });
+                session.active_skill_scope = None;
+            }
+            let working_dir = {
+                let session = self.session.lock().await;
+                session.working_dir.clone()
+            };
+            let worker = super::worker::Worker::new(
+                format!("skill:{}", meta.skill_name),
+                self.provider_router.clone(),
+                self.tools.clone(),
+                self.config.clone(),
+                self.graph.clone(),
+                working_dir,
+            );
+            let worker_id = worker.id.clone();
+            let prompt = meta.materialized_prompt.clone();
+            let session_arc = self.session.clone();
+            let event_tx = self.event_tx.clone();
+            let skill_name = meta.skill_name.clone();
+
+            tokio::spawn(async move {
+                let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+                worker.run(prompt, notify_tx, event_tx).await;
+                if let Some(notification) = notify_rx.recv().await {
+                    match notification.status {
+                        super::worker::WorkerStatus::Completed { result, .. } => {
+                            let mut session = session_arc.lock().await;
+                            session
+                                .history
+                                .add_user(format!("[Skill Result: {skill_name}]\n{result}"));
+                            if let Some(last) = session.invoked_skills.last_mut() {
+                                last.worker_id = Some(worker_id);
+                            }
+                        }
+                        super::worker::WorkerStatus::Failed { error, .. } => {
+                            let mut session = session_arc.lock().await;
+                            session
+                                .history
+                                .add_user(format!("[Skill Failure: {skill_name}]\n{error}"));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        } else {
+            // Inline mode: the materialized prompt is already embedded in the
+            // tool_result content (see InvokeSkillTool::execute). We only need
+            // to install the scope and record the invocation — do NOT inject
+            // another user turn, that would duplicate context and violate the
+            // user/assistant turn alternation the providers expect.
+            let skill_name = meta.skill_name.clone();
+            {
+                let mut session = self.session.lock().await;
+                session.active_skill_scope = Some(scope);
+                session.push_invoked_skill(SkillInvocationRecord {
+                    skill_name: meta.skill_name.clone(),
+                    source,
+                    canonical_path: meta.canonical_path.as_ref().map(std::path::PathBuf::from),
+                    materialized_prompt: meta.materialized_prompt.clone(),
+                    invoked_at: chrono::Utc::now(),
+                    worker_id: None,
+                });
+            }
+            let _ = self.event_tx.send(AgentEvent::SkillScopeChanged {
+                name: Some(skill_name),
+            });
+        }
+    }
+
     #[instrument(skip_all, fields(tool = %tc.name, id = %tc.id))]
     #[allow(clippy::too_many_arguments)]
     async fn execute_single(
@@ -689,13 +967,19 @@ impl AgentLoop {
         event_tx: mpsc::UnboundedSender<AgentEvent>,
         perm_tx: mpsc::UnboundedSender<PermissionRequest>,
     ) -> ToolOutput {
+        let skill_hooks = ctx
+            .active_skill_scope
+            .as_ref()
+            .map(|scope| scope.hooks.as_hooks_config());
         match hooks::pre_tool_use(
             hooks_config,
             &tc.name,
             &tc.input,
             working_dir.clone(),
             Some(session_id.clone()),
-        ).await {
+        )
+        .await
+        {
             PreToolOutcome::Proceed => {}
             PreToolOutcome::Veto { reason, hook } => {
                 let msg = format!(
@@ -704,6 +988,27 @@ impl AgentLoop {
                 );
                 let _ = event_tx.send(AgentEvent::Error(msg.clone()));
                 return ToolOutput::error(msg);
+            }
+        }
+        if let Some(skill_hooks) = &skill_hooks {
+            match hooks::pre_tool_use(
+                skill_hooks,
+                &tc.name,
+                &tc.input,
+                working_dir.clone(),
+                Some(session_id.clone()),
+            )
+            .await
+            {
+                PreToolOutcome::Proceed => {}
+                PreToolOutcome::Veto { reason, hook } => {
+                    let msg = format!(
+                        "Skill PreToolUse hook vetoed '{}' (hook: `{}`): {}",
+                        tc.name, hook, reason
+                    );
+                    let _ = event_tx.send(AgentEvent::Error(msg.clone()));
+                    return ToolOutput::error(msg);
+                }
             }
         }
 
@@ -741,7 +1046,20 @@ impl AgentLoop {
             output.is_error,
             working_dir,
             Some(session_id),
-        ).await;
+        )
+        .await;
+        if let Some(skill_hooks) = &skill_hooks {
+            hooks::post_tool_use(
+                skill_hooks,
+                &tc.name,
+                &tc.input,
+                &output.content,
+                output.is_error,
+                ctx.working_dir.clone(),
+                Some(ctx.session_id.clone()),
+            )
+            .await;
+        }
 
         output
     }

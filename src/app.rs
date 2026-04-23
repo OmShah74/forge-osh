@@ -6,6 +6,7 @@ use crate::config::{self, keyring::KeyStore, Config};
 use crate::graph::{new_shared_graph, SharedGraph};
 use crate::provider::router::ProviderRouter;
 use crate::session::{checkpoint::Checkpoint, Session};
+use crate::skills::{shared_registry, SharedSkillRegistry};
 use crate::tools::ToolRegistry;
 
 pub struct App {
@@ -16,6 +17,7 @@ pub struct App {
     pub key_store: KeyStore,
     /// Shared semantic code graph (None until /forge-graph has been built)
     pub shared_graph: SharedGraph,
+    pub skills: SharedSkillRegistry,
 }
 
 impl App {
@@ -74,22 +76,19 @@ impl App {
             ToolRegistry::new()
         } else {
             let mut registry = ToolRegistry::with_builtins();
-            registry.register(Box::new(
-                crate::graph::tools::GraphQueryTool::new(shared_graph.clone())
-            ));
+            registry.register(Box::new(crate::graph::tools::GraphQueryTool::new(
+                shared_graph.clone(),
+            )));
             registry
         });
 
         // Initialize session
-        let working_dir = cli
-            .dir
-            .clone()
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
+        let working_dir = cli.dir.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
 
         let session = if let Some(resume_arg) = &cli.resume {
             // --resume (no value)        → "__latest__" sentinel → load most recent
@@ -100,9 +99,22 @@ impl App {
                 sessions.first().map(|s| s.id.clone())
             } else {
                 // exact id → prefix id → name
-                sessions.iter().find(|s| s.id == *resume_arg).map(|s| s.id.clone())
-                    .or_else(|| sessions.iter().find(|s| s.id.starts_with(resume_arg.as_str())).map(|s| s.id.clone()))
-                    .or_else(|| sessions.iter().find(|s| s.name == *resume_arg).map(|s| s.id.clone()))
+                sessions
+                    .iter()
+                    .find(|s| s.id == *resume_arg)
+                    .map(|s| s.id.clone())
+                    .or_else(|| {
+                        sessions
+                            .iter()
+                            .find(|s| s.id.starts_with(resume_arg.as_str()))
+                            .map(|s| s.id.clone())
+                    })
+                    .or_else(|| {
+                        sessions
+                            .iter()
+                            .find(|s| s.name == *resume_arg)
+                            .map(|s| s.id.clone())
+                    })
             };
 
             match target {
@@ -133,6 +145,7 @@ impl App {
         };
 
         let session = Arc::new(Mutex::new(session));
+        let skills = shared_registry(std::path::Path::new(&working_dir));
 
         // Try to load graph artifact for the working directory
         {
@@ -152,6 +165,7 @@ impl App {
             session,
             key_store,
             shared_graph,
+            skills,
         })
     }
 
@@ -164,6 +178,7 @@ impl App {
             self.session.clone(),
             Arc::new(Mutex::new(self.key_store.clone())),
             self.shared_graph.clone(),
+            self.skills.clone(),
         )
         .await
     }
@@ -196,9 +211,14 @@ impl App {
             permission_store: Arc::new(parking_lot::RwLock::new(PermissionStore::load())),
             cancel: Arc::new(parking_lot::RwLock::new(CancellationToken::new())),
             permission_mode: Arc::new(parking_lot::RwLock::new(
-                if self.config.general.trust_mode { PermissionMode::Bypass } else { PermissionMode::Default },
+                if self.config.general.trust_mode {
+                    PermissionMode::Bypass
+                } else {
+                    PermissionMode::Default
+                },
             )),
             thinking: Arc::new(parking_lot::RwLock::new(ThinkingConfig::Disabled)),
+            skill_registry: self.skills.clone(),
         };
 
         // Spawn agent
@@ -211,7 +231,11 @@ impl App {
                 AgentEvent::ToolStart { name, .. } => {
                     eprintln!("[Tool: {name}]");
                 }
-                AgentEvent::ToolEnd { name, output, is_error } => {
+                AgentEvent::ToolEnd {
+                    name,
+                    output,
+                    is_error,
+                } => {
                     if is_error {
                         eprintln!("[{name} ERROR]: {output}");
                     }
@@ -246,9 +270,7 @@ impl App {
                 let path = config::config_dir().join("config.toml");
                 println!("Config file: {}", path.display());
                 if let Ok(editor) = std::env::var("EDITOR") {
-                    let _ = std::process::Command::new(editor)
-                        .arg(&path)
-                        .status();
+                    let _ = std::process::Command::new(editor).arg(&path).status();
                 }
             }
             Some(ConfigAction::Set { key, value }) => {

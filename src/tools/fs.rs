@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use super::Tool;
 use crate::agent::file_history;
 use crate::types::*;
-use super::Tool;
 
 fn resolve_path(path_str: &str, ctx: &ToolContext) -> PathBuf {
     let path = Path::new(path_str);
@@ -22,8 +22,12 @@ pub struct ReadFileTool;
 
 #[async_trait]
 impl Tool for ReadFileTool {
-    fn name(&self) -> &str { "read_file" }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Read the contents of a file. Optionally specify start and end line numbers."
@@ -41,7 +45,9 @@ impl Tool for ReadFileTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -55,7 +61,8 @@ impl Tool for ReadFileTool {
         }
 
         // Detect image files by extension — return metadata instead of binary error
-        let extension = path.extension()
+        let extension = path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|s| s.to_lowercase());
         let is_image = matches!(
@@ -82,7 +89,10 @@ impl Tool for ReadFileTool {
                 This is a binary image file. To analyze its visual content, \
                 describe what you need from it and I can use web search or \
                 other tools. SVG files can be read as text if you need the markup.",
-                path.display(), mime, size_bytes, size_bytes as f64 / 1024.0
+                path.display(),
+                mime,
+                size_bytes,
+                size_bytes as f64 / 1024.0
             ));
         }
 
@@ -148,7 +158,9 @@ pub struct WriteFileTool;
 
 #[async_trait]
 impl Tool for WriteFileTool {
-    fn name(&self) -> &str { "write_file" }
+    fn name(&self) -> &str {
+        "write_file"
+    }
 
     fn description(&self) -> &str {
         "Write content to a file, replacing its entire contents. Creates the file if it does not exist."
@@ -165,7 +177,9 @@ impl Tool for WriteFileTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -205,7 +219,11 @@ impl Tool for WriteFileTool {
 
         match fs::write(&path, content).await {
             Ok(_) => {
-                let action = if old_content.is_empty() { "Created" } else { "Updated" };
+                let action = if old_content.is_empty() {
+                    "Created"
+                } else {
+                    "Updated"
+                };
                 let diff = generate_diff(&old_content, content);
                 // Refresh the fingerprint so the next edit isn't blocked.
                 if let Some(ref cache) = ctx.file_cache {
@@ -213,7 +231,10 @@ impl Tool for WriteFileTool {
                 }
                 ToolOutput::success(format!(
                     "{} {} ({} bytes)\n\n{}",
-                    action, path.display(), content.len(), diff
+                    action,
+                    path.display(),
+                    content.len(),
+                    diff
                 ))
             }
             Err(e) => ToolOutput::error(format!("Failed to write file: {e}")),
@@ -234,15 +255,16 @@ fn normalize_endings(s: &str) -> String {
 
 /// Strip leading/trailing whitespace from every line while preserving line count.
 fn normalize_whitespace_per_line(s: &str) -> String {
-    s.lines()
-        .map(|l| l.trim())
-        .collect::<Vec<_>>()
-        .join("\n")
+    s.lines().map(|l| l.trim()).collect::<Vec<_>>().join("\n")
 }
 
 /// Find the closest matching regions in `content` for a given `needle`.
 /// Returns `(start_line_1indexed, similarity_score, matched_snippet)`.
-fn find_closest_matches(content: &str, needle: &str, max_results: usize) -> Vec<(usize, f64, String)> {
+fn find_closest_matches(
+    content: &str,
+    needle: &str,
+    max_results: usize,
+) -> Vec<(usize, f64, String)> {
     let content_lines: Vec<&str> = content.lines().collect();
     let needle_lines: Vec<&str> = needle.lines().collect();
     let needle_len = needle_lines.len().max(1);
@@ -253,7 +275,10 @@ fn find_closest_matches(content: &str, needle: &str, max_results: usize) -> Vec<
 
     let mut candidates: Vec<(usize, f64, String)> = Vec::new();
 
-    for start in 0..content_lines.len().saturating_sub(needle_len.saturating_sub(1)) {
+    for start in 0..content_lines
+        .len()
+        .saturating_sub(needle_len.saturating_sub(1))
+    {
         let end = (start + needle_len).min(content_lines.len());
         let window: Vec<&str> = content_lines[start..end].to_vec();
         let window_norm: Vec<String> = window.iter().map(|l| l.trim().to_string()).collect();
@@ -275,12 +300,20 @@ fn find_closest_matches(content: &str, needle: &str, max_results: usize) -> Vec<
 
 /// Attempt to apply an edit using various matching strategies.
 /// Returns Ok(new_content) on success, or Err(diagnostic_message) on failure.
-fn apply_edit_robust(content: &str, old_str: &str, new_str: &str, edit_index: usize) -> Result<(String, String), String> {
+fn apply_edit_robust(
+    content: &str,
+    old_str: &str,
+    new_str: &str,
+    edit_index: usize,
+) -> Result<(String, String), String> {
     // Strategy 1: Exact match (original behavior)
     let count = content.matches(old_str).count();
     if count == 1 {
         let result = content.replacen(old_str, new_str, 1);
-        return Ok((result, format!("  Edit {}: applied (exact match)", edit_index)));
+        return Ok((
+            result,
+            format!("  Edit {}: applied (exact match)", edit_index),
+        ));
     }
     if count > 1 {
         return Err(format!(
@@ -297,7 +330,13 @@ fn apply_edit_robust(content: &str, old_str: &str, new_str: &str, edit_index: us
     let norm_count = norm_content.matches(&norm_old).count();
     if norm_count == 1 {
         let result = norm_content.replacen(&norm_old, &norm_new, 1);
-        return Ok((result, format!("  Edit {}: applied (auto-fixed line endings \\r\\n → \\n)", edit_index)));
+        return Ok((
+            result,
+            format!(
+                "  Edit {}: applied (auto-fixed line endings \\r\\n → \\n)",
+                edit_index
+            ),
+        ));
     }
 
     // Strategy 3: Whitespace-normalized match (trim each line)
@@ -328,10 +367,14 @@ fn apply_edit_robust(content: &str, old_str: &str, new_str: &str, edit_index: us
                 } else {
                     result
                 };
-                return Ok((result, format!(
-                    "  Edit {}: applied (auto-fixed whitespace differences at line {})",
-                    edit_index, line_start + 1
-                )));
+                return Ok((
+                    result,
+                    format!(
+                        "  Edit {}: applied (auto-fixed whitespace differences at line {})",
+                        edit_index,
+                        line_start + 1
+                    ),
+                ));
             }
         }
     }
@@ -359,7 +402,7 @@ fn apply_edit_robust(content: &str, old_str: &str, new_str: &str, edit_index: us
             "TIP: Your old_str has whitespace, line-ending, or content differences \
              from what is actually in the file. Copy the EXACT text from a fresh \
              read_file call. If edit_file keeps failing, use write_file to replace \
-             the entire file contents instead."
+             the entire file contents instead.",
         );
     } else {
         err_msg.push_str(
@@ -376,7 +419,9 @@ fn apply_edit_robust(content: &str, old_str: &str, new_str: &str, edit_index: us
 
 #[async_trait]
 impl Tool for EditFileTool {
-    fn name(&self) -> &str { "edit_file" }
+    fn name(&self) -> &str {
+        "edit_file"
+    }
 
     fn description(&self) -> &str {
         "Apply targeted edits to a file using search-and-replace. The old_str must uniquely \
@@ -404,7 +449,9 @@ impl Tool for EditFileTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -503,7 +550,9 @@ pub struct CreateFileTool;
 
 #[async_trait]
 impl Tool for CreateFileTool {
-    fn name(&self) -> &str { "create_file" }
+    fn name(&self) -> &str {
+        "create_file"
+    }
 
     fn description(&self) -> &str {
         "Create a new file with content. Errors if the file already exists."
@@ -520,7 +569,9 @@ impl Tool for CreateFileTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -555,7 +606,9 @@ impl Tool for CreateFileTool {
                 }
                 ToolOutput::success(format!(
                     "Created {} ({} bytes)\n\n{}",
-                    path.display(), content.len(), diff
+                    path.display(),
+                    content.len(),
+                    diff
                 ))
             }
             Err(e) => ToolOutput::error(format!("Failed to create file: {e}")),
@@ -569,7 +622,9 @@ pub struct DeleteFileTool;
 
 #[async_trait]
 impl Tool for DeleteFileTool {
-    fn name(&self) -> &str { "delete_file" }
+    fn name(&self) -> &str {
+        "delete_file"
+    }
 
     fn description(&self) -> &str {
         "Delete a file or empty directory."
@@ -585,7 +640,9 @@ impl Tool for DeleteFileTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Destructive }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Destructive
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -633,8 +690,12 @@ pub struct ListDirectoryTool;
 
 #[async_trait]
 impl Tool for ListDirectoryTool {
-    fn name(&self) -> &str { "list_directory" }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "list_directory"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "List contents of a directory with optional recursive traversal and filtering."
@@ -654,7 +715,9 @@ impl Tool for ListDirectoryTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -725,9 +788,13 @@ pub struct MoveFileTool;
 
 #[async_trait]
 impl Tool for MoveFileTool {
-    fn name(&self) -> &str { "move_file" }
+    fn name(&self) -> &str {
+        "move_file"
+    }
 
-    fn description(&self) -> &str { "Move or rename a file." }
+    fn description(&self) -> &str {
+        "Move or rename a file."
+    }
 
     fn parameters_schema(&self) -> Value {
         json!({
@@ -740,7 +807,9 @@ impl Tool for MoveFileTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let src = match input["source"].as_str() {
@@ -763,11 +832,7 @@ impl Tool for MoveFileTool {
         }
 
         match fs::rename(&src, &dst).await {
-            Ok(_) => ToolOutput::success(format!(
-                "Moved {} -> {}",
-                src.display(),
-                dst.display()
-            )),
+            Ok(_) => ToolOutput::success(format!("Moved {} -> {}", src.display(), dst.display())),
             Err(e) => ToolOutput::error(format!("Failed to move file: {e}")),
         }
     }
@@ -779,9 +844,13 @@ pub struct CopyFileTool;
 
 #[async_trait]
 impl Tool for CopyFileTool {
-    fn name(&self) -> &str { "copy_file" }
+    fn name(&self) -> &str {
+        "copy_file"
+    }
 
-    fn description(&self) -> &str { "Copy a file." }
+    fn description(&self) -> &str {
+        "Copy a file."
+    }
 
     fn parameters_schema(&self) -> Value {
         json!({
@@ -794,7 +863,9 @@ impl Tool for CopyFileTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let src = match input["source"].as_str() {
@@ -838,8 +909,10 @@ mod tests {
             home_dir: dir.to_path_buf(),
             session_id: "test".to_string(),
             trust_mode: true,
-        permission_mode: crate::types::PermissionMode::Default,
-        file_cache: None,
+            permission_mode: crate::types::PermissionMode::Default,
+            file_cache: None,
+            active_skill_scope: None,
+                skill_registry: None,
         }
     }
 

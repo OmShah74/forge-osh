@@ -2,12 +2,15 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
     Frame,
 };
 
 use super::themes::Theme;
-use super::{AppState, KeyManagerState, Modal, MessageRole, OSH_SPLASH_LINES, SessionBrowserState};
+use super::{AppState, KeyManagerState, MessageRole, Modal, SessionBrowserState, OSH_SPLASH_LINES};
 
 /// Render the entire TUI
 pub fn render(frame: &mut Frame, state: &mut AppState) {
@@ -33,10 +36,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),              // header
-            Constraint::Min(5),                 // conversation
-            Constraint::Length(input_height),   // input (dynamic)
-            Constraint::Length(1),              // status bar
+            Constraint::Length(1),            // header
+            Constraint::Min(5),               // conversation
+            Constraint::Length(input_height), // input (dynamic)
+            Constraint::Length(1),            // status bar
         ])
         .split(area);
 
@@ -48,7 +51,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     // Render modal overlays on top
     if let Some(modal) = &state.modal {
         match modal {
-            Modal::Confirmation { tool_name, description, .. } => {
+            Modal::Confirmation {
+                tool_name,
+                description,
+                ..
+            } => {
                 render_confirmation(frame, tool_name, description, &theme);
             }
             Modal::Help => {
@@ -63,7 +70,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Modal::KeyManager(km) => {
                 render_key_manager(frame, km, &theme);
             }
-            Modal::CustomModelInput { provider_id, input_buffer } => {
+            Modal::CustomModelInput {
+                provider_id,
+                input_buffer,
+            } => {
                 render_custom_model_input(frame, provider_id, input_buffer, &theme);
             }
             Modal::SessionBrowser(browser) => {
@@ -110,8 +120,8 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         busy_indicator,
     );
 
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(theme.header_fg).bg(theme.header_bg));
+    let header =
+        Paragraph::new(header_text).style(Style::default().fg(theme.header_fg).bg(theme.header_bg));
 
     frame.render_widget(header, area);
 }
@@ -143,12 +153,18 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                         let ch_is_hash = ch == '#';
                         if ch_is_hash != in_hash {
                             if !segment.is_empty() {
-                                let color = if in_hash { theme.prompt_fg } else { theme.border_fg };
+                                let color = if in_hash {
+                                    theme.prompt_fg
+                                } else {
+                                    theme.border_fg
+                                };
                                 spans.push(Span::styled(
                                     segment.clone(),
-                                    Style::default().fg(color).add_modifier(
-                                        if in_hash { Modifier::BOLD } else { Modifier::empty() },
-                                    ),
+                                    Style::default().fg(color).add_modifier(if in_hash {
+                                        Modifier::BOLD
+                                    } else {
+                                        Modifier::empty()
+                                    }),
                                 ));
                                 segment.clear();
                             }
@@ -157,12 +173,18 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                         segment.push(ch);
                     }
                     if !segment.is_empty() {
-                        let color = if in_hash { theme.prompt_fg } else { theme.border_fg };
+                        let color = if in_hash {
+                            theme.prompt_fg
+                        } else {
+                            theme.border_fg
+                        };
                         spans.push(Span::styled(
                             segment,
-                            Style::default().fg(color).add_modifier(
-                                if in_hash { Modifier::BOLD } else { Modifier::empty() },
-                            ),
+                            Style::default().fg(color).add_modifier(if in_hash {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
                         ));
                     }
                     lines.push(Line::from(spans));
@@ -171,15 +193,13 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
             }
 
             MessageRole::User => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        " You ",
-                        Style::default()
-                            .fg(theme.header_bg)
-                            .bg(theme.user_msg_fg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    " You ",
+                    Style::default()
+                        .fg(theme.header_bg)
+                        .bg(theme.user_msg_fg)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 for text_line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {text_line}"),
@@ -190,15 +210,13 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
             }
 
             MessageRole::Assistant => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        " forge ",
-                        Style::default()
-                            .fg(theme.header_bg)
-                            .bg(theme.assistant_msg_fg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    " forge ",
+                    Style::default()
+                        .fg(theme.header_bg)
+                        .bg(theme.assistant_msg_fg)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 render_assistant_content(&mut lines, &msg.content, theme);
                 lines.push(Line::from(""));
             }
@@ -218,7 +236,10 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 lines.push(Line::from(""));
             }
 
-            MessageRole::ToolResult { is_error, tool_name } => {
+            MessageRole::ToolResult {
+                is_error,
+                tool_name,
+            } => {
                 let (color, status_icon) = if *is_error {
                     (theme.error_fg, "✗")
                 } else {
@@ -229,12 +250,10 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 } else {
                     format!("  {} {}", status_icon, tool_name)
                 };
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        tool_label,
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    tool_label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )]));
 
                 let content_lines: Vec<&str> = msg.content.lines().collect();
 
@@ -263,7 +282,9 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                             // Hunk header — cyan/amber
                             lines.push(Line::from(Span::styled(
                                 format!("    {text_line}"),
-                                Style::default().fg(theme.tool_name_fg).add_modifier(Modifier::ITALIC),
+                                Style::default()
+                                    .fg(theme.tool_name_fg)
+                                    .add_modifier(Modifier::ITALIC),
                             )));
                         } else {
                             // Context lines
@@ -281,8 +302,13 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 }
                 if content_lines.len() > max_lines {
                     lines.push(Line::from(Span::styled(
-                        format!("    … ({} more lines hidden)", content_lines.len() - max_lines),
-                        Style::default().fg(theme.muted_fg).add_modifier(Modifier::ITALIC),
+                        format!(
+                            "    … ({} more lines hidden)",
+                            content_lines.len() - max_lines
+                        ),
+                        Style::default()
+                            .fg(theme.muted_fg)
+                            .add_modifier(Modifier::ITALIC),
                     )));
                 }
                 lines.push(Line::from(""));
@@ -300,15 +326,13 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
 
     // Streaming text (currently being generated)
     if !state.streaming_text.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                " forge ",
-                Style::default()
-                    .fg(theme.header_bg)
-                    .bg(theme.assistant_msg_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            " forge ",
+            Style::default()
+                .fg(theme.header_bg)
+                .bg(theme.assistant_msg_fg)
+                .add_modifier(Modifier::BOLD),
+        )]));
         render_assistant_content(&mut lines, &state.streaming_text, theme);
     }
 
@@ -326,12 +350,21 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
     // max_scroll() to be too small and the viewport to freeze near the bottom.
     let wrap_width = area.width.saturating_sub(2) as usize; // -1 scrollbar, -1 border safety
     let total_visual = if wrap_width > 0 {
-        lines.iter().map(|line| {
-            let w: usize = line.spans.iter()
-                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            if w == 0 { 1 } else { (w + wrap_width - 1) / wrap_width }
-        }).sum()
+        lines
+            .iter()
+            .map(|line| {
+                let w: usize = line
+                    .spans
+                    .iter()
+                    .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                if w == 0 {
+                    1
+                } else {
+                    (w + wrap_width - 1) / wrap_width
+                }
+            })
+            .sum()
     } else {
         lines.len()
     };
@@ -348,11 +381,19 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
     let mut skip_raw = 0usize;
     if wrap_width > 0 {
         for line in &lines {
-            if skipped_visual >= scroll_start { break; }
-            let w: usize = line.spans.iter()
+            if skipped_visual >= scroll_start {
+                break;
+            }
+            let w: usize = line
+                .spans
+                .iter()
                 .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
                 .sum();
-            let rows = if w == 0 { 1 } else { (w + wrap_width - 1) / wrap_width };
+            let rows = if w == 0 {
+                1
+            } else {
+                (w + wrap_width - 1) / wrap_width
+            };
             skipped_visual += rows;
             skip_raw += 1;
         }
@@ -459,7 +500,9 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
                 Span::raw("  "),
                 Span::styled(
                     heading.to_string(),
-                    Style::default().fg(theme.tool_name_fg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.tool_name_fg)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
             continue;
@@ -469,7 +512,9 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
                 Span::raw("  "),
                 Span::styled(
                     heading.to_string(),
-                    Style::default().fg(theme.warning_fg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    Style::default()
+                        .fg(theme.warning_fg)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 ),
             ]));
             continue;
@@ -545,17 +590,13 @@ fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
                 current.clear();
             }
             i += 2;
-            while i + 1 < chars.len()
-                && !(chars[i] == marker && chars[i + 1] == marker)
-            {
+            while i + 1 < chars.len() && !(chars[i] == marker && chars[i + 1] == marker) {
                 current.push(chars[i]);
                 i += 1;
             }
             spans.push(Span::styled(
                 current.clone(),
-                Style::default()
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
             current.clear();
             if i + 1 < chars.len() {
@@ -642,12 +683,10 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
             for (key, value) in obj {
                 match value {
                     serde_json::Value::String(s) if s.contains('\n') || s.len() > 60 => {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("    {key}: "),
-                                Style::default().fg(theme.tool_name_fg),
-                            ),
-                        ]));
+                        lines.push(Line::from(vec![Span::styled(
+                            format!("    {key}: "),
+                            Style::default().fg(theme.tool_name_fg),
+                        )]));
                         let content_lines: Vec<&str> = s.lines().collect();
                         let max_preview = 25;
                         for content_line in content_lines.iter().take(max_preview) {
@@ -658,7 +697,10 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
                         }
                         if content_lines.len() > max_preview {
                             lines.push(Line::from(Span::styled(
-                                format!("      ... ({} more lines)", content_lines.len() - max_preview),
+                                format!(
+                                    "      ... ({} more lines)",
+                                    content_lines.len() - max_preview
+                                ),
                                 Style::default().fg(theme.muted_fg),
                             )));
                         }
@@ -678,10 +720,7 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
                                 format!("    {key}: "),
                                 Style::default().fg(theme.tool_name_fg),
                             ),
-                            Span::styled(
-                                value.to_string(),
-                                Style::default().fg(theme.fg),
-                            ),
+                            Span::styled(value.to_string(), Style::default().fg(theme.fg)),
                         ]));
                     }
                 }
@@ -707,18 +746,34 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) 
 
     let (display_text, text_style) = if state.input.text.is_empty() {
         if state.agent_busy {
-            ("Agent is working... (Ctrl+C to cancel)", Style::default().fg(theme.muted_fg))
+            (
+                "Agent is working... (Ctrl+C to cancel)",
+                Style::default().fg(theme.muted_fg),
+            )
         } else {
-            ("Type a message or /help for commands...", Style::default().fg(theme.muted_fg))
+            (
+                "Type a message or /help for commands...",
+                Style::default().fg(theme.muted_fg),
+            )
         }
     } else {
         (state.input.text.as_str(), Style::default().fg(theme.fg))
     };
 
     let title = if state.agent_busy {
-        Span::styled(" ⏳ ", Style::default().fg(theme.spinner_fg).add_modifier(Modifier::BOLD))
+        Span::styled(
+            " ⏳ ",
+            Style::default()
+                .fg(theme.spinner_fg)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        Span::styled(" ❯ ", Style::default().fg(theme.prompt_fg).add_modifier(Modifier::BOLD))
+        Span::styled(
+            " ❯ ",
+            Style::default()
+                .fg(theme.prompt_fg)
+                .add_modifier(Modifier::BOLD),
+        )
     };
 
     let input = Paragraph::new(display_text)
@@ -788,7 +843,11 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         let vim_indicator = if state.vim_normal_mode { " [VIM]" } else { "" };
         format!(" L{current}/{total}{vim_indicator}")
     } else {
-        if state.vim_normal_mode { " [VIM]".to_string() } else { String::new() }
+        if state.vim_normal_mode {
+            " [VIM]".to_string()
+        } else {
+            String::new()
+        }
     };
 
     // Unread indicator: shown when scrolled away from bottom and new messages arrived
@@ -798,12 +857,18 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         String::new()
     };
 
+    let skill_indicator = state
+        .active_skill_label
+        .as_deref()
+        .map(|n| format!("  🪄 {n}"))
+        .unwrap_or_default();
+
     let status = format!(
-        " ^C Cancel  ^O Model  ^P Provider  ^K Keys  ^B Cost  ^R Theme  ^T Trust[{trust}]  /help Cmds{scroll_info}{unread_indicator}"
+        " ^C Cancel  ^O Model  ^P Provider  ^K Keys  ^B Cost  ^R Theme  ^T Trust[{trust}]  /help Cmds{skill_indicator}{scroll_info}{unread_indicator}"
     );
 
-    let bar = Paragraph::new(status)
-        .style(Style::default().fg(theme.status_fg).bg(theme.status_bg));
+    let bar =
+        Paragraph::new(status).style(Style::default().fg(theme.status_fg).bg(theme.status_bg));
 
     frame.render_widget(bar, area);
 }
@@ -950,13 +1015,16 @@ fn render_key_manager(frame: &mut Frame, km: &KeyManagerState, theme: &Theme) {
             if len <= 8 {
                 "*".repeat(len)
             } else {
-                format!("{}...{}", &km.input_buffer[..4], &km.input_buffer[len - 4..])
+                format!(
+                    "{}...{}",
+                    &km.input_buffer[..4],
+                    &km.input_buffer[len - 4..]
+                )
             }
         };
 
-        let text = format!(
-            "Set API key for: {provider}\n\nKey: {masked}\n\n[Enter] Save    [Esc] Cancel"
-        );
+        let text =
+            format!("Set API key for: {provider}\n\nKey: {masked}\n\n[Enter] Save    [Esc] Cancel");
 
         let dialog = Paragraph::new(text)
             .style(Style::default().fg(theme.fg))
@@ -1011,7 +1079,12 @@ fn render_key_manager(frame: &mut Frame, km: &KeyManagerState, theme: &Theme) {
 // Custom model input dialog
 // ---------------------------------------------------------------------------
 
-fn render_custom_model_input(frame: &mut Frame, provider_id: &str, input_buffer: &str, theme: &Theme) {
+fn render_custom_model_input(
+    frame: &mut Frame,
+    provider_id: &str,
+    input_buffer: &str,
+    theme: &Theme,
+) {
     let area = centered_rect(60, 30, frame.area());
     frame.render_widget(Clear, area);
 
@@ -1120,8 +1193,10 @@ fn render_session_browser(frame: &mut Frame, browser: &SessionBrowserState, them
         width: area.width.saturating_sub(2),
         height: 1,
     };
-    let footer = Paragraph::new("  ID: press Enter to load conversation  |  D: mark for delete  |  Esc: close")
-        .style(Style::default().fg(theme.muted_fg));
+    let footer = Paragraph::new(
+        "  ID: press Enter to load conversation  |  D: mark for delete  |  Esc: close",
+    )
+    .style(Style::default().fg(theme.muted_fg));
     frame.render_widget(footer, footer_area);
 }
 

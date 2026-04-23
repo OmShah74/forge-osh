@@ -7,6 +7,7 @@ pub mod notebook;
 pub mod powershell;
 pub mod search;
 pub mod shell;
+pub mod skills;
 pub mod tasks;
 pub mod validate;
 pub mod web;
@@ -119,6 +120,7 @@ impl ToolRegistry {
         registry.register(Box::new(agent_tools::AskUserQuestionTool));
         registry.register(Box::new(agent_tools::EnterPlanModeTool));
         registry.register(Box::new(agent_tools::ExitPlanModeTool));
+        registry.register(Box::new(skills::InvokeSkillTool));
 
         // ── Notebooks ──────────────────────────────────────────────────────
         registry.register(Box::new(notebook::NotebookReadTool));
@@ -140,7 +142,8 @@ impl ToolRegistry {
     }
 
     pub fn all_definitions(&self) -> Vec<ToolDefinition> {
-        let mut defs: Vec<ToolDefinition> = self.tools
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
             .values()
             .map(|tool| ToolDefinition {
                 name: tool.name().to_string(),

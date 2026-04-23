@@ -57,8 +57,14 @@ pub async fn undo_last() -> String {
                         let _ = tokio::fs::create_dir_all(parent).await;
                     }
                     match tokio::fs::write(path, &content).await {
-                        Ok(_) => format!("Undone: restored {} ({} bytes)", path.display(), content.len()),
-                        Err(e) => format!("Undo failed (could not restore {}): {e}", path.display()),
+                        Ok(_) => format!(
+                            "Undone: restored {} ({} bytes)",
+                            path.display(),
+                            content.len()
+                        ),
+                        Err(e) => {
+                            format!("Undo failed (could not restore {}): {e}", path.display())
+                        }
                     }
                 }
             }
@@ -85,12 +91,18 @@ mod tests {
 
         // Mutate the file
         tokio::fs::write(&path, b"modified content").await.unwrap();
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "modified content");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "modified content"
+        );
 
         // Undo
         let msg = undo_last().await;
         assert!(msg.contains("Undone"), "Expected undo message, got: {msg}");
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "original content");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "original content"
+        );
     }
 
     #[tokio::test]

@@ -81,10 +81,7 @@ impl Checkpoint {
             "- **Provider**: {} / {}\n",
             session.provider_id, session.model_id
         ));
-        md.push_str(&format!(
-            "- **Created**: {}\n",
-            session.history.created_at
-        ));
+        md.push_str(&format!("- **Created**: {}\n", session.history.created_at));
         md.push_str(&format!(
             "- **Messages**: {}\n\n",
             session.history.message_count()

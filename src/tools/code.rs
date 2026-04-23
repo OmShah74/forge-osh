@@ -5,8 +5,8 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 /// Detect project type from files in working directory
 fn detect_project_type(working_dir: &Path) -> Vec<ProjectType> {
@@ -46,35 +46,40 @@ enum ProjectType {
 }
 
 async fn run_command(cmd: &str, args: &[&str], working_dir: &Path) -> ToolOutput {
-    let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-    let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let flag = if cfg!(target_os = "windows") {
+        "/C"
+    } else {
+        "-c"
+    };
     let full_cmd = format!("{} {}", cmd, args.join(" "));
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        async {
-            let mut child = Command::new(shell)
-                .arg(flag)
-                .arg(&full_cmd)
-                .current_dir(working_dir)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let mut child = Command::new(shell)
+            .arg(flag)
+            .arg(&full_cmd)
+            .current_dir(working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
 
-            let mut stdout = String::new();
-            let mut stderr = String::new();
+        let mut stdout = String::new();
+        let mut stderr = String::new();
 
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_string(&mut stdout).await?;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                err.read_to_string(&mut stderr).await?;
-            }
+        if let Some(mut out) = child.stdout.take() {
+            out.read_to_string(&mut stdout).await?;
+        }
+        if let Some(mut err) = child.stderr.take() {
+            err.read_to_string(&mut stderr).await?;
+        }
 
-            let status = child.wait().await?;
-            Ok::<(String, String, bool), std::io::Error>((stdout, stderr, status.success()))
-        },
-    )
+        let status = child.wait().await?;
+        Ok::<(String, String, bool), std::io::Error>((stdout, stderr, status.success()))
+    })
     .await;
 
     match result {
@@ -107,7 +112,9 @@ pub struct RunLinterTool;
 
 #[async_trait]
 impl Tool for RunLinterTool {
-    fn name(&self) -> &str { "run_linter" }
+    fn name(&self) -> &str {
+        "run_linter"
+    }
     fn description(&self) -> &str {
         "Run the project's linter. Auto-detects the project type (cargo clippy, eslint, ruff, etc.)."
     }
@@ -120,7 +127,9 @@ impl Tool for RunLinterTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Shell }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Shell
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let fix = input["fix"].as_bool().unwrap_or(false);
@@ -138,14 +147,27 @@ impl Tool for RunLinterTool {
                     } else {
                         vec!["clippy", "--", "-W", "clippy::all"]
                     };
-                    return run_command("cargo", &args.iter().copied().collect::<Vec<_>>(), &ctx.working_dir).await;
+                    return run_command(
+                        "cargo",
+                        &args.iter().copied().collect::<Vec<_>>(),
+                        &ctx.working_dir,
+                    )
+                    .await;
                 }
                 ProjectType::Node => {
-                    let cmd = if fix { "npx eslint . --fix" } else { "npx eslint ." };
+                    let cmd = if fix {
+                        "npx eslint . --fix"
+                    } else {
+                        "npx eslint ."
+                    };
                     return run_command(cmd, &[], &ctx.working_dir).await;
                 }
                 ProjectType::Python => {
-                    let cmd = if fix { "ruff check . --fix" } else { "ruff check ." };
+                    let cmd = if fix {
+                        "ruff check . --fix"
+                    } else {
+                        "ruff check ."
+                    };
                     return run_command(cmd, &[], &ctx.working_dir).await;
                 }
                 ProjectType::Go => {
@@ -165,7 +187,9 @@ pub struct RunTestsTool;
 
 #[async_trait]
 impl Tool for RunTestsTool {
-    fn name(&self) -> &str { "run_tests" }
+    fn name(&self) -> &str {
+        "run_tests"
+    }
     fn description(&self) -> &str {
         "Run the project's test suite. Auto-detects the project type."
     }
@@ -179,7 +203,9 @@ impl Tool for RunTestsTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Shell }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Shell
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let filter = input["filter"].as_str();
@@ -238,7 +264,9 @@ pub struct RunFormatterTool;
 
 #[async_trait]
 impl Tool for RunFormatterTool {
-    fn name(&self) -> &str { "run_formatter" }
+    fn name(&self) -> &str {
+        "run_formatter"
+    }
     fn description(&self) -> &str {
         "Run the project's code formatter. Auto-detects the project type."
     }
@@ -251,7 +279,9 @@ impl Tool for RunFormatterTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Shell }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Shell
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let check = input["check"].as_bool().unwrap_or(false);

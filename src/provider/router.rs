@@ -35,10 +35,9 @@ impl ProviderRouter {
 
         // OpenAI
         if let Some(key) = key_store.get("openai") {
-            if let Ok(p) = OpenAICompatProvider::openai(
-                key,
-                config.providers.openai.default_model.clone(),
-            ) {
+            if let Ok(p) =
+                OpenAICompatProvider::openai(key, config.providers.openai.default_model.clone())
+            {
                 providers.insert("openai".to_string(), Box::new(p));
             }
         }
@@ -56,20 +55,18 @@ impl ProviderRouter {
 
         // Groq
         if let Some(key) = key_store.get("groq") {
-            if let Ok(p) = OpenAICompatProvider::groq(
-                key,
-                config.providers.groq.default_model.clone(),
-            ) {
+            if let Ok(p) =
+                OpenAICompatProvider::groq(key, config.providers.groq.default_model.clone())
+            {
                 providers.insert("groq".to_string(), Box::new(p));
             }
         }
 
         // Grok (xAI)
         if let Some(key) = key_store.get("grok") {
-            if let Ok(p) = OpenAICompatProvider::grok(
-                key,
-                config.providers.grok.default_model.clone(),
-            ) {
+            if let Ok(p) =
+                OpenAICompatProvider::grok(key, config.providers.grok.default_model.clone())
+            {
                 providers.insert("grok".to_string(), Box::new(p));
             }
         }
@@ -86,30 +83,27 @@ impl ProviderRouter {
 
         // Mistral
         if let Some(key) = key_store.get("mistral") {
-            if let Ok(p) = OpenAICompatProvider::mistral(
-                key,
-                config.providers.mistral.default_model.clone(),
-            ) {
+            if let Ok(p) =
+                OpenAICompatProvider::mistral(key, config.providers.mistral.default_model.clone())
+            {
                 providers.insert("mistral".to_string(), Box::new(p));
             }
         }
 
         // DeepSeek
         if let Some(key) = key_store.get("deepseek") {
-            if let Ok(p) = OpenAICompatProvider::deepseek(
-                key,
-                config.providers.deepseek.default_model.clone(),
-            ) {
+            if let Ok(p) =
+                OpenAICompatProvider::deepseek(key, config.providers.deepseek.default_model.clone())
+            {
                 providers.insert("deepseek".to_string(), Box::new(p));
             }
         }
 
         // Together
         if let Some(key) = key_store.get("together") {
-            if let Ok(p) = OpenAICompatProvider::together(
-                key,
-                config.providers.together.default_model.clone(),
-            ) {
+            if let Ok(p) =
+                OpenAICompatProvider::together(key, config.providers.together.default_model.clone())
+            {
                 providers.insert("together".to_string(), Box::new(p));
             }
         }
@@ -136,10 +130,9 @@ impl ProviderRouter {
 
         // Cohere
         if let Some(key) = key_store.get("cohere") {
-            if let Ok(p) = OpenAICompatProvider::cohere(
-                key,
-                config.providers.cohere.default_model.clone(),
-            ) {
+            if let Ok(p) =
+                OpenAICompatProvider::cohere(key, config.providers.cohere.default_model.clone())
+            {
                 providers.insert("cohere".to_string(), Box::new(p));
             }
         }
@@ -175,7 +168,10 @@ impl ProviderRouter {
             .get(&self.active_provider)
             .map(|p| p.as_ref())
             .ok_or_else(|| {
-                ForgeError::Provider("No active provider. Configure at least one provider with an API key.".to_string())
+                ForgeError::Provider(
+                    "No active provider. Configure at least one provider with an API key."
+                        .to_string(),
+                )
             })
     }
 
@@ -230,8 +226,7 @@ impl ProviderRouter {
         base_url: String,
         model: String,
     ) -> Result<()> {
-        let provider =
-            OpenAICompatProvider::custom(name, String::new(), base_url, model)?;
+        let provider = OpenAICompatProvider::custom(name, String::new(), base_url, model)?;
         self.providers.insert(id, Box::new(provider));
         Ok(())
     }
@@ -239,7 +234,12 @@ impl ProviderRouter {
     /// Instantiate (or replace) a single cloud provider using the supplied key.
     /// Called after the user saves a new API key so the provider becomes active
     /// immediately without requiring a restart.
-    pub fn reload_provider(&mut self, provider_id: &str, key: String, config: &Config) -> Result<()> {
+    pub fn reload_provider(
+        &mut self,
+        provider_id: &str,
+        key: String,
+        config: &Config,
+    ) -> Result<()> {
         let provider: Box<dyn Provider> = match provider_id {
             "anthropic" => Box::new(AnthropicProvider::new(
                 key,
@@ -318,7 +318,8 @@ impl ProviderRouter {
         if self.active_provider == provider_id {
             // Pick another available provider as the new active
             self.active_provider = self.providers.keys().next().cloned().unwrap_or_default();
-            self.active_model = self.providers
+            self.active_model = self
+                .providers
                 .get(&self.active_provider)
                 .map(|p| p.model_id().to_string())
                 .unwrap_or_default();

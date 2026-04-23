@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::fs;
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // TodoWriteTool — writes a structured TODO list to .forge-osh/todos.md
@@ -21,7 +21,9 @@ pub struct TodoWriteTool;
 
 #[async_trait]
 impl Tool for TodoWriteTool {
-    fn name(&self) -> &str { "todo_write" }
+    fn name(&self) -> &str {
+        "todo_write"
+    }
 
     fn description(&self) -> &str {
         "Write a structured TODO list to .forge-osh/todos.md so the agent can track its work plan. \
@@ -61,7 +63,9 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let todos = match input["todos"].as_array() {
@@ -71,7 +75,10 @@ impl Tool for TodoWriteTool {
 
         let mut lines = vec![
             "# forge-osh Task List".to_string(),
-            format!("*Updated: {}*", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")),
+            format!(
+                "*Updated: {}*",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            ),
             String::new(),
         ];
 
@@ -80,12 +87,20 @@ impl Tool for TodoWriteTool {
         let labels = ["In Progress", "Pending", "Blocked", "Completed"];
         let icons = ["▶", "○", "✖", "✓"];
 
-        for (status, label, icon) in statuses.iter().zip(labels.iter()).zip(icons.iter()).map(|((s, l), i)| (s, l, i)) {
-            let group: Vec<&Value> = todos.iter()
+        for (status, label, icon) in statuses
+            .iter()
+            .zip(labels.iter())
+            .zip(icons.iter())
+            .map(|((s, l), i)| (s, l, i))
+        {
+            let group: Vec<&Value> = todos
+                .iter()
                 .filter(|t| t["status"].as_str().unwrap_or("pending") == *status)
                 .collect();
 
-            if group.is_empty() { continue; }
+            if group.is_empty() {
+                continue;
+            }
 
             lines.push(format!("## {} {}", icon, label));
             lines.push(String::new());
@@ -109,7 +124,10 @@ impl Tool for TodoWriteTool {
                     _ => "[ ]",
                 };
 
-                lines.push(format!("- {} **{}** {}{}", check, id, content, priority_badge));
+                lines.push(format!(
+                    "- {} **{}** {}{}",
+                    check, id, content, priority_badge
+                ));
                 if !notes.is_empty() {
                     lines.push(format!("  > {}", notes));
                 }
@@ -129,10 +147,12 @@ impl Tool for TodoWriteTool {
         match fs::write(&todos_path, &content).await {
             Ok(_) => {
                 let total = todos.len();
-                let done = todos.iter()
+                let done = todos
+                    .iter()
                     .filter(|t| t["status"].as_str().unwrap_or("") == "completed")
                     .count();
-                let in_progress = todos.iter()
+                let in_progress = todos
+                    .iter()
                     .filter(|t| t["status"].as_str().unwrap_or("") == "in_progress")
                     .count();
                 ToolOutput::success(format!(
@@ -202,7 +222,9 @@ pub struct TaskCreateTool;
 
 #[async_trait]
 impl Tool for TaskCreateTool {
-    fn name(&self) -> &str { "task_create" }
+    fn name(&self) -> &str {
+        "task_create"
+    }
 
     fn description(&self) -> &str {
         "Create a tracked task in this session. Returns the task ID. \
@@ -220,7 +242,9 @@ impl Tool for TaskCreateTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let subject = match input["subject"].as_str() {
@@ -255,7 +279,9 @@ pub struct TaskUpdateTool;
 
 #[async_trait]
 impl Tool for TaskUpdateTool {
-    fn name(&self) -> &str { "task_update" }
+    fn name(&self) -> &str {
+        "task_update"
+    }
 
     fn description(&self) -> &str {
         "Update a task's status (pending → in_progress → completed/failed) and optionally set its output."
@@ -276,7 +302,9 @@ impl Tool for TaskUpdateTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let id = match input["id"].as_str() {
@@ -312,9 +340,15 @@ pub struct TaskGetTool;
 
 #[async_trait]
 impl Tool for TaskGetTool {
-    fn name(&self) -> &str { "task_get" }
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn description(&self) -> &str { "Get details of a specific task by ID." }
+    fn name(&self) -> &str {
+        "task_get"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn description(&self) -> &str {
+        "Get details of a specific task by ID."
+    }
 
     fn parameters_schema(&self) -> Value {
         json!({
@@ -326,7 +360,9 @@ impl Tool for TaskGetTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let id = match input["id"].as_str() {
@@ -342,8 +378,14 @@ impl Tool for TaskGetTool {
                     format!("Subject: {}", task.subject),
                     format!("Status: {}", task.status),
                     format!("Description: {}", task.description),
-                    format!("Created: {}", task.created_at.format("%Y-%m-%d %H:%M:%S UTC")),
-                    format!("Updated: {}", task.updated_at.format("%Y-%m-%d %H:%M:%S UTC")),
+                    format!(
+                        "Created: {}",
+                        task.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+                    ),
+                    format!(
+                        "Updated: {}",
+                        task.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+                    ),
                 ];
                 if let Some(ref out) = task.output {
                     lines.push(format!("Output: {out}"));
@@ -363,9 +405,15 @@ pub struct TaskListTool;
 
 #[async_trait]
 impl Tool for TaskListTool {
-    fn name(&self) -> &str { "task_list" }
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn description(&self) -> &str { "List all tasks in the current session." }
+    fn name(&self) -> &str {
+        "task_list"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn description(&self) -> &str {
+        "List all tasks in the current session."
+    }
 
     fn parameters_schema(&self) -> Value {
         json!({
@@ -380,13 +428,16 @@ impl Tool for TaskListTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let filter = input["status_filter"].as_str().unwrap_or("all");
         let registry = TASK_REGISTRY.lock();
 
-        let tasks: Vec<&TaskEntry> = registry.iter()
+        let tasks: Vec<&TaskEntry> = registry
+            .iter()
             .filter(|t| filter == "all" || t.status.to_string() == filter)
             .collect();
 
@@ -405,14 +456,19 @@ impl Tool for TaskListTool {
             TaskStatus::Failed => "✖",
         };
 
-        let lines: Vec<String> = tasks.iter().map(|t| {
-            format!("{} [{}] {} — {}", icon(&t.status), t.id, t.subject, t.status)
-        }).collect();
+        let lines: Vec<String> = tasks
+            .iter()
+            .map(|t| {
+                format!(
+                    "{} [{}] {} — {}",
+                    icon(&t.status),
+                    t.id,
+                    t.subject,
+                    t.status
+                )
+            })
+            .collect();
 
-        ToolOutput::success(format!(
-            "Tasks ({}):\n\n{}",
-            tasks.len(),
-            lines.join("\n")
-        ))
+        ToolOutput::success(format!("Tasks ({}):\n\n{}", tasks.len(), lines.join("\n")))
     }
 }

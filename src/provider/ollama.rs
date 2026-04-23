@@ -50,7 +50,10 @@ impl OllamaProvider {
             .send()
             .await?;
 
-        let data: Value = resp.json().await.map_err(|e| ForgeError::Provider(e.to_string()))?;
+        let data: Value = resp
+            .json()
+            .await
+            .map_err(|e| ForgeError::Provider(e.to_string()))?;
 
         let models = data["models"]
             .as_array()
@@ -70,8 +73,7 @@ impl OllamaProvider {
                             name: name.clone(),
                             context_window: ctx,
                             supports_tools: true,
-                            supports_vision: name.contains("vision")
-                                || name.contains("llava"),
+                            supports_vision: name.contains("vision") || name.contains("llava"),
                             input_cost_per_million: 0.0,
                             output_cost_per_million: 0.0,
                             provider_id: "ollama".to_string(),
@@ -168,7 +170,11 @@ impl Provider for OllamaProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<ChatResponse> {
         // Use OpenAI-compatible endpoint for tool support
-        let has_tools = request.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
+        let has_tools = request
+            .tools
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false);
         let url = if has_tools {
             format!("{}/v1/chat/completions", self.base_url)
         } else {
@@ -287,7 +293,10 @@ impl Provider for OllamaProvider {
             let _ = tx.send(StreamEvent::Done(stop_reason.clone()));
 
             let content = if !tool_calls.is_empty() && !full_text.is_empty() {
-                AssistantContent::Mixed { text: full_text, tool_calls }
+                AssistantContent::Mixed {
+                    text: full_text,
+                    tool_calls,
+                }
             } else if !tool_calls.is_empty() {
                 AssistantContent::ToolUse(tool_calls)
             } else {

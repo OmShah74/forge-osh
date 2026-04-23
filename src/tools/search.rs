@@ -4,8 +4,8 @@ use regex::RegexBuilder;
 use serde_json::{json, Value};
 use std::path::Path;
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 // ─── search_files (enhanced grep) ────────────────────────────────────────────
 //
@@ -22,8 +22,12 @@ pub struct SearchFilesTool;
 
 #[async_trait]
 impl Tool for SearchFilesTool {
-    fn name(&self) -> &str { "search_files" }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "search_files"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Search for text patterns in files using regex or fixed strings. Returns matching lines with \
@@ -89,7 +93,9 @@ impl Tool for SearchFilesTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let pattern_str = match input["pattern"].as_str() {
@@ -101,7 +107,11 @@ impl Tool for SearchFilesTool {
             .as_str()
             .map(|p| {
                 let path = Path::new(p);
-                if path.is_absolute() { path.to_path_buf() } else { ctx.working_dir.join(path) }
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    ctx.working_dir.join(path)
+                }
             })
             .unwrap_or_else(|| ctx.working_dir.clone());
 
@@ -117,8 +127,10 @@ impl Tool for SearchFilesTool {
 
         // Context lines
         let ctx_both = input["context"].as_u64().map(|n| n as usize);
-        let before_ctx = ctx_both.unwrap_or_else(|| input["before_context"].as_u64().unwrap_or(0) as usize);
-        let after_ctx = ctx_both.unwrap_or_else(|| input["after_context"].as_u64().unwrap_or(0) as usize);
+        let before_ctx =
+            ctx_both.unwrap_or_else(|| input["before_context"].as_u64().unwrap_or(0) as usize);
+        let after_ctx =
+            ctx_both.unwrap_or_else(|| input["after_context"].as_u64().unwrap_or(0) as usize);
 
         // Build regex (or literal matcher)
         let effective_pattern = if fixed_string {
@@ -154,9 +166,13 @@ impl Tool for SearchFilesTool {
             .build();
 
         'walk: for entry in walker.into_iter().filter_map(|e| e.ok()) {
-            if total_matches >= max_results { break; }
+            if total_matches >= max_results {
+                break;
+            }
             let path = entry.path();
-            if !path.is_file() { continue; }
+            if !path.is_file() {
+                continue;
+            }
 
             // Apply file type filter
             let file_name = entry.file_name().to_string_lossy();
@@ -178,7 +194,11 @@ impl Tool for SearchFilesTool {
             };
 
             let lines: Vec<&str> = content.lines().collect();
-            let relative = path.strip_prefix(&search_path).unwrap_or(path).to_string_lossy().to_string();
+            let relative = path
+                .strip_prefix(&search_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
 
             // Find matching line indices
             let mut match_indices: Vec<usize> = Vec::new();
@@ -188,7 +208,9 @@ impl Tool for SearchFilesTool {
                 }
             }
 
-            if match_indices.is_empty() { continue; }
+            if match_indices.is_empty() {
+                continue;
+            }
 
             let mut matched: Vec<MatchedLine> = Vec::new();
 
@@ -213,7 +235,9 @@ impl Tool for SearchFilesTool {
             total_matches += match_indices.len();
             file_matches.push((relative, matched));
 
-            if total_matches >= max_results { break 'walk; }
+            if total_matches >= max_results {
+                break 'walk;
+            }
         }
 
         // ---- Format output based on mode ----
@@ -232,10 +256,13 @@ impl Tool for SearchFilesTool {
                 ))
             }
             "count" => {
-                let lines: Vec<String> = file_matches.iter().map(|(f, matches)| {
-                    let count = matches.iter().filter(|m| m.is_match).count();
-                    format!("{f}: {count}")
-                }).collect();
+                let lines: Vec<String> = file_matches
+                    .iter()
+                    .map(|(f, matches)| {
+                        let count = matches.iter().filter(|m| m.is_match).count();
+                        format!("{f}: {count}")
+                    })
+                    .collect();
                 ToolOutput::success(format!(
                     "Match counts for '{}':\n\n{}",
                     pattern_str,
@@ -258,10 +285,8 @@ impl Tool for SearchFilesTool {
                             output_lines.push("  ...".to_string());
                         }
                         let prefix = if m.is_match { ">" } else { " " };
-                        output_lines.push(format!(
-                            "{prefix} {file}:{:>4} | {}",
-                            m.line_no, m.content
-                        ));
+                        output_lines
+                            .push(format!("{prefix} {file}:{:>4} | {}", m.line_no, m.content));
                         prev_line_no = m.line_no;
                     }
                 }
@@ -326,8 +351,12 @@ pub struct FindFilesTool;
 
 #[async_trait]
 impl Tool for FindFilesTool {
-    fn name(&self) -> &str { "find_files" }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "find_files"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Find files by name or glob pattern. Respects .gitignore. Returns paths relative to the search directory."
@@ -358,7 +387,9 @@ impl Tool for FindFilesTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let pattern_str = match input["pattern"].as_str() {
@@ -370,7 +401,11 @@ impl Tool for FindFilesTool {
             .as_str()
             .map(|p| {
                 let path = Path::new(p);
-                if path.is_absolute() { path.to_path_buf() } else { ctx.working_dir.join(path) }
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    ctx.working_dir.join(path)
+                }
             })
             .unwrap_or_else(|| ctx.working_dir.clone());
 
@@ -391,7 +426,9 @@ impl Tool for FindFilesTool {
             .build();
 
         for entry in walker.into_iter().filter_map(|e| e.ok()) {
-            if results.len() >= max_results { break; }
+            if results.len() >= max_results {
+                break;
+            }
 
             let path = entry.path();
             if let Some(name) = path.file_name() {
@@ -428,20 +465,29 @@ mod tests {
             home_dir: dir.to_path_buf(),
             session_id: "test".to_string(),
             trust_mode: true,
-        permission_mode: crate::types::PermissionMode::Default,
-        file_cache: None,
+            permission_mode: crate::types::PermissionMode::Default,
+            file_cache: None,
+            active_skill_scope: None,
+                skill_registry: None,
         }
     }
 
     #[tokio::test]
     async fn test_search_files_basic() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.rs"), "fn hello_world() {}\nfn goodbye() {}").unwrap();
+        std::fs::write(
+            dir.path().join("test.rs"),
+            "fn hello_world() {}\nfn goodbye() {}",
+        )
+        .unwrap();
 
         let tool = SearchFilesTool;
         let ctx = test_ctx(dir.path());
         let output = tool
-            .execute(json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}), &ctx)
+            .execute(
+                json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}),
+                &ctx,
+            )
             .await;
         assert!(!output.is_error);
         assert!(output.content.contains("hello_world"));
@@ -450,16 +496,23 @@ mod tests {
     #[tokio::test]
     async fn test_search_files_context() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.rs"), "line1\nline2\nline3\nline4\nline5").unwrap();
+        std::fs::write(
+            dir.path().join("test.rs"),
+            "line1\nline2\nline3\nline4\nline5",
+        )
+        .unwrap();
 
         let tool = SearchFilesTool;
         let ctx = test_ctx(dir.path());
         let output = tool
-            .execute(json!({
-                "pattern": "line3",
-                "path": dir.path().to_str().unwrap(),
-                "context": 1
-            }), &ctx)
+            .execute(
+                json!({
+                    "pattern": "line3",
+                    "path": dir.path().to_str().unwrap(),
+                    "context": 1
+                }),
+                &ctx,
+            )
             .await;
         assert!(!output.is_error);
         assert!(output.content.contains("line2"));
@@ -477,21 +530,31 @@ mod tests {
         let ctx = test_ctx(dir.path());
 
         // files_with_matches mode
-        let output = tool.execute(json!({
-            "pattern": "hello",
-            "path": dir.path().to_str().unwrap(),
-            "output_mode": "files_with_matches"
-        }), &ctx).await;
+        let output = tool
+            .execute(
+                json!({
+                    "pattern": "hello",
+                    "path": dir.path().to_str().unwrap(),
+                    "output_mode": "files_with_matches"
+                }),
+                &ctx,
+            )
+            .await;
         assert!(!output.is_error);
         assert!(output.content.contains("a.rs"));
         assert!(!output.content.contains("b.rs"));
 
         // count mode
-        let output = tool.execute(json!({
-            "pattern": "hello",
-            "path": dir.path().to_str().unwrap(),
-            "output_mode": "count"
-        }), &ctx).await;
+        let output = tool
+            .execute(
+                json!({
+                    "pattern": "hello",
+                    "path": dir.path().to_str().unwrap(),
+                    "output_mode": "count"
+                }),
+                &ctx,
+            )
+            .await;
         assert!(!output.is_error);
         assert!(output.content.contains("2")); // 2 matches in a.rs
     }
@@ -504,11 +567,16 @@ mod tests {
         let tool = SearchFilesTool;
         let ctx = test_ctx(dir.path());
         // Fixed string: "foo.bar" should match literally, not as regex
-        let output = tool.execute(json!({
-            "pattern": "foo.bar",
-            "path": dir.path().to_str().unwrap(),
-            "fixed_string": true
-        }), &ctx).await;
+        let output = tool
+            .execute(
+                json!({
+                    "pattern": "foo.bar",
+                    "path": dir.path().to_str().unwrap(),
+                    "fixed_string": true
+                }),
+                &ctx,
+            )
+            .await;
         assert!(!output.is_error);
         assert!(output.content.contains("foo.bar"));
     }
@@ -522,7 +590,10 @@ mod tests {
         let tool = FindFilesTool;
         let ctx = test_ctx(dir.path());
         let output = tool
-            .execute(json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}), &ctx)
+            .execute(
+                json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+                &ctx,
+            )
             .await;
         assert!(!output.is_error);
         assert!(output.content.contains("foo.rs"));

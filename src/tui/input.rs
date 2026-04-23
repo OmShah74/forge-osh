@@ -210,10 +210,7 @@ impl InputState {
 
     /// Save the most recent 500 history entries to disk.
     pub fn save_history(&self, path: &std::path::Path) {
-        let recent: Vec<String> = self.history.iter()
-            .rev().take(500)
-            .rev().cloned()
-            .collect();
+        let recent: Vec<String> = self.history.iter().rev().take(500).rev().cloned().collect();
         if let Ok(json) = serde_json::to_string(&recent) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);

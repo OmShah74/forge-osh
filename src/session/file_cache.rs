@@ -19,7 +19,7 @@ use std::time::SystemTime;
 #[derive(Debug, Clone)]
 pub struct FileFingerprint {
     pub mtime: Option<SystemTime>,
-    pub size:  u64,
+    pub size: u64,
     /// Hex-encoded SHA-256 of the file's bytes at read time.
     pub sha256: String,
     pub observed_at: SystemTime,
@@ -81,21 +81,26 @@ impl FileStateCache {
         let key = canonical(path);
         let cached = match self.inner.lock().get(&key).cloned() {
             Some(fp) => fp,
-            None => return Ok(()),   // never read → no stale view to enforce
+            None => return Ok(()), // never read → no stale view to enforce
         };
 
         if !path.exists() {
             return Err(format!(
                 "File '{}' existed when last read ({} bytes, sha {}...) but is now \
                  missing. Re-read before continuing.",
-                path.display(), cached.size, &cached.sha256[..16.min(cached.sha256.len())]
+                path.display(),
+                cached.size,
+                &cached.sha256[..16.min(cached.sha256.len())]
             ));
         }
 
         let now = match Self::fingerprint_now(path) {
             Ok(fp) => fp,
             Err(e) => {
-                return Err(format!("Could not re-fingerprint '{}': {e}", path.display()));
+                return Err(format!(
+                    "Could not re-fingerprint '{}': {e}",
+                    path.display()
+                ));
             }
         };
 
@@ -108,7 +113,8 @@ impl FileStateCache {
              (size {} → {}, sha {}... → {}...). Call read_file again before \
              editing — the LLM must not overwrite newer content blindly.",
             path.display(),
-            cached.size, now.size,
+            cached.size,
+            now.size,
             &cached.sha256[..16.min(cached.sha256.len())],
             &now.sha256[..16.min(now.sha256.len())]
         ))
@@ -131,7 +137,9 @@ impl FileStateCache {
         self.inner.lock().len()
     }
 
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 fn canonical(path: &Path) -> PathBuf {

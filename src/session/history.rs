@@ -65,10 +65,9 @@ impl ConversationHistory {
         let keep_from = self.messages.len().saturating_sub(keep_last);
         let kept = self.messages.split_off(keep_from);
         self.messages.clear();
-        self.messages
-            .push(Message::User(UserContent::Text(format!(
-                "[Previous conversation summary]: {summary}"
-            ))));
+        self.messages.push(Message::User(UserContent::Text(format!(
+            "[Previous conversation summary]: {summary}"
+        ))));
         self.messages.extend(kept);
         self.updated_at = Utc::now();
     }

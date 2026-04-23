@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // Global plan-mode flag (visible to the agent loop)
@@ -32,7 +32,9 @@ pub struct AskUserQuestionTool;
 
 #[async_trait]
 impl Tool for AskUserQuestionTool {
-    fn name(&self) -> &str { "ask_user" }
+    fn name(&self) -> &str {
+        "ask_user"
+    }
 
     fn description(&self) -> &str {
         "Pause execution and ask the user a clarifying question that requires their input before \
@@ -60,7 +62,9 @@ impl Tool for AskUserQuestionTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let question = match input["question"].as_str() {
@@ -100,7 +104,9 @@ pub struct EnterPlanModeTool;
 
 #[async_trait]
 impl Tool for EnterPlanModeTool {
-    fn name(&self) -> &str { "enter_plan_mode" }
+    fn name(&self) -> &str {
+        "enter_plan_mode"
+    }
 
     fn description(&self) -> &str {
         "Switch to plan mode. In plan mode, propose your complete plan for accomplishing the task \
@@ -122,7 +128,9 @@ impl Tool for EnterPlanModeTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         set_plan_mode(true);
@@ -144,7 +152,9 @@ pub struct ExitPlanModeTool;
 
 #[async_trait]
 impl Tool for ExitPlanModeTool {
-    fn name(&self) -> &str { "exit_plan_mode" }
+    fn name(&self) -> &str {
+        "exit_plan_mode"
+    }
 
     fn description(&self) -> &str {
         "Exit plan mode and proceed with execution of the proposed plan. \
@@ -163,19 +173,20 @@ impl Tool for ExitPlanModeTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let confirmed = input["confirmed"].as_bool().unwrap_or(true);
         set_plan_mode(false);
 
         if confirmed {
-            ToolOutput::success(
-                "Plan mode exited. Proceeding with execution.".to_string()
-            )
+            ToolOutput::success("Plan mode exited. Proceeding with execution.".to_string())
         } else {
             ToolOutput::success(
-                "Plan mode exited. Plan was not confirmed — waiting for further instructions.".to_string()
+                "Plan mode exited. Plan was not confirmed — waiting for further instructions."
+                    .to_string(),
             )
         }
     }

@@ -9,6 +9,7 @@ pub mod error;
 pub mod graph;
 pub mod provider;
 pub mod session;
+pub mod skills;
 pub mod tools;
 pub mod tui;
 pub mod types;

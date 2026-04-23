@@ -52,8 +52,12 @@ pub struct HookEntry {
     pub blocking: bool,
 }
 
-fn default_matcher() -> String { "*".to_string() }
-fn default_hook_timeout() -> u64 { 10 }
+fn default_matcher() -> String {
+    "*".to_string()
+}
+fn default_hook_timeout() -> u64 {
+    10
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HooksConfig {
@@ -182,7 +186,10 @@ async fn run_hook(hook: &HookEntry, ctx: &HookContext) -> HookResult {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => {
-            return HookResult { spawn_failed: true, ..Default::default() };
+            return HookResult {
+                spawn_failed: true,
+                ..Default::default()
+            };
         }
     };
 
@@ -247,7 +254,9 @@ fn matches(hook: &HookEntry, tool_name: &str) -> bool {
 pub async fn run_hooks(hooks: &[HookEntry], ctx: &HookContext) -> Vec<HookResult> {
     let mut out = Vec::with_capacity(hooks.len());
     for hook in hooks {
-        if !matches(hook, &ctx.tool_name) { continue; }
+        if !matches(hook, &ctx.tool_name) {
+            continue;
+        }
         out.push(run_hook(hook, ctx).await);
     }
     out
@@ -290,7 +299,9 @@ pub async fn pre_tool_use(
         working_dir,
     };
     for hook in &config.pre_tool_use {
-        if !matches(hook, tool_name) { continue; }
+        if !matches(hook, tool_name) {
+            continue;
+        }
         let result = run_hook(hook, &ctx).await;
         if hook.blocking && !result.succeeded() {
             let reason = if !result.stderr.trim().is_empty() {
@@ -302,7 +313,10 @@ pub async fn pre_tool_use(
             } else {
                 format!("hook exited with code {:?}", result.exit_code)
             };
-            return PreToolOutcome::Veto { reason, hook: hook.command.clone() };
+            return PreToolOutcome::Veto {
+                reason,
+                hook: hook.command.clone(),
+            };
         }
     }
     PreToolOutcome::Proceed
@@ -318,7 +332,9 @@ pub async fn post_tool_use(
     working_dir: PathBuf,
     session_id: Option<String>,
 ) {
-    if config.post_tool_use.is_empty() { return; }
+    if config.post_tool_use.is_empty() {
+        return;
+    }
     let ctx = HookContext {
         tool_name: tool_name.to_string(),
         tool_input: serde_json::to_string(input).unwrap_or_default(),
@@ -332,8 +348,14 @@ pub async fn post_tool_use(
 }
 
 /// Run Stop hooks (called when agent loop finishes)
-pub async fn run_stop_hooks(config: &HooksConfig, working_dir: PathBuf, session_id: Option<String>) {
-    if config.stop.is_empty() { return; }
+pub async fn run_stop_hooks(
+    config: &HooksConfig,
+    working_dir: PathBuf,
+    session_id: Option<String>,
+) {
+    if config.stop.is_empty() {
+        return;
+    }
     let ctx = HookContext {
         tool_name: String::new(),
         tool_input: String::new(),
@@ -356,7 +378,9 @@ pub async fn user_prompt_submit(
     working_dir: PathBuf,
     session_id: Option<String>,
 ) -> Result<(), String> {
-    if config.user_prompt_submit.is_empty() { return Ok(()); }
+    if config.user_prompt_submit.is_empty() {
+        return Ok(());
+    }
     let ctx = HookContext {
         tool_name: String::new(),
         tool_input: String::new(),
@@ -367,15 +391,23 @@ pub async fn user_prompt_submit(
         working_dir,
     };
     for hook in &config.user_prompt_submit {
-        if !matches(hook, "") && hook.matcher != "*" { continue; }
+        if !matches(hook, "") && hook.matcher != "*" {
+            continue;
+        }
         let result = run_hook(hook, &ctx).await;
         if hook.blocking && !result.succeeded() {
             let reason = if !result.stderr.trim().is_empty() {
                 result.stderr.trim().to_string()
             } else if result.timed_out {
-                format!("UserPromptSubmit hook timed out after {}s", hook.timeout_seconds)
+                format!(
+                    "UserPromptSubmit hook timed out after {}s",
+                    hook.timeout_seconds
+                )
             } else {
-                format!("UserPromptSubmit hook exited with code {:?}", result.exit_code)
+                format!(
+                    "UserPromptSubmit hook exited with code {:?}",
+                    result.exit_code
+                )
             };
             return Err(reason);
         }
@@ -385,7 +417,9 @@ pub async fn user_prompt_submit(
 
 /// Run SessionStart hooks (when a session is loaded/created).
 pub async fn session_start(config: &HooksConfig, working_dir: PathBuf, session_id: String) {
-    if config.session_start.is_empty() { return; }
+    if config.session_start.is_empty() {
+        return;
+    }
     let ctx = HookContext {
         tool_name: String::new(),
         tool_input: String::new(),
@@ -400,7 +434,9 @@ pub async fn session_start(config: &HooksConfig, working_dir: PathBuf, session_i
 
 /// Run SessionEnd hooks (when the TUI exits / session is saved).
 pub async fn session_end(config: &HooksConfig, working_dir: PathBuf, session_id: String) {
-    if config.session_end.is_empty() { return; }
+    if config.session_end.is_empty() {
+        return;
+    }
     let ctx = HookContext {
         tool_name: String::new(),
         tool_input: String::new(),
@@ -415,7 +451,9 @@ pub async fn session_end(config: &HooksConfig, working_dir: PathBuf, session_id:
 
 /// Run PreCompact hooks (before context compaction).
 pub async fn pre_compact(config: &HooksConfig, working_dir: PathBuf, session_id: Option<String>) {
-    if config.pre_compact.is_empty() { return; }
+    if config.pre_compact.is_empty() {
+        return;
+    }
     let ctx = HookContext {
         tool_name: String::new(),
         tool_input: String::new(),

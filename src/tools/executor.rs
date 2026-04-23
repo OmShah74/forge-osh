@@ -1,9 +1,9 @@
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
+use super::ToolRegistry;
 use crate::agent::permissions::{effective_permission, EffectivePermission, PermissionStore};
 use crate::types::*;
-use super::ToolRegistry;
 
 /// Executes tool calls with permission checking, schema validation, and
 /// cancellation support.
@@ -18,13 +18,19 @@ pub struct ToolExecutor {
 
 impl ToolExecutor {
     pub fn new(max_output_chars: usize) -> Self {
-        Self { max_output_chars, validate_inputs: true }
+        Self {
+            max_output_chars,
+            validate_inputs: true,
+        }
     }
 
     /// Skip JSON-schema validation. Primarily used in test fixtures that
     /// synthesise minimal tool inputs.
     pub fn new_unvalidated(max_output_chars: usize) -> Self {
-        Self { max_output_chars, validate_inputs: false }
+        Self {
+            max_output_chars,
+            validate_inputs: false,
+        }
     }
 
     /// Execute a tool call.
@@ -59,10 +65,9 @@ impl ToolExecutor {
 
         // ── Input validation against parameters_schema ───────────────────────
         if self.validate_inputs {
-            if let Err(msg) = super::validate::validate_input(
-                &tool.parameters_schema(),
-                &tool_call.input,
-            ) {
+            if let Err(msg) =
+                super::validate::validate_input(&tool.parameters_schema(), &tool_call.input)
+            {
                 return ToolOutput::error(format!(
                     "Invalid input for tool '{}': {msg}",
                     tool_call.name
@@ -73,7 +78,8 @@ impl ToolExecutor {
         let perm_level = tool.effective_permission_level(&tool_call.input);
 
         // ── Permission decision ──────────────────────────────────────────────
-        let decision = decide_permission(&tool_call.name, &tool_call.input, &perm_level, ctx, store);
+        let decision =
+            decide_permission(&tool_call.name, &tool_call.input, &perm_level, ctx, store);
 
         match decision {
             PermissionDecision::Allow => {}
@@ -82,11 +88,7 @@ impl ToolExecutor {
             }
             PermissionDecision::Ask => {
                 let description = format_tool_description(&tool_call.name, &tool_call.input);
-                let response = permission_fn(
-                    tool_call.name.clone(),
-                    description,
-                    perm_level,
-                ).await;
+                let response = permission_fn(tool_call.name.clone(), description, perm_level).await;
 
                 match response {
                     PermissionResponse::Allow
@@ -156,6 +158,18 @@ fn decide_permission(
         return PermissionDecision::Allow;
     }
 
+    // 1.5 Skill-scope narrowing: if a skill is active and it declares an
+    // allowlist, deny tools outside the declared set before consulting
+    // persistent rules or prompting.
+    if let Some(scope) = &ctx.active_skill_scope {
+        if !scope.allows_tool(tool_name) {
+            return PermissionDecision::Deny(format!(
+                "Tool '{tool_name}' is not allowed while skill '{}' is active.",
+                scope.skill_name
+            ));
+        }
+    }
+
     // 2. Plan mode: only ReadOnly allowed.
     if ctx.permission_mode == PermissionMode::Plan && *level != PermissionLevel::ReadOnly {
         return PermissionDecision::Deny(format!(
@@ -172,7 +186,7 @@ fn decide_permission(
     // 4. Consult the persistent permission rules store.
     match effective_permission(tool_name, input, level, false, store) {
         EffectivePermission::Allow => PermissionDecision::Allow,
-        EffectivePermission::Deny  => PermissionDecision::Deny(format!(
+        EffectivePermission::Deny => PermissionDecision::Deny(format!(
             "Tool '{tool_name}' denied by stored permission rule. \
              Run `/permissions` to inspect or edit rules."
         )),
@@ -225,7 +239,10 @@ pub(crate) fn format_tool_description(name: &str, input: &serde_json::Value) -> 
             format!("Fetch URL: {url}")
         }
         _ => {
-            format!("{name}: {}", serde_json::to_string_pretty(input).unwrap_or_default())
+            format!(
+                "{name}: {}",
+                serde_json::to_string_pretty(input).unwrap_or_default()
+            )
         }
     }
 }
@@ -236,16 +253,11 @@ mod tests {
 
     #[test]
     fn test_format_description() {
-        let desc = format_tool_description(
-            "bash",
-            &serde_json::json!({"command": "ls -la"}),
-        );
+        let desc = format_tool_description("bash", &serde_json::json!({"command": "ls -la"}));
         assert!(desc.contains("ls -la"));
 
-        let desc = format_tool_description(
-            "delete_file",
-            &serde_json::json!({"path": "/tmp/test.txt"}),
-        );
+        let desc =
+            format_tool_description("delete_file", &serde_json::json!({"path": "/tmp/test.txt"}));
         assert!(desc.contains("/tmp/test.txt"));
     }
 
@@ -259,9 +271,16 @@ mod tests {
             trust_mode: true,
             permission_mode: PermissionMode::Bypass,
             file_cache: None,
+            active_skill_scope: None,
+                skill_registry: None,
         };
-        match decide_permission("bash", &serde_json::json!({"command":"rm -rf /"}),
-                                &PermissionLevel::Destructive, &ctx, &store) {
+        match decide_permission(
+            "bash",
+            &serde_json::json!({"command":"rm -rf /"}),
+            &PermissionLevel::Destructive,
+            &ctx,
+            &store,
+        ) {
             PermissionDecision::Allow => {}
             _ => panic!("Bypass should allow"),
         }
@@ -277,9 +296,16 @@ mod tests {
             trust_mode: false,
             permission_mode: PermissionMode::Plan,
             file_cache: None,
+            active_skill_scope: None,
+                skill_registry: None,
         };
-        match decide_permission("write_file", &serde_json::json!({"path":"/tmp/x"}),
-                                &PermissionLevel::Mutating, &ctx, &store) {
+        match decide_permission(
+            "write_file",
+            &serde_json::json!({"path":"/tmp/x"}),
+            &PermissionLevel::Mutating,
+            &ctx,
+            &store,
+        ) {
             PermissionDecision::Deny(_) => {}
             _ => panic!("Plan mode must deny mutations"),
         }
@@ -288,7 +314,11 @@ mod tests {
     #[test]
     fn test_store_rule_allows_without_prompt() {
         let mut store = PermissionStore::default();
-        store.rules.push(crate::agent::permissions::PermissionRule::new_allow("bash", "git *"));
+        store
+            .rules
+            .push(crate::agent::permissions::PermissionRule::new_allow(
+                "bash", "git *",
+            ));
         let ctx = ToolContext {
             working_dir: std::path::PathBuf::from("."),
             home_dir: std::path::PathBuf::from("."),
@@ -296,9 +326,16 @@ mod tests {
             trust_mode: false,
             permission_mode: PermissionMode::Default,
             file_cache: None,
+            active_skill_scope: None,
+                skill_registry: None,
         };
-        match decide_permission("bash", &serde_json::json!({"command":"git status"}),
-                                &PermissionLevel::Shell, &ctx, &store) {
+        match decide_permission(
+            "bash",
+            &serde_json::json!({"command":"git status"}),
+            &PermissionLevel::Shell,
+            &ctx,
+            &store,
+        ) {
             PermissionDecision::Allow => {}
             _ => panic!("Stored allow rule should skip prompt"),
         }

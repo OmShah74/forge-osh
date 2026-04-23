@@ -27,7 +27,8 @@ pub struct Theme {
 
 impl Theme {
     /// All available theme names in cycle order
-    pub const THEME_NAMES: &'static [&'static str] = &["dark", "light", "dracula", "nord", "solarized"];
+    pub const THEME_NAMES: &'static [&'static str] =
+        &["dark", "light", "dracula", "nord", "solarized"];
 
     pub fn from_name(name: &str) -> Self {
         match name {
@@ -41,7 +42,10 @@ impl Theme {
 
     /// Return the next theme name in the cycle
     pub fn next_theme_name(current: &str) -> &'static str {
-        let idx = Self::THEME_NAMES.iter().position(|&n| n == current).unwrap_or(0);
+        let idx = Self::THEME_NAMES
+            .iter()
+            .position(|&n| n == current)
+            .unwrap_or(0);
         Self::THEME_NAMES[(idx + 1) % Self::THEME_NAMES.len()]
     }
 
@@ -52,13 +56,13 @@ impl Theme {
             // with a light background this made all white/light text invisible.
             bg: Color::Rgb(18, 18, 26),
             fg: Color::Rgb(220, 220, 228),
-            user_msg_fg: Color::Rgb(86, 210, 230),    // bright cyan
+            user_msg_fg: Color::Rgb(86, 210, 230), // bright cyan
             assistant_msg_fg: Color::Rgb(220, 220, 228),
-            tool_name_fg: Color::Rgb(255, 198, 82),   // amber
-            added_fg: Color::Rgb(180, 255, 180),      // bright green text
-            added_bg: Color::Rgb(20, 60, 30),         // dark green background
-            removed_fg: Color::Rgb(255, 180, 180),    // bright red text
-            removed_bg: Color::Rgb(70, 20, 20),       // dark red background
+            tool_name_fg: Color::Rgb(255, 198, 82), // amber
+            added_fg: Color::Rgb(180, 255, 180),    // bright green text
+            added_bg: Color::Rgb(20, 60, 30),       // dark green background
+            removed_fg: Color::Rgb(255, 180, 180),  // bright red text
+            removed_bg: Color::Rgb(70, 20, 20),     // dark red background
             border_fg: Color::Rgb(80, 80, 100),
             header_bg: Color::Rgb(28, 28, 40),
             header_fg: Color::Rgb(220, 220, 228),

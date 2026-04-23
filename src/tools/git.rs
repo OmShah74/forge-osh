@@ -3,11 +3,14 @@ use serde_json::{json, Value};
 use std::process::Stdio;
 use tokio::process::Command;
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 /// Helper to run a git command and capture output
-async fn run_git(args: &[&str], working_dir: &std::path::Path) -> std::result::Result<String, String> {
+async fn run_git(
+    args: &[&str],
+    working_dir: &std::path::Path,
+) -> std::result::Result<String, String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(working_dir)
@@ -33,9 +36,15 @@ pub struct GitStatusTool;
 
 #[async_trait]
 impl Tool for GitStatusTool {
-    fn name(&self) -> &str { "git_status" }
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn description(&self) -> &str { "Show the working tree status (like `git status --short`)." }
+    fn name(&self) -> &str {
+        "git_status"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn description(&self) -> &str {
+        "Show the working tree status (like `git status --short`)."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -43,7 +52,9 @@ impl Tool for GitStatusTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolOutput {
         match run_git(&["status", "--short", "--branch"], &ctx.working_dir).await {
@@ -63,8 +74,12 @@ pub struct GitDiffTool;
 
 #[async_trait]
 impl Tool for GitDiffTool {
-    fn name(&self) -> &str { "git_diff" }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "git_diff"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Show changes. Use 'staged' for staged changes, 'commit' to diff between commits."
     }
@@ -79,7 +94,9 @@ impl Tool for GitDiffTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let mut args = vec!["diff"];
@@ -118,9 +135,15 @@ pub struct GitLogTool;
 
 #[async_trait]
 impl Tool for GitLogTool {
-    fn name(&self) -> &str { "git_log" }
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn description(&self) -> &str { "Show commit history." }
+    fn name(&self) -> &str {
+        "git_log"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn description(&self) -> &str {
+        "Show commit history."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -132,7 +155,9 @@ impl Tool for GitLogTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let count = input["count"].as_u64().unwrap_or(10);
@@ -166,8 +191,12 @@ pub struct GitAddTool;
 
 #[async_trait]
 impl Tool for GitAddTool {
-    fn name(&self) -> &str { "git_add" }
-    fn description(&self) -> &str { "Stage files for commit." }
+    fn name(&self) -> &str {
+        "git_add"
+    }
+    fn description(&self) -> &str {
+        "Stage files for commit."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -181,14 +210,13 @@ impl Tool for GitAddTool {
             "required": ["paths"]
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let paths = match input["paths"].as_array() {
-            Some(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>(),
+            Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
             None => return ToolOutput::error("Missing 'paths' parameter"),
         };
 
@@ -216,8 +244,12 @@ pub struct GitCommitTool;
 
 #[async_trait]
 impl Tool for GitCommitTool {
-    fn name(&self) -> &str { "git_commit" }
-    fn description(&self) -> &str { "Create a git commit with staged changes." }
+    fn name(&self) -> &str {
+        "git_commit"
+    }
+    fn description(&self) -> &str {
+        "Create a git commit with staged changes."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -227,7 +259,9 @@ impl Tool for GitCommitTool {
             "required": ["message"]
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let message = match input["message"].as_str() {
@@ -248,8 +282,12 @@ pub struct GitBranchTool;
 
 #[async_trait]
 impl Tool for GitBranchTool {
-    fn name(&self) -> &str { "git_branch" }
-    fn description(&self) -> &str { "List, create, or delete branches." }
+    fn name(&self) -> &str {
+        "git_branch"
+    }
+    fn description(&self) -> &str {
+        "List, create, or delete branches."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -260,7 +298,9 @@ impl Tool for GitBranchTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let action = input["action"].as_str().unwrap_or("list");
@@ -302,8 +342,12 @@ pub struct GitCheckoutTool;
 
 #[async_trait]
 impl Tool for GitCheckoutTool {
-    fn name(&self) -> &str { "git_checkout" }
-    fn description(&self) -> &str { "Switch branches or restore files." }
+    fn name(&self) -> &str {
+        "git_checkout"
+    }
+    fn description(&self) -> &str {
+        "Switch branches or restore files."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -319,18 +363,18 @@ impl Tool for GitCheckoutTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let branch = input["branch"].as_str();
         let create = input["create"].as_bool().unwrap_or(false);
-        let paths = input["paths"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect::<Vec<_>>()
-            });
+        let paths = input["paths"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        });
 
         if let Some(b) = branch {
             let mut args = vec!["checkout"];
@@ -364,7 +408,9 @@ pub struct GitStashTool;
 
 #[async_trait]
 impl Tool for GitStashTool {
-    fn name(&self) -> &str { "git_stash" }
+    fn name(&self) -> &str {
+        "git_stash"
+    }
     fn description(&self) -> &str {
         "Stash uncommitted changes. Actions: 'push' (stash with optional message), 'pop' (restore latest stash), 'list' (show stashes)."
     }
@@ -378,19 +424,21 @@ impl Tool for GitStashTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let action = input["action"].as_str().unwrap_or("list");
         match action {
-            "list" => {
-                match run_git(&["stash", "list"], &ctx.working_dir).await {
-                    Ok(out) => ToolOutput::success(if out.trim().is_empty() {
-                        "No stashes found".to_string()
-                    } else { out }),
-                    Err(e) => ToolOutput::error(e),
-                }
-            }
+            "list" => match run_git(&["stash", "list"], &ctx.working_dir).await {
+                Ok(out) => ToolOutput::success(if out.trim().is_empty() {
+                    "No stashes found".to_string()
+                } else {
+                    out
+                }),
+                Err(e) => ToolOutput::error(e),
+            },
             "push" => {
                 let result = if let Some(m) = input["message"].as_str() {
                     run_git(&["stash", "push", "-m", m], &ctx.working_dir).await
@@ -402,12 +450,10 @@ impl Tool for GitStashTool {
                     Err(e) => ToolOutput::error(e),
                 }
             }
-            "pop" => {
-                match run_git(&["stash", "pop"], &ctx.working_dir).await {
-                    Ok(out) => ToolOutput::success(format!("Stash applied\n{out}")),
-                    Err(e) => ToolOutput::error(e),
-                }
-            }
+            "pop" => match run_git(&["stash", "pop"], &ctx.working_dir).await {
+                Ok(out) => ToolOutput::success(format!("Stash applied\n{out}")),
+                Err(e) => ToolOutput::error(e),
+            },
             _ => ToolOutput::error(format!("Unknown action: {action}")),
         }
     }
@@ -419,9 +465,15 @@ pub struct GitBlameTool;
 
 #[async_trait]
 impl Tool for GitBlameTool {
-    fn name(&self) -> &str { "git_blame" }
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn description(&self) -> &str { "Show who last modified each line of a file (git blame)." }
+    fn name(&self) -> &str {
+        "git_blame"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn description(&self) -> &str {
+        "Show who last modified each line of a file (git blame)."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -432,7 +484,9 @@ impl Tool for GitBlameTool {
             "required": ["file"]
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let file = match input["file"].as_str() {
@@ -457,9 +511,15 @@ pub struct GitShowTool;
 
 #[async_trait]
 impl Tool for GitShowTool {
-    fn name(&self) -> &str { "git_show" }
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn description(&self) -> &str { "Show a commit, tag, or other git object (git show <ref>)." }
+    fn name(&self) -> &str {
+        "git_show"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn description(&self) -> &str {
+        "Show a commit, tag, or other git object (git show <ref>)."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -470,7 +530,9 @@ impl Tool for GitShowTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let git_ref = input["ref"].as_str().unwrap_or("HEAD");
@@ -493,7 +555,9 @@ pub struct GitResetTool;
 
 #[async_trait]
 impl Tool for GitResetTool {
-    fn name(&self) -> &str { "git_reset" }
+    fn name(&self) -> &str {
+        "git_reset"
+    }
     fn description(&self) -> &str {
         "Reset current HEAD to a specified state. Mode: 'soft' (keep staged), 'mixed' (unstage, keep files), 'hard' (discard all changes)."
     }
@@ -507,7 +571,9 @@ impl Tool for GitResetTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Destructive }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Destructive
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let mode = input["mode"].as_str().unwrap_or("mixed");
@@ -530,8 +596,12 @@ pub struct GitFetchTool;
 
 #[async_trait]
 impl Tool for GitFetchTool {
-    fn name(&self) -> &str { "git_fetch" }
-    fn description(&self) -> &str { "Fetch from a remote (git fetch <remote>)." }
+    fn name(&self) -> &str {
+        "git_fetch"
+    }
+    fn description(&self) -> &str {
+        "Fetch from a remote (git fetch <remote>)."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -542,7 +612,9 @@ impl Tool for GitFetchTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Network
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let all = input["all"].as_bool().unwrap_or(false);
@@ -565,8 +637,12 @@ pub struct GitPushTool;
 
 #[async_trait]
 impl Tool for GitPushTool {
-    fn name(&self) -> &str { "git_push" }
-    fn description(&self) -> &str { "Push commits to a remote repository (git push <remote> <branch>)." }
+    fn name(&self) -> &str {
+        "git_push"
+    }
+    fn description(&self) -> &str {
+        "Push commits to a remote repository (git push <remote> <branch>)."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -579,7 +655,9 @@ impl Tool for GitPushTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Network
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let remote = input["remote"].as_str().unwrap_or("origin").to_string();
@@ -612,8 +690,12 @@ pub struct GitPullTool;
 
 #[async_trait]
 impl Tool for GitPullTool {
-    fn name(&self) -> &str { "git_pull" }
-    fn description(&self) -> &str { "Pull changes from a remote repository (git pull <remote> <branch>)." }
+    fn name(&self) -> &str {
+        "git_pull"
+    }
+    fn description(&self) -> &str {
+        "Pull changes from a remote repository (git pull <remote> <branch>)."
+    }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -625,7 +707,9 @@ impl Tool for GitPullTool {
             "required": []
         })
     }
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Network
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let remote = input["remote"].as_str().unwrap_or("origin").to_string();

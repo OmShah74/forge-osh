@@ -107,10 +107,8 @@ impl Coordinator {
             worker.run(prompt, notify_tx, event_tx).await;
         });
 
-        self.active_workers.insert(
-            worker_id.clone(),
-            WorkerHandle { description, task },
-        );
+        self.active_workers
+            .insert(worker_id.clone(), WorkerHandle { description, task });
 
         worker_id
     }
@@ -149,7 +147,11 @@ impl Coordinator {
                 self.active_workers.remove(&notif.worker_id);
 
                 match notif.status {
-                    WorkerStatus::Completed { result, token_usage, duration_ms } => {
+                    WorkerStatus::Completed {
+                        result,
+                        token_usage,
+                        duration_ms,
+                    } => {
                         events.push(AgentEvent::WorkerCompleted {
                             worker_id: notif.worker_id,
                             description: notif.description,
