@@ -146,17 +146,22 @@ impl Worker {
                     }
                 };
 
-                let graph_info = self.graph.read()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|cg| format!(
-                        "{} nodes, {} edges — use graph_query for symbol lookup.",
-                        cg.meta.total_nodes, cg.meta.total_edges
-                    )));
+                let graph_info = self.graph.read().ok().and_then(|g| {
+                    g.as_ref().map(|cg| {
+                        format!(
+                            "{} nodes, {} edges — use graph_query for symbol lookup.",
+                            cg.meta.total_nodes, cg.meta.total_edges
+                        )
+                    })
+                });
 
                 let system = system_prompt::build_system_prompt(
                     &std::path::PathBuf::from(&self.working_dir),
                     &self.config.general.system_prompt_extra,
                     graph_info.as_deref(),
+                    None,
+                    self.config.agent.max_skill_listed_in_prompt,
+                    false,
                 );
 
                 let tools = if provider.supports_tools() {
@@ -240,7 +245,9 @@ impl Worker {
                 session_id: self.id.clone(),
                 trust_mode: true, // Workers always run in trust mode
                 permission_mode: crate::types::PermissionMode::Bypass,
-        file_cache: None,
+                file_cache: None,
+                active_skill_scope: None,
+                skill_registry: None,
             };
 
             for tc in &tool_calls {

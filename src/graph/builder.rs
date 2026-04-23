@@ -21,39 +21,35 @@ use sha2::{Digest, Sha256};
 /// Extensions we bother to parse.
 const PARSEABLE_EXTS: &[&str] = &[
     // Rust
-    "rs",
-    // Python
-    "py", "pyw", "pyi",
-    // JavaScript / TypeScript
-    "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts",
-    // Go
-    "go",
-    // C / C++
-    "c", "h", "cpp", "cc", "cxx", "hpp", "hxx", "h++",
-    // Java
-    "java",
-    // C#
-    "cs",
-    // Ruby
-    "rb", "rake", "gemspec",
-    // Kotlin
-    "kt", "kts",
-    // Swift
-    "swift",
-    // Bash / shell
-    "sh", "bash", "zsh", "fish",
-    // PHP
-    "php", "php3", "php4", "php5", "phtml",
-    // Lua
-    "lua",
-    // Scala
+    "rs", // Python
+    "py", "pyw", "pyi", // JavaScript / TypeScript
+    "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts", // Go
+    "go",  // C / C++
+    "c", "h", "cpp", "cc", "cxx", "hpp", "hxx", "h++",  // Java
+    "java", // C#
+    "cs",   // Ruby
+    "rb", "rake", "gemspec", // Kotlin
+    "kt", "kts",   // Swift
+    "swift", // Bash / shell
+    "sh", "bash", "zsh", "fish", // PHP
+    "php", "php3", "php4", "php5", "phtml", // Lua
+    "lua",   // Scala
     "scala", "sc",
 ];
 
 /// Directories we skip unconditionally.
 const SKIP_DIRS: &[&str] = &[
-    "target", "node_modules", ".git", "__pycache__", ".venv", "venv",
-    "dist", "build", ".mypy_cache", "vendor", ".cargo",
+    "target",
+    "node_modules",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".mypy_cache",
+    "vendor",
+    ".cargo",
 ];
 
 fn collect_source_files(root: &Path) -> Vec<PathBuf> {
@@ -75,10 +71,10 @@ fn collect_source_files(root: &Path) -> Vec<PathBuf> {
                 }
             }
             // Only files with parseable extensions
-            if !e.path().is_file() { return false; }
-            let ext = e.path().extension()
-                .and_then(|x| x.to_str())
-                .unwrap_or("");
+            if !e.path().is_file() {
+                return false;
+            }
+            let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or("");
             PARSEABLE_EXTS.contains(&ext)
         })
         .map(|e| e.path().to_path_buf())
@@ -92,7 +88,7 @@ fn collect_source_files(root: &Path) -> Vec<PathBuf> {
 fn make_fqdn(file_path: &str, container: Option<&str>, name: &str) -> String {
     match container {
         Some(c) => format!("{}::{}::{}", file_path, c, name),
-        None    => format!("{}::{}", file_path, name),
+        None => format!("{}::{}", file_path, name),
     }
 }
 
@@ -111,7 +107,11 @@ fn extract_snippet(lines: &[String], start: usize, end: usize) -> String {
     const CAP: usize = 200;
     let actual_end = end.min(start + CAP).min(lines.len().saturating_sub(1));
     let text = lines[start..=actual_end].join("\n");
-    if end > start + CAP { format!("{}\n// ... (truncated)", text) } else { text }
+    if end > start + CAP {
+        format!("{}\n// ... (truncated)", text)
+    } else {
+        text
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,21 +122,20 @@ pub struct GraphBuilder;
 
 impl GraphBuilder {
     /// Build the semantic code graph for `root`, sending progress strings via `progress`.
-    pub fn build(
-        root: &Path,
-        progress: &Sender<GraphBuildMsg>,
-    ) -> anyhow::Result<CodeGraph> {
-        let _ = progress.send(GraphBuildMsg::Progress(
-            format!("Scanning {}...", root.display())
-        ));
+    pub fn build(root: &Path, progress: &Sender<GraphBuildMsg>) -> anyhow::Result<CodeGraph> {
+        let _ = progress.send(GraphBuildMsg::Progress(format!(
+            "Scanning {}...",
+            root.display()
+        )));
 
         // ── Phase 1: collect & parse files in parallel ───────────────────────
         let files = collect_source_files(root);
         let file_count = files.len();
 
-        let _ = progress.send(GraphBuildMsg::Progress(
-            format!("Found {} source files — parsing...", file_count)
-        ));
+        let _ = progress.send(GraphBuildMsg::Progress(format!(
+            "Found {} source files — parsing...",
+            file_count
+        )));
 
         // Parallel parse
         let parsed: Vec<ParsedFile> = files
@@ -150,18 +149,19 @@ impl GraphBuilder {
             })
             .collect();
 
-        let _ = progress.send(GraphBuildMsg::Progress(
-            format!("Parsed {} files — building graph...", parsed.len())
-        ));
+        let _ = progress.send(GraphBuildMsg::Progress(format!(
+            "Parsed {} files — building graph...",
+            parsed.len()
+        )));
 
         // ── Phase 2: build graph (sequential) ────────────────────────────────
         let mut meta = GraphMeta {
-            version:     GRAPH_VERSION,
-            root_path:   root.to_string_lossy().to_string(),
-            built_at:    chrono::Local::now().timestamp(),
+            version: GRAPH_VERSION,
+            root_path: root.to_string_lossy().to_string(),
+            built_at: chrono::Local::now().timestamp(),
             total_nodes: 0,
             total_edges: 0,
-            file_count:  parsed.len(),
+            file_count: parsed.len(),
         };
 
         let mut graph = CodeGraph::new(meta.clone());
@@ -170,19 +170,22 @@ impl GraphBuilder {
         for pf in &parsed {
             let fqdn = pf.path.clone();
             let node = GraphNode {
-                id:            hash_fqdn(&fqdn),
-                fqdn:          fqdn.clone(),
-                name:          std::path::Path::new(&pf.path)
+                id: hash_fqdn(&fqdn),
+                fqdn: fqdn.clone(),
+                name: std::path::Path::new(&pf.path)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| pf.path.clone()),
-                kind:          NodeKind::File,
-                span:          Span { start_line: 0, end_line: pf.lines.len() as u32 },
-                file_path:     pf.path.clone(),
-                modifiers:     Modifiers::default(),
+                kind: NodeKind::File,
+                span: Span {
+                    start_line: 0,
+                    end_line: pf.lines.len() as u32,
+                },
+                file_path: pf.path.clone(),
+                modifiers: Modifiers::default(),
                 documentation: None,
-                content:       CodeContent::stub(format!("// {}", pf.path)),
-                language:      pf.language.clone(),
+                content: CodeContent::stub(format!("// {}", pf.path)),
+                language: pf.language.clone(),
             };
             graph.add_node(node);
         }
@@ -194,20 +197,25 @@ impl GraphBuilder {
             for def in &pf.defs {
                 let fqdn = make_fqdn(&pf.path, def.container.as_deref(), &def.name);
                 // Skip if already present (impl blocks with same type name)
-                if graph.fqdn_index.contains_key(&fqdn) { continue; }
+                if graph.fqdn_index.contains_key(&fqdn) {
+                    continue;
+                }
 
                 let full = extract_snippet(&pf.lines, def.start as usize, def.end as usize);
                 let node = GraphNode {
-                    id:            hash_fqdn(&fqdn),
-                    fqdn:          fqdn.clone(),
-                    name:          def.name.clone(),
-                    kind:          def.kind.clone(),
-                    span:          Span { start_line: def.start, end_line: def.end },
-                    file_path:     pf.path.clone(),
-                    modifiers:     def.modifiers,
+                    id: hash_fqdn(&fqdn),
+                    fqdn: fqdn.clone(),
+                    name: def.name.clone(),
+                    kind: def.kind.clone(),
+                    span: Span {
+                        start_line: def.start,
+                        end_line: def.end,
+                    },
+                    file_path: pf.path.clone(),
+                    modifiers: def.modifiers,
                     documentation: def.doc.clone(),
-                    content:       CodeContent::new(full),
-                    language:      pf.language.clone(),
+                    content: CodeContent::new(full),
+                    language: pf.language.clone(),
                 };
                 let node_idx = graph.add_node(node);
 
@@ -225,16 +233,20 @@ impl GraphBuilder {
             }
         }
 
-
-        let _ = progress.send(GraphBuildMsg::Progress(
-            format!("Inserted {} nodes — resolving edges...", graph.graph.node_count())
-        ));
+        let _ = progress.send(GraphBuildMsg::Progress(format!(
+            "Inserted {} nodes — resolving edges...",
+            graph.graph.node_count()
+        )));
 
         // ── Phase 3: edge resolution ─────────────────────────────────────────
         // Collect all (from, to, edge_type) tuples first (avoids borrow conflicts),
         // then insert them all at once.
 
-        let mut edges_to_add: Vec<(petgraph::stable_graph::NodeIndex, petgraph::stable_graph::NodeIndex, EdgeType)> = Vec::new();
+        let mut edges_to_add: Vec<(
+            petgraph::stable_graph::NodeIndex,
+            petgraph::stable_graph::NodeIndex,
+            EdgeType,
+        )> = Vec::new();
 
         for pf in &parsed {
             let file_node = graph.fqdn_index.get(&pf.path).copied();
@@ -246,7 +258,11 @@ impl GraphBuilder {
 
                 // Try matching a file node by path
                 for (fqdn, &idx) in &graph.fqdn_index {
-                    if graph.graph.node_weight(idx).map(|n| n.kind == NodeKind::File).unwrap_or(false)
+                    if graph
+                        .graph
+                        .node_weight(idx)
+                        .map(|n| n.kind == NodeKind::File)
+                        .unwrap_or(false)
                         && (fqdn.ends_with(&target_normalized) || fqdn.contains(&imp.target))
                     {
                         if let Some(fi) = file_node {
@@ -259,10 +275,14 @@ impl GraphBuilder {
 
                 // Fall back to symbol name lookup
                 if !matched {
-                    let sym_name = imp.target.split("::").last()
+                    let sym_name = imp
+                        .target
+                        .split("::")
+                        .last()
                         .or_else(|| imp.target.split('.').last())
                         .unwrap_or(&imp.target);
-                    let targets: Vec<petgraph::stable_graph::NodeIndex> = graph.name_index
+                    let targets: Vec<petgraph::stable_graph::NodeIndex> = graph
+                        .name_index
                         .get(sym_name)
                         .map(|v| v.iter().take(3).copied().collect())
                         .unwrap_or_default();
@@ -281,17 +301,30 @@ impl GraphBuilder {
                     .as_deref()
                     .and_then(|fq| graph.fqdn_index.get(fq).copied());
 
-                let callee_idxs: Vec<petgraph::stable_graph::NodeIndex> = graph.name_index
+                let callee_idxs: Vec<petgraph::stable_graph::NodeIndex> = graph
+                    .name_index
                     .get(&call.target)
-                    .map(|v| v.iter()
-                        .filter(|&&i| graph.graph.node_weight(i)
-                            .map(|n| matches!(n.kind,
-                                NodeKind::Function | NodeKind::Method |
-                                NodeKind::Macro | NodeKind::Constructor))
-                            .unwrap_or(false))
-                        .take(5)
-                        .copied()
-                        .collect())
+                    .map(|v| {
+                        v.iter()
+                            .filter(|&&i| {
+                                graph
+                                    .graph
+                                    .node_weight(i)
+                                    .map(|n| {
+                                        matches!(
+                                            n.kind,
+                                            NodeKind::Function
+                                                | NodeKind::Method
+                                                | NodeKind::Macro
+                                                | NodeKind::Constructor
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .take(5)
+                            .copied()
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 if let Some(ci) = caller_idx {
@@ -306,17 +339,30 @@ impl GraphBuilder {
                 let caller_fqdn = find_enclosing_def(pf, mut_ref.line);
                 if let Some(ref cf) = caller_fqdn {
                     let caller_idx = graph.fqdn_index.get(cf).copied();
-                    let target_idxs: Vec<petgraph::stable_graph::NodeIndex> = graph.name_index
+                    let target_idxs: Vec<petgraph::stable_graph::NodeIndex> = graph
+                        .name_index
                         .get(&mut_ref.target)
-                        .map(|v| v.iter()
-                            .filter(|&&i| graph.graph.node_weight(i)
-                                .map(|n| matches!(n.kind,
-                                    NodeKind::GlobalVar | NodeKind::Field |
-                                    NodeKind::LocalVar  | NodeKind::Property))
-                                .unwrap_or(false))
-                            .take(3)
-                            .copied()
-                            .collect())
+                        .map(|v| {
+                            v.iter()
+                                .filter(|&&i| {
+                                    graph
+                                        .graph
+                                        .node_weight(i)
+                                        .map(|n| {
+                                            matches!(
+                                                n.kind,
+                                                NodeKind::GlobalVar
+                                                    | NodeKind::Field
+                                                    | NodeKind::LocalVar
+                                                    | NodeKind::Property
+                                            )
+                                        })
+                                        .unwrap_or(false)
+                                })
+                                .take(3)
+                                .copied()
+                                .collect()
+                        })
                         .unwrap_or_default();
                     if let Some(ci) = caller_idx {
                         for ti in target_idxs {
@@ -371,13 +417,11 @@ impl GraphBuilder {
         meta.total_edges = graph.graph.edge_count();
         graph.meta = meta;
 
-        let _ = progress.send(GraphBuildMsg::Progress(
-            format!(
-                "Graph complete: {} nodes, {} edges",
-                graph.graph.node_count(),
-                graph.graph.edge_count()
-            )
-        ));
+        let _ = progress.send(GraphBuildMsg::Progress(format!(
+            "Graph complete: {} nodes, {} edges",
+            graph.graph.node_count(),
+            graph.graph.edge_count()
+        )));
 
         Ok(graph)
     }
@@ -390,8 +434,12 @@ fn find_enclosing_def(pf: &ParsedFile, line: u32) -> Option<String> {
     for def in &pf.defs {
         if def.start <= line && line <= def.end {
             match best {
-                None => { best = Some(def); }
-                Some(b) if (def.end - def.start) < (b.end - b.start) => { best = Some(def); }
+                None => {
+                    best = Some(def);
+                }
+                Some(b) if (def.end - def.start) < (b.end - b.start) => {
+                    best = Some(def);
+                }
                 _ => {}
             }
         }

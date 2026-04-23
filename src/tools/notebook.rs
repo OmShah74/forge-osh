@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // NotebookReadTool
@@ -16,8 +16,12 @@ pub struct NotebookReadTool;
 
 #[async_trait]
 impl Tool for NotebookReadTool {
-    fn name(&self) -> &str { "notebook_read" }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "notebook_read"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Read a Jupyter notebook (.ipynb) file and return its cells as formatted text. \
@@ -43,7 +47,9 @@ impl Tool for NotebookReadTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -140,21 +146,28 @@ impl Tool for NotebookReadTool {
                                     let stream_name = out["name"].as_str().unwrap_or("stdout");
                                     let text = extract_source(&out["text"]);
                                     output.push_str(&format!("[{}] {}", stream_name, text));
-                                    if !text.ends_with('\n') { output.push('\n'); }
+                                    if !text.ends_with('\n') {
+                                        output.push('\n');
+                                    }
                                 }
                                 "execute_result" | "display_data" => {
                                     // Try text/plain first
                                     if let Some(text) = out["data"]["text/plain"].as_str() {
                                         output.push_str(text);
-                                        if !text.ends_with('\n') { output.push('\n'); }
+                                        if !text.ends_with('\n') {
+                                            output.push('\n');
+                                        }
                                     } else if let Some(arr) = out["data"]["text/plain"].as_array() {
                                         let text = join_source_array(arr);
                                         output.push_str(&text);
-                                        if !text.ends_with('\n') { output.push('\n'); }
+                                        if !text.ends_with('\n') {
+                                            output.push('\n');
+                                        }
                                     } else if out["data"]["image/png"].is_string() {
                                         output.push_str("[image/png output — binary, not shown]\n");
                                     } else if out["data"]["text/html"].is_string() {
-                                        output.push_str("[HTML output — use read_file to inspect]\n");
+                                        output
+                                            .push_str("[HTML output — use read_file to inspect]\n");
                                     }
                                 }
                                 "error" => {

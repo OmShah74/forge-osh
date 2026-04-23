@@ -33,14 +33,24 @@ impl PermissionRule {
         let pattern = pattern.into();
         let tool = tool.into();
         let description = format!("Auto-allow {}({})", tool, pattern);
-        Self { tool, pattern, allow: true, description }
+        Self {
+            tool,
+            pattern,
+            allow: true,
+            description,
+        }
     }
 
     pub fn new_deny(tool: impl Into<String>, pattern: impl Into<String>) -> Self {
         let pattern = pattern.into();
         let tool = tool.into();
         let description = format!("Auto-deny {}({})", tool, pattern);
-        Self { tool, pattern, allow: false, description }
+        Self {
+            tool,
+            pattern,
+            allow: false,
+            description,
+        }
     }
 
     /// Check if this rule matches the given tool call.
@@ -80,7 +90,7 @@ fn glob_match(pattern: &str, subject: &str) -> bool {
         return subject_lower.ends_with(suffix.trim());
     }
     if pattern_lower.starts_with('*') && pattern_lower.ends_with('*') {
-        let inner = &pattern_lower[1..pattern_lower.len()-1];
+        let inner = &pattern_lower[1..pattern_lower.len() - 1];
         return subject_lower.contains(inner);
     }
 
@@ -130,7 +140,11 @@ impl PermissionStore {
     /// Add an allow rule (if not already present)
     pub fn add_allow(&mut self, tool: &str, pattern: &str) {
         let rule = PermissionRule::new_allow(tool, pattern);
-        if !self.rules.iter().any(|r| r.tool == rule.tool && r.pattern == rule.pattern && r.allow) {
+        if !self
+            .rules
+            .iter()
+            .any(|r| r.tool == rule.tool && r.pattern == rule.pattern && r.allow)
+        {
             self.rules.push(rule);
             self.save();
         }
@@ -139,7 +153,11 @@ impl PermissionStore {
     /// Add a deny rule
     pub fn add_deny(&mut self, tool: &str, pattern: &str) {
         let rule = PermissionRule::new_deny(tool, pattern);
-        if !self.rules.iter().any(|r| r.tool == rule.tool && r.pattern == rule.pattern && !r.allow) {
+        if !self
+            .rules
+            .iter()
+            .any(|r| r.tool == rule.tool && r.pattern == rule.pattern && !r.allow)
+        {
             self.rules.push(rule);
             self.save();
         }
@@ -174,13 +192,26 @@ impl PermissionStore {
     /// Format all rules for display
     pub fn display(&self) -> String {
         if self.rules.is_empty() {
-            return "No permission rules stored. Add rules with /permissions add bash(git *).".to_string();
+            return "No permission rules stored. Add rules with /permissions add bash(git *)."
+                .to_string();
         }
-        let lines: Vec<String> = self.rules.iter().enumerate().map(|(i, r)| {
-            let kind = if r.allow { "ALLOW" } else { " DENY" };
-            format!("  [{i:>2}] {kind}  {}({})  — {}", r.tool, r.pattern, r.description)
-        }).collect();
-        format!("Permission Rules ({} total):\n{}", self.rules.len(), lines.join("\n"))
+        let lines: Vec<String> = self
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let kind = if r.allow { "ALLOW" } else { " DENY" };
+                format!(
+                    "  [{i:>2}] {kind}  {}({})  — {}",
+                    r.tool, r.pattern, r.description
+                )
+            })
+            .collect();
+        format!(
+            "Permission Rules ({} total):\n{}",
+            self.rules.len(),
+            lines.join("\n")
+        )
     }
 }
 
@@ -256,7 +287,9 @@ mod tests {
     fn test_store_check() {
         let mut store = PermissionStore::default();
         store.rules.push(PermissionRule::new_allow("bash", "git *"));
-        store.rules.push(PermissionRule::new_deny("bash", "rm -rf *"));
+        store
+            .rules
+            .push(PermissionRule::new_deny("bash", "rm -rf *"));
 
         assert_eq!(store.check("bash", "git status"), Some(true));
         assert_eq!(store.check("bash", "rm -rf /tmp"), Some(false));

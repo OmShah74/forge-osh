@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 /// Registry of active worktrees created in this session.
 static WORKTREE_REGISTRY: Lazy<Arc<Mutex<Vec<WorktreeEntry>>>> =
@@ -54,7 +54,9 @@ pub struct EnterWorktreeTool;
 
 #[async_trait]
 impl Tool for EnterWorktreeTool {
-    fn name(&self) -> &str { "enter_worktree" }
+    fn name(&self) -> &str {
+        "enter_worktree"
+    }
 
     fn description(&self) -> &str {
         "Create a new git worktree at the given path, optionally on a new branch. \
@@ -84,7 +86,9 @@ impl Tool for EnterWorktreeTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Mutating }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Mutating
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -144,7 +148,9 @@ pub struct ExitWorktreeTool;
 
 #[async_trait]
 impl Tool for ExitWorktreeTool {
-    fn name(&self) -> &str { "exit_worktree" }
+    fn name(&self) -> &str {
+        "exit_worktree"
+    }
 
     fn description(&self) -> &str {
         "Remove a git worktree previously created with enter_worktree. \
@@ -168,7 +174,9 @@ impl Tool for ExitWorktreeTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Destructive }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Destructive
+    }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let path_str = match input["path"].as_str() {
@@ -210,7 +218,9 @@ pub struct ListWorktreesTool;
 
 #[async_trait]
 impl Tool for ListWorktreesTool {
-    fn name(&self) -> &str { "list_worktrees" }
+    fn name(&self) -> &str {
+        "list_worktrees"
+    }
 
     fn description(&self) -> &str {
         "List all git worktrees in the repository, including which ones were \
@@ -224,19 +234,28 @@ impl Tool for ListWorktreesTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolOutput {
         match run_git(&["worktree", "list", "--porcelain"], &ctx.working_dir).await {
             Ok(output) => {
                 let session_wts: Vec<String> = {
-                    WORKTREE_REGISTRY.lock().await.iter().map(|e| e.path.clone()).collect()
+                    WORKTREE_REGISTRY
+                        .lock()
+                        .await
+                        .iter()
+                        .map(|e| e.path.clone())
+                        .collect()
                 };
 
                 let mut lines = vec!["Git worktrees:".to_string()];
                 for block in output.split("\n\n") {
                     let block = block.trim();
-                    if block.is_empty() { continue; }
+                    if block.is_empty() {
+                        continue;
+                    }
                     let is_session = session_wts.iter().any(|p| block.contains(p.as_str()));
                     let tag = if is_session { " [this session]" } else { "" };
                     lines.push(format!("{block}{tag}"));

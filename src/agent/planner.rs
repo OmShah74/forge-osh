@@ -58,8 +58,12 @@ mod tests {
 
     #[test]
     fn test_complex_detection() {
-        assert!(Planner::is_complex_task("Refactor the auth module to use JWT"));
-        assert!(Planner::is_complex_task("Build a new REST API with CRUD operations"));
+        assert!(Planner::is_complex_task(
+            "Refactor the auth module to use JWT"
+        ));
+        assert!(Planner::is_complex_task(
+            "Build a new REST API with CRUD operations"
+        ));
         assert!(!Planner::is_complex_task("What does this function do?"));
         assert!(!Planner::is_complex_task("Fix the typo"));
     }

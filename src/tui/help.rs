@@ -25,6 +25,22 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /find <pattern>    Search files (gitignore-aware glob, e.g. /find *.rs)
   /config [key val]  View or set config (theme/trust/vim). E.g. /config theme dark
   /stats             Show detailed session statistics (tokens, tools, context %)
+  /skills                   List all available skills (grouped by source)
+  /skill <name> [args]      Invoke a skill. Inline skills narrow tool access;
+                            fork skills run in an isolated worker.
+  /skill show <name>        Display a skill's full SKILL.md body
+  /skill new <name>         Scaffold a new project skill + open $EDITOR
+  /skill edit <name>        Edit an existing skill in $EDITOR (reload after save)
+  /skill delete <name>      Remove a project skill directory
+  /skill reload             Re-scan skill directories
+  /skill path               Print where skills are loaded from
+  /skill off                Clear the currently-active skill scope
+
+  Skill locations:
+    • Project:  ./.claude/skills/<name>/SKILL.md
+    • User:     ~/.forge-osh/skills/<name>/SKILL.md
+    • Bundled:  shipped with forge-osh (debug, review, refactor, project-memory)
+  Project overrides user overrides bundled.
 
 GIT COMMANDS
   /commit            Generate AI commit message for staged changes

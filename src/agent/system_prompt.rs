@@ -1,9 +1,18 @@
 use std::path::{Path, PathBuf};
 
+use crate::skills::SkillRegistry;
+
 /// Build the system prompt dynamically based on environment.
 ///
 /// `graph_info` is a brief description of the loaded forge-graph (None if not built).
-pub fn build_system_prompt(working_dir: &Path, extra: &str, graph_info: Option<&str>) -> String {
+pub fn build_system_prompt(
+    working_dir: &Path,
+    extra: &str,
+    graph_info: Option<&str>,
+    skills: Option<&SkillRegistry>,
+    max_skills_in_prompt: usize,
+    include_skills: bool,
+) -> String {
     let os_name = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let shell_name = if cfg!(target_os = "windows") {
@@ -153,6 +162,25 @@ You operate in an autonomous agentic loop:
         prompt.push_str(&memory_content);
     }
 
+    if include_skills {
+        if let Some(skill_registry) = skills {
+            let listed = skill_registry.list_for_prompt(max_skills_in_prompt);
+            if !listed.is_empty() {
+                prompt.push_str("\n\n## Skills\n");
+                prompt.push_str(
+                    "The following Rust-native skills are available. When one matches the task, use the `invoke_skill` tool instead of re-inventing the workflow.\n",
+                );
+                for skill in listed {
+                    prompt.push_str(&format!("- `{}` — {}", skill.name, skill.description));
+                    if let Some(when) = &skill.when_to_use {
+                        prompt.push_str(&format!(" Use when: {}", when));
+                    }
+                    prompt.push('\n');
+                }
+            }
+        }
+    }
+
     if !extra.is_empty() {
         prompt.push_str("\n\n## Additional Instructions\n");
         prompt.push_str(extra);
@@ -229,7 +257,10 @@ fn build_git_context(working_dir: &Path) -> String {
         if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
             parts.push(format!("Branch: {}", branch.trim()));
         } else {
-            parts.push(format!("Detached HEAD: {}", content.trim().get(..8).unwrap_or("")));
+            parts.push(format!(
+                "Detached HEAD: {}",
+                content.trim().get(..8).unwrap_or("")
+            ));
         }
     }
 
@@ -243,10 +274,14 @@ fn build_git_context(working_dir: &Path) -> String {
             let log = String::from_utf8_lossy(&output.stdout);
             let commits: Vec<&str> = log.lines().collect();
             if !commits.is_empty() {
-                parts.push(format!("Recent commits:\n{}", commits.iter()
-                    .map(|c| format!("  {c}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")));
+                parts.push(format!(
+                    "Recent commits:\n{}",
+                    commits
+                        .iter()
+                        .map(|c| format!("  {c}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
             }
         }
     }
@@ -263,10 +298,19 @@ fn build_git_context(working_dir: &Path) -> String {
             if lines.is_empty() {
                 parts.push("Working tree: clean".to_string());
             } else {
-                parts.push(format!("Working tree changes ({} files):\n{}{}",
+                parts.push(format!(
+                    "Working tree changes ({} files):\n{}{}",
                     status.lines().count(),
-                    lines.iter().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"),
-                    if status.lines().count() > 10 { "\n  ..." } else { "" }
+                    lines
+                        .iter()
+                        .map(|l| format!("  {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    if status.lines().count() > 10 {
+                        "\n  ..."
+                    } else {
+                        ""
+                    }
                 ));
             }
         }
@@ -294,9 +338,13 @@ fn build_directory_tree(working_dir: &Path) -> String {
         .build();
 
     for entry in walker.into_iter().filter_map(|e| e.ok()) {
-        if entries.len() >= max_entries { break; }
+        if entries.len() >= max_entries {
+            break;
+        }
         let path = entry.path();
-        if path == working_dir { continue; }
+        if path == working_dir {
+            continue;
+        }
 
         let relative = path.strip_prefix(working_dir).unwrap_or(path);
         let depth = relative.components().count();
@@ -304,7 +352,10 @@ fn build_directory_tree(working_dir: &Path) -> String {
         let name = entry.file_name().to_string_lossy();
 
         // Skip common noise
-        if matches!(name.as_ref(), ".git" | "node_modules" | "target" | "__pycache__" | ".venv") {
+        if matches!(
+            name.as_ref(),
+            ".git" | "node_modules" | "target" | "__pycache__" | ".venv"
+        ) {
             continue;
         }
 
@@ -383,20 +434,27 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt() {
-        let prompt = build_system_prompt(Path::new("."), "", None);
+        let prompt = build_system_prompt(Path::new("."), "", None, None, 8, true);
         assert!(prompt.contains("forge"));
         assert!(prompt.contains("Working Directory"));
     }
 
     #[test]
     fn test_build_with_extra() {
-        let prompt = build_system_prompt(Path::new("."), "Always write tests", None);
+        let prompt = build_system_prompt(Path::new("."), "Always write tests", None, None, 8, true);
         assert!(prompt.contains("Always write tests"));
     }
 
     #[test]
     fn test_build_with_graph() {
-        let prompt = build_system_prompt(Path::new("."), "", Some("100 nodes, 200 edges"));
+        let prompt = build_system_prompt(
+            Path::new("."),
+            "",
+            Some("100 nodes, 200 edges"),
+            None,
+            8,
+            true,
+        );
         assert!(prompt.contains("forge-graph"));
         assert!(prompt.contains("100 nodes"));
     }

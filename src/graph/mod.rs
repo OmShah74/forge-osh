@@ -33,7 +33,10 @@ pub fn new_shared_graph() -> SharedGraph {
 #[allow(clippy::large_enum_variant)]
 pub enum GraphBuildMsg {
     Progress(String),
-    Done { graph: CodeGraph, artifact_path: PathBuf },
+    Done {
+        graph: CodeGraph,
+        artifact_path: PathBuf,
+    },
     Error(String),
 }
 
@@ -50,7 +53,7 @@ pub const GRAPH_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 pub struct CodeGraph {
-    pub meta:  GraphMeta,
+    pub meta: GraphMeta,
     pub graph: StableGraph<GraphNode, EdgeType, Directed>,
 
     // ── Indices rebuilt on load (not serialized) ──────────────────────────
@@ -129,7 +132,13 @@ impl CodeGraph {
             .unwrap_or_else(|| "root".to_string());
         let sanitized: String = dir_name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         format!("forge_graph_{sanitized}.bin")
     }

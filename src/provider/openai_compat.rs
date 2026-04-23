@@ -54,7 +54,10 @@ impl OpenAICompatProvider {
 
         let extra_headers = if provider_id == "openrouter" {
             vec![
-                ("HTTP-Referer".to_string(), "https://forge-osh.dev".to_string()),
+                (
+                    "HTTP-Referer".to_string(),
+                    "https://forge-osh.dev".to_string(),
+                ),
                 ("X-Title".to_string(), "forge-osh".to_string()),
             ]
         } else {
@@ -174,19 +177,8 @@ impl OpenAICompatProvider {
         )
     }
 
-    pub fn custom(
-        name: String,
-        api_key: String,
-        base_url: String,
-        model: String,
-    ) -> Result<Self> {
-        Self::new(
-            "custom".into(),
-            name,
-            api_key,
-            base_url,
-            model,
-        )
+    pub fn custom(name: String, api_key: String, base_url: String, model: String) -> Result<Self> {
+        Self::new("custom".into(), name, api_key, base_url, model)
     }
 
     fn build_messages(&self, messages: &[Message]) -> Vec<Value> {
@@ -315,11 +307,7 @@ impl Provider for OpenAICompatProvider {
             let text = response.text().await.unwrap_or_default();
             let message = serde_json::from_str::<Value>(&text)
                 .ok()
-                .and_then(|v| {
-                    v["error"]["message"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                })
+                .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
                 .unwrap_or(text);
             return Err(ForgeError::api(status, message));
         }
@@ -410,10 +398,8 @@ impl Provider for OpenAICompatProvider {
 
                 // Usage in the final event
                 if let Some(u) = parsed.get("usage") {
-                    usage.input_tokens =
-                        u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
-                    usage.output_tokens =
-                        u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                    usage.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                    usage.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
                 }
             }
         }

@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::provider::Provider;
+use crate::skills::SkillInvocationRecord;
 use crate::types::*;
 
 /// Default keep-last for manual `/compact` (no argument).
@@ -37,6 +38,7 @@ pub const DEFAULT_KEEP_LAST: usize = 0;
 /// `context_window_tokens`; pass 0 to disable.
 pub async fn summarize_messages(
     messages: &[Message],
+    invoked_skills: &[SkillInvocationRecord],
     provider: &dyn Provider,
     model_id: &str,
     context_window_tokens: u32,
@@ -64,23 +66,29 @@ pub async fn summarize_messages(
                     }
                 }
                 for tc in content.tool_calls() {
-                    let input_str =
-                        serde_json::to_string(&tc.input).unwrap_or_default();
-                    transcript.push_str(&format!(
-                        "[Tool call: {}({})]\n\n",
-                        tc.name, input_str
-                    ));
+                    let input_str = serde_json::to_string(&tc.input).unwrap_or_default();
+                    transcript.push_str(&format!("[Tool call: {}({})]\n\n", tc.name, input_str));
                 }
             }
             Message::Tool(result) => {
                 let status = if result.is_error { "ERROR" } else { "OK" };
-                transcript.push_str(&format!(
-                    "[Tool result ({status})]: {}\n\n",
-                    result.content
-                ));
+                transcript.push_str(&format!("[Tool result ({status})]: {}\n\n", result.content));
             }
         }
     }
+
+    let invoked_skills_text = if invoked_skills.is_empty() {
+        String::new()
+    } else {
+        let mut text = String::from("\n\nACTIVE / RECENT SKILLS TO PRESERVE:\n");
+        for skill in invoked_skills {
+            text.push_str(&format!(
+                "- Skill: {} | Source: {:?} | Invoked: {}\n  Prompt:\n{}\n",
+                skill.skill_name, skill.source, skill.invoked_at, skill.materialized_prompt
+            ));
+        }
+        text
+    };
 
     // Safety cap: leave headroom (~25% of the context window) for the
     // summary prompt itself, the system prompt, and the response. Only
@@ -105,8 +113,8 @@ pub async fn summarize_messages(
     // tokens. Using ~4 chars/token as a rough converter is fine here — this
     // is an instruction to the model, not a precise budget check.
     let transcript_tokens_est = (transcript.len() / 4) as u32;
-    let target_min_words: u32  = (transcript_tokens_est / 18).clamp(250, 1500);
-    let target_max_words: u32  = (transcript_tokens_est / 8).clamp(400,  3500);
+    let target_min_words: u32 = (transcript_tokens_est / 18).clamp(250, 1500);
+    let target_max_words: u32 = (transcript_tokens_est / 8).clamp(400, 3500);
     let max_tokens_budget: u32 = ((target_max_words as f32) * 1.6) as u32; // words → tokens headroom
     let max_tokens_budget: u32 = max_tokens_budget.clamp(1500, 8000);
 
@@ -167,7 +175,7 @@ pub async fn summarize_messages(
              NOT include meta-commentary about this summary itself. Do NOT \
              apologise for length. Do NOT wrap in code fences.\n\
              \n\
-             TRANSCRIPT TO COMPRESS:\n\n{transcript}"
+             TRANSCRIPT TO COMPRESS:\n\n{transcript}{invoked_skills_text}"
         )))],
         tools: None,
         max_tokens: max_tokens_budget,
@@ -188,12 +196,7 @@ pub async fn summarize_messages(
     let (stream_tx, _stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
     let response = provider.chat(summarize_request, stream_tx).await?;
 
-    let summary = response
-        .content
-        .text()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let summary = response.content.text().unwrap_or("").trim().to_string();
 
     if summary.is_empty() {
         return Err(crate::error::ForgeError::Provider(
@@ -223,10 +226,7 @@ pub async fn summarize_messages(
 
 /// Decide how many messages to drop and which to keep.
 /// Returns (messages_to_summarize, messages_to_keep).
-pub fn split_for_compaction(
-    messages: &[Message],
-    keep_last: usize,
-) -> (&[Message], &[Message]) {
+pub fn split_for_compaction(messages: &[Message], keep_last: usize) -> (&[Message], &[Message]) {
     if messages.len() <= keep_last {
         return (&[], messages);
     }
@@ -262,9 +262,7 @@ mod tests {
 
     #[test]
     fn test_split_nothing_to_do() {
-        let msgs: Vec<Message> = vec![
-            Message::User(UserContent::Text("hello".to_string())),
-        ];
+        let msgs: Vec<Message> = vec![Message::User(UserContent::Text("hello".to_string()))];
         let (to_summarize, to_keep) = split_for_compaction(&msgs, 8);
         assert_eq!(to_summarize.len(), 0);
         assert_eq!(to_keep.len(), 1);

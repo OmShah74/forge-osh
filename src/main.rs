@@ -17,16 +17,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(
-                    if cli.verbose {
-                        "forge_agent=debug"
-                    } else {
-                        "forge_agent=info"
-                    }
-                    .parse()
-                    .unwrap(),
-                ),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(
+                if cli.verbose {
+                    "forge_agent=debug"
+                } else {
+                    "forge_agent=info"
+                }
+                .parse()
+                .unwrap(),
+            ),
         )
         .with_writer(std::io::stderr)
         .init();

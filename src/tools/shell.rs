@@ -5,8 +5,8 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // Read-only command classification (from Claude Code BashTool analysis)
@@ -15,42 +15,107 @@ use super::Tool;
 /// Read-only base commands — these never mutate filesystem state.
 const READ_ONLY_COMMANDS: &[&str] = &[
     // File listing
-    "ls", "ll", "la", "dir", "tree",
+    "ls",
+    "ll",
+    "la",
+    "dir",
+    "tree",
     // File content viewing
-    "cat", "less", "more", "head", "tail", "bat", "type",
+    "cat",
+    "less",
+    "more",
+    "head",
+    "tail",
+    "bat",
+    "type",
     // Path / navigation info
-    "pwd", "echo", "printf",
+    "pwd",
+    "echo",
+    "printf",
     // Lookup
-    "which", "where", "whereis", "command",
+    "which",
+    "where",
+    "whereis",
+    "command",
     // Text processing (read-only when no output redirect)
-    "wc", "sort", "uniq", "cut", "tr", "diff", "cmp", "comm",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "diff",
+    "cmp",
+    "comm",
     // File info
-    "file", "stat", "du", "df", "lsblk", "lscpu",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "lsblk",
+    "lscpu",
     // System info
-    "uname", "hostname", "whoami", "id", "env", "printenv", "date", "uptime", "ps",
+    "uname",
+    "hostname",
+    "whoami",
+    "id",
+    "env",
+    "printenv",
+    "date",
+    "uptime",
+    "ps",
     // Search tools
-    "grep", "rg", "ag", "ack", "ripgrep",
+    "grep",
+    "rg",
+    "ag",
+    "ack",
+    "ripgrep",
     // Find (without -exec/-delete handled separately)
-    "find", "locate",
+    "find",
+    "locate",
     // Awk/sed (read-only modes)
-    "awk", "sed",
+    "awk",
+    "sed",
     // Process info
-    "top", "htop", "pstree",
+    "top",
+    "htop",
+    "pstree",
     // Network info (read-only)
-    "ping", "traceroute", "netstat", "ss", "nslookup", "dig",
+    "ping",
+    "traceroute",
+    "netstat",
+    "ss",
+    "nslookup",
+    "dig",
     // Package listing (not install)
-    "pip", "pip3",
+    "pip",
+    "pip3",
     // Windows equivalents
     "cmd",
 ];
 
 /// Git subcommands that are read-only
 const GIT_READ_ONLY_SUBCOMMANDS: &[&str] = &[
-    "status", "log", "diff", "show", "blame", "branch",
-    "stash", "remote", "tag", "describe", "shortlog",
-    "reflog", "rev-parse", "cat-file", "ls-files",
-    "ls-remote", "fetch", "config", "format-patch",
-    "cherry", "cherry-pick", // cherry-pick can be mutating but we list what CC does
+    "status",
+    "log",
+    "diff",
+    "show",
+    "blame",
+    "branch",
+    "stash",
+    "remote",
+    "tag",
+    "describe",
+    "shortlog",
+    "reflog",
+    "rev-parse",
+    "cat-file",
+    "ls-files",
+    "ls-remote",
+    "fetch",
+    "config",
+    "format-patch",
+    "cherry",
+    "cherry-pick", // cherry-pick can be mutating but we list what CC does
 ];
 
 /// Returns true if the command is safe to run without Shell-level permission.
@@ -60,9 +125,12 @@ pub fn is_read_only_command(command: &str) -> bool {
 
     // Reject if it contains output redirection or assignment operators
     // (these could write to files or mutate state)
-    if cmd.contains(" > ") || cmd.starts_with("> ")
-        || cmd.contains(" >> ") || cmd.starts_with(">> ")
-        || cmd.contains(";") // chaining may include mutating commands
+    if cmd.contains(" > ")
+        || cmd.starts_with("> ")
+        || cmd.contains(" >> ")
+        || cmd.starts_with(">> ")
+        || cmd.contains(";")
+    // chaining may include mutating commands
     {
         return false;
     }
@@ -177,7 +245,7 @@ const BLOCKED_PATTERNS: &[&str] = &[
     "rm -rf /",
     "sudo rm -rf /",
     "mkfs",
-    ":(){:|:&};:",          // fork bomb
+    ":(){:|:&};:",              // fork bomb
     "dd if=/dev/zero of=/dev/", // disk wipe
     "chmod -R 777 /",
     "chown -R root /",
@@ -215,7 +283,9 @@ impl Default for BashTool {
 
 #[async_trait]
 impl Tool for BashTool {
-    fn name(&self) -> &str { "bash" }
+    fn name(&self) -> &str {
+        "bash"
+    }
 
     fn description(&self) -> &str {
         "Execute a bash/shell command. Returns combined stdout and stderr. \
@@ -245,7 +315,9 @@ impl Tool for BashTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Shell }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Shell
+    }
 
     fn effective_permission_level(&self, input: &serde_json::Value) -> PermissionLevel {
         if let Some(cmd) = input["command"].as_str() {
@@ -278,7 +350,11 @@ impl Tool for BashTool {
             .as_str()
             .map(|p| {
                 let path = Path::new(p);
-                if path.is_absolute() { path.to_path_buf() } else { ctx.working_dir.join(path) }
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    ctx.working_dir.join(path)
+                }
             })
             .unwrap_or_else(|| ctx.working_dir.clone());
 
@@ -291,50 +367,47 @@ impl Tool for BashTool {
 
         let max_output_bytes = self.max_output_bytes;
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout),
-            async {
-                let mut child = Command::new(shell)
-                    .arg(flag)
-                    .arg(command)
-                    .current_dir(&work_dir)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to spawn process: {e}"))?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+            let mut child = Command::new(shell)
+                .arg(flag)
+                .arg(command)
+                .current_dir(&work_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn process: {e}"))?;
 
-                let mut stdout_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
-                let mut stderr_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
+            let mut stdout_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
+            let mut stderr_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
 
-                // Read stdout and stderr
-                let mut stdout_buf = Vec::new();
-                let mut stderr_buf = Vec::new();
+            // Read stdout and stderr
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
-                if let Some(mut out) = child.stdout.take() {
-                    out.read_to_end(&mut stdout_buf)
-                        .await
-                        .map_err(|e| format!("Failed to read stdout: {e}"))?;
-                    stdout_acc.push(&stdout_buf);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    err.read_to_end(&mut stderr_buf)
-                        .await
-                        .map_err(|e| format!("Failed to read stderr: {e}"))?;
-                    stderr_acc.push(&stderr_buf);
-                }
-
-                let status = child
-                    .wait()
+            if let Some(mut out) = child.stdout.take() {
+                out.read_to_end(&mut stdout_buf)
                     .await
-                    .map_err(|e| format!("Failed to wait for process: {e}"))?;
+                    .map_err(|e| format!("Failed to read stdout: {e}"))?;
+                stdout_acc.push(&stdout_buf);
+            }
+            if let Some(mut err) = child.stderr.take() {
+                err.read_to_end(&mut stderr_buf)
+                    .await
+                    .map_err(|e| format!("Failed to read stderr: {e}"))?;
+                stderr_acc.push(&stderr_buf);
+            }
 
-                Ok::<(String, String, i32), String>((
-                    stdout_acc.finish(),
-                    stderr_acc.finish(),
-                    status.code().unwrap_or(-1),
-                ))
-            },
-        )
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| format!("Failed to wait for process: {e}"))?;
+
+            Ok::<(String, String, i32), String>((
+                stdout_acc.finish(),
+                stderr_acc.finish(),
+                status.code().unwrap_or(-1),
+            ))
+        })
         .await;
 
         match result {
@@ -393,8 +466,10 @@ mod tests {
             home_dir: dirs::home_dir().unwrap_or_default(),
             session_id: "test".to_string(),
             trust_mode: true,
-        permission_mode: crate::types::PermissionMode::Default,
-        file_cache: None,
+            permission_mode: crate::types::PermissionMode::Default,
+            file_cache: None,
+            active_skill_scope: None,
+                skill_registry: None,
         }
     }
 

@@ -33,7 +33,8 @@ pub fn validate_input(schema: &Value, input: &Value) -> Result<(), String> {
     if let Err(errors) = compiled.validate(input) {
         let mut lines = Vec::new();
         for (i, err) in errors.enumerate() {
-            if i >= 5 { // cap at first 5 errors to keep the prompt tight
+            if i >= 5 {
+                // cap at first 5 errors to keep the prompt tight
                 lines.push("  (…further errors omitted)".to_string());
                 break;
             }

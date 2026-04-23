@@ -251,17 +251,14 @@ impl Provider for AnthropicProvider {
                 match event_type.as_str() {
                     "message_start" => {
                         if let Some(u) = parsed.get("message").and_then(|m| m.get("usage")) {
-                            usage.input_tokens =
-                                u["input_tokens"].as_u64().unwrap_or(0) as u32;
+                            usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as u32;
                         }
                     }
                     "content_block_start" => {
                         if let Some(cb) = parsed.get("content_block") {
                             if cb["type"] == "tool_use" {
-                                current_tool_id =
-                                    cb["id"].as_str().unwrap_or("").to_string();
-                                current_tool_name =
-                                    cb["name"].as_str().unwrap_or("").to_string();
+                                current_tool_id = cb["id"].as_str().unwrap_or("").to_string();
+                                current_tool_name = cb["name"].as_str().unwrap_or("").to_string();
                                 current_tool_input.clear();
                                 let _ = tx.send(StreamEvent::ToolCallStart {
                                     id: current_tool_id.clone(),
@@ -278,9 +275,7 @@ impl Provider for AnthropicProvider {
                                     let _ = tx.send(StreamEvent::Token(text.to_string()));
                                 }
                             } else if delta["type"] == "input_json_delta" {
-                                if let Some(json_delta) =
-                                    delta["partial_json"].as_str()
-                                {
+                                if let Some(json_delta) = delta["partial_json"].as_str() {
                                     current_tool_input.push_str(json_delta);
                                     let _ = tx.send(StreamEvent::ToolCallDelta {
                                         id: current_tool_id.clone(),
@@ -293,8 +288,7 @@ impl Provider for AnthropicProvider {
                     "content_block_stop" => {
                         if !current_tool_name.is_empty() {
                             let input: Value =
-                                serde_json::from_str(&current_tool_input)
-                                    .unwrap_or(json!({}));
+                                serde_json::from_str(&current_tool_input).unwrap_or(json!({}));
                             tool_calls.push(ToolCall {
                                 id: current_tool_id.clone(),
                                 name: current_tool_name.clone(),
@@ -321,8 +315,7 @@ impl Provider for AnthropicProvider {
                             }
                         }
                         if let Some(u) = parsed.get("usage") {
-                            usage.output_tokens =
-                                u["output_tokens"].as_u64().unwrap_or(0) as u32;
+                            usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as u32;
                         }
                     }
                     "message_stop" => {

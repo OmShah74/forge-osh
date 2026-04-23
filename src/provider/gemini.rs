@@ -245,10 +245,8 @@ impl Provider for GeminiProvider {
                 }
 
                 if let Some(um) = parsed.get("usageMetadata") {
-                    usage.input_tokens =
-                        um["promptTokenCount"].as_u64().unwrap_or(0) as u32;
-                    usage.output_tokens =
-                        um["candidatesTokenCount"].as_u64().unwrap_or(0) as u32;
+                    usage.input_tokens = um["promptTokenCount"].as_u64().unwrap_or(0) as u32;
+                    usage.output_tokens = um["candidatesTokenCount"].as_u64().unwrap_or(0) as u32;
                 }
             }
         }

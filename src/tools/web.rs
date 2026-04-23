@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 // ─── web_fetch ────────────────────────────────────────────────────────────
 
@@ -10,8 +10,12 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    fn name(&self) -> &str { "web_fetch" }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Fetch a URL and return its content as plain text. HTML is converted to readable text."
@@ -28,7 +32,9 @@ impl Tool for WebFetchTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Network
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let url = match input["url"].as_str() {
@@ -100,7 +106,9 @@ pub struct WebSearchTool;
 
 #[async_trait]
 impl Tool for WebSearchTool {
-    fn name(&self) -> &str { "web_search" }
+    fn name(&self) -> &str {
+        "web_search"
+    }
 
     fn description(&self) -> &str {
         "Search the web using DuckDuckGo. Returns titles, URLs, and snippets."
@@ -117,7 +125,9 @@ impl Tool for WebSearchTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Network }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Network
+    }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
         let query = match input["query"].as_str() {

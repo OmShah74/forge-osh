@@ -9,8 +9,8 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::types::*;
 use super::Tool;
+use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // Dangerous PowerShell command patterns
@@ -23,7 +23,7 @@ const BLOCKED_PS_PATTERNS: &[&str] = &[
     "Clear-Disk",
     "Remove-Partition",
     "Set-ExecutionPolicy Unrestricted",
-    "Invoke-Expression",  // Too broad; flag but let permission system handle
+    "Invoke-Expression", // Too broad; flag but let permission system handle
 ];
 
 fn is_blocked_ps(command: &str) -> Option<&'static str> {
@@ -38,13 +38,34 @@ fn is_blocked_ps(command: &str) -> Option<&'static str> {
 
 /// PowerShell read-only cmdlets and commands
 const PS_READ_ONLY_CMDLETS: &[&str] = &[
-    "get-", "select-", "where-", "format-", "measure-",
-    "test-path", "test-connection", "resolve-path",
-    "get-help", "get-command", "get-module",
-    "get-childitem", "get-content", "get-item", "get-itemproperty",
-    "get-process", "get-service", "get-eventlog",
-    "get-date", "get-location", "get-variable",
-    "get-env", "dir", "ls", "cat", "echo", "write-host", "write-output",
+    "get-",
+    "select-",
+    "where-",
+    "format-",
+    "measure-",
+    "test-path",
+    "test-connection",
+    "resolve-path",
+    "get-help",
+    "get-command",
+    "get-module",
+    "get-childitem",
+    "get-content",
+    "get-item",
+    "get-itemproperty",
+    "get-process",
+    "get-service",
+    "get-eventlog",
+    "get-date",
+    "get-location",
+    "get-variable",
+    "get-env",
+    "dir",
+    "ls",
+    "cat",
+    "echo",
+    "write-host",
+    "write-output",
 ];
 
 pub fn is_read_only_ps_command(command: &str) -> bool {
@@ -53,7 +74,9 @@ pub fn is_read_only_ps_command(command: &str) -> bool {
     if lower.contains(" > ") || lower.contains(" >> ") || lower.contains(" | out-file") {
         return false;
     }
-    PS_READ_ONLY_CMDLETS.iter().any(|prefix| lower.starts_with(prefix))
+    PS_READ_ONLY_CMDLETS
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +101,9 @@ impl Default for PowerShellTool {
 
 #[async_trait]
 impl Tool for PowerShellTool {
-    fn name(&self) -> &str { "powershell" }
+    fn name(&self) -> &str {
+        "powershell"
+    }
 
     fn description(&self) -> &str {
         "Execute a PowerShell command (Windows). Returns combined stdout and stderr. \
@@ -104,7 +129,9 @@ impl Tool for PowerShellTool {
         })
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Shell }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Shell
+    }
 
     fn effective_permission_level(&self, input: &Value) -> PermissionLevel {
         if let Some(cmd) = input["command"].as_str() {
@@ -145,7 +172,7 @@ impl Tool for PowerShellTool {
                     "PowerShell is not available on this platform. \
                     Install PowerShell Core (pwsh) to use this tool, \
                     or use the 'bash' tool instead."
-                    .to_string(),
+                        .to_string(),
                 );
             }
         }
@@ -160,70 +187,71 @@ impl Tool for PowerShellTool {
         );
 
         #[cfg(not(target_os = "windows"))]
-        let (ps_prog, ps_args_prefix): (&str, Vec<&str>) = (
-            "pwsh",
-            vec!["-NoProfile", "-NonInteractive", "-Command"],
-        );
+        let (ps_prog, ps_args_prefix): (&str, Vec<&str>) =
+            ("pwsh", vec!["-NoProfile", "-NonInteractive", "-Command"]);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout),
-            async {
-                let work_dir_path = Path::new(&work_dir);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+            let work_dir_path = Path::new(&work_dir);
 
-                let mut cmd = Command::new(ps_prog);
-                cmd.args(&ps_args_prefix)
-                    .arg(command)
-                    .current_dir(work_dir_path)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
+            let mut cmd = Command::new(ps_prog);
+            cmd.args(&ps_args_prefix)
+                .arg(command)
+                .current_dir(work_dir_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
-                let mut child = cmd.spawn()
-                    .map_err(|e| format!("Failed to spawn PowerShell: {e}"))?;
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("Failed to spawn PowerShell: {e}"))?;
 
-                let mut stdout_buf = Vec::new();
-                let mut stderr_buf = Vec::new();
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
-                if let Some(mut out) = child.stdout.take() {
-                    out.read_to_end(&mut stdout_buf)
-                        .await
-                        .map_err(|e| format!("Failed to read stdout: {e}"))?;
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    err.read_to_end(&mut stderr_buf)
-                        .await
-                        .map_err(|e| format!("Failed to read stderr: {e}"))?;
-                }
-
-                let status = child
-                    .wait()
+            if let Some(mut out) = child.stdout.take() {
+                out.read_to_end(&mut stdout_buf)
                     .await
-                    .map_err(|e| format!("Failed to wait for process: {e}"))?;
+                    .map_err(|e| format!("Failed to read stdout: {e}"))?;
+            }
+            if let Some(mut err) = child.stderr.take() {
+                err.read_to_end(&mut stderr_buf)
+                    .await
+                    .map_err(|e| format!("Failed to read stderr: {e}"))?;
+            }
 
-                // Truncate if too long (keep tail)
-                let trim_tail = |buf: Vec<u8>| -> String {
-                    if buf.len() > max_output_bytes / 2 {
-                        let start = buf.len() - max_output_bytes / 2;
-                        let s = String::from_utf8_lossy(&buf[start..]).to_string();
-                        format!("[...truncated...]\n{s}")
-                    } else {
-                        String::from_utf8_lossy(&buf).to_string()
-                    }
-                };
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| format!("Failed to wait for process: {e}"))?;
 
-                let stdout = trim_tail(stdout_buf);
-                let stderr = trim_tail(stderr_buf);
-                let exit_code = status.code().unwrap_or(-1);
+            // Truncate if too long (keep tail)
+            let trim_tail = |buf: Vec<u8>| -> String {
+                if buf.len() > max_output_bytes / 2 {
+                    let start = buf.len() - max_output_bytes / 2;
+                    let s = String::from_utf8_lossy(&buf[start..]).to_string();
+                    format!("[...truncated...]\n{s}")
+                } else {
+                    String::from_utf8_lossy(&buf).to_string()
+                }
+            };
 
-                Ok::<(String, String, i32), String>((stdout, stderr, exit_code))
-            },
-        ).await;
+            let stdout = trim_tail(stdout_buf);
+            let stderr = trim_tail(stderr_buf);
+            let exit_code = status.code().unwrap_or(-1);
+
+            Ok::<(String, String, i32), String>((stdout, stderr, exit_code))
+        })
+        .await;
 
         match result {
             Ok(Ok((stdout, stderr, exit_code))) => {
                 let mut combined = String::new();
-                if !stdout.is_empty() { combined.push_str(&stdout); }
+                if !stdout.is_empty() {
+                    combined.push_str(&stdout);
+                }
                 if !stderr.is_empty() {
-                    if !combined.is_empty() { combined.push('\n'); }
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
                     combined.push_str("[stderr]\n");
                     combined.push_str(&stderr);
                 }

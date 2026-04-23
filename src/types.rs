@@ -87,7 +87,9 @@ pub enum ThinkingConfig {
 }
 
 impl Default for ThinkingConfig {
-    fn default() -> Self { ThinkingConfig::Disabled }
+    fn default() -> Self {
+        ThinkingConfig::Disabled
+    }
 }
 
 impl ThinkingConfig {
@@ -169,17 +171,9 @@ pub enum CompletionReason {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Token(String),
-    ToolCallStart {
-        id: String,
-        name: String,
-    },
-    ToolCallDelta {
-        id: String,
-        arguments_delta: String,
-    },
-    ToolCallEnd {
-        id: String,
-    },
+    ToolCallStart { id: String, name: String },
+    ToolCallDelta { id: String, arguments_delta: String },
+    ToolCallEnd { id: String },
     Usage(Usage),
     Done(CompletionReason),
     Error(String),
@@ -249,7 +243,9 @@ pub enum PermissionMode {
 }
 
 impl Default for PermissionMode {
-    fn default() -> Self { PermissionMode::Default }
+    fn default() -> Self {
+        PermissionMode::Default
+    }
 }
 
 impl PermissionMode {
@@ -266,7 +262,9 @@ impl PermissionMode {
         match s.trim().to_lowercase().as_str() {
             "default" | "normal" => Some(PermissionMode::Default),
             "plan" => Some(PermissionMode::Plan),
-            "accept-edits" | "accept_edits" | "acceptedits" | "accept" => Some(PermissionMode::AcceptEdits),
+            "accept-edits" | "accept_edits" | "acceptedits" | "accept" => {
+                Some(PermissionMode::AcceptEdits)
+            }
             "bypass" | "trust" | "yolo" => Some(PermissionMode::Bypass),
             _ => None,
         }
@@ -294,6 +292,13 @@ pub struct ToolContext {
     /// than panicking.
     #[doc(hidden)]
     pub file_cache: Option<std::sync::Arc<crate::session::FileStateCache>>,
+    /// Skill-scoped constraints and overrides currently active for this turn chain.
+    #[doc(hidden)]
+    pub active_skill_scope: Option<crate::skills::ActiveSkillScope>,
+    /// Shared skill registry. Absent in minimal test contexts — tools that
+    /// need skill lookup must fall back to loading from disk.
+    #[doc(hidden)]
+    pub skill_registry: Option<crate::skills::SharedSkillRegistry>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -305,6 +310,13 @@ impl std::fmt::Debug for ToolContext {
             .field("trust_mode", &self.trust_mode)
             .field("permission_mode", &self.permission_mode)
             .field("file_cache", &self.file_cache.as_ref().map(|c| c.len()))
+            .field(
+                "active_skill_scope",
+                &self
+                    .active_skill_scope
+                    .as_ref()
+                    .map(|s| s.skill_name.as_str()),
+            )
             .finish()
     }
 }
@@ -318,6 +330,8 @@ impl ToolContext {
             trust_mode: mode == PermissionMode::Bypass,
             permission_mode: mode,
             file_cache: None,
+            active_skill_scope: None,
+            skill_registry: None,
         }
     }
 }

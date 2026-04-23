@@ -47,8 +47,7 @@ pub fn sessions_dir() -> PathBuf {
 // Config structs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -61,7 +60,6 @@ pub struct Config {
     #[serde(default)]
     pub ui: UiConfig,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
@@ -201,6 +199,12 @@ pub struct AgentConfig {
     pub auto_summarize_at: f32,
     #[serde(default = "default_max_output")]
     pub max_output_per_tool: usize,
+    #[serde(default = "default_true")]
+    pub skills_enabled: bool,
+    #[serde(default = "default_true")]
+    pub include_skills_in_system_prompt: bool,
+    #[serde(default = "default_max_skill_listed_in_prompt")]
+    pub max_skill_listed_in_prompt: usize,
 }
 
 impl Default for AgentConfig {
@@ -212,6 +216,9 @@ impl Default for AgentConfig {
             planning_mode: true,
             auto_summarize_at: default_summarize_at(),
             max_output_per_tool: default_max_output(),
+            skills_enabled: true,
+            include_skills_in_system_prompt: true,
+            max_skill_listed_in_prompt: default_max_skill_listed_in_prompt(),
         }
     }
 }
@@ -354,6 +361,9 @@ fn default_summarize_at() -> f32 {
 fn default_max_output() -> usize {
     50000
 }
+fn default_max_skill_listed_in_prompt() -> usize {
+    12
+}
 fn default_bash_timeout() -> u64 {
     30
 }
@@ -457,10 +467,16 @@ impl Config {
         if let Ok(theme) = std::env::var("FORGE_THEME") {
             self.general.theme = theme;
         }
-        if std::env::var("FORGE_TRUST").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("FORGE_TRUST")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             self.general.trust_mode = true;
         }
-        if std::env::var("FORGE_NO_COLOR").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("FORGE_NO_COLOR")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             self.general.theme = "plain".to_string();
         }
     }
@@ -494,10 +510,14 @@ impl Config {
 
     /// Initialize with sane defaults for each provider's base URL and default model
     pub fn with_provider_defaults(mut self) -> Self {
-        self.providers.anthropic.base_url =
-            non_empty_or(&self.providers.anthropic.base_url, "https://api.anthropic.com/v1");
-        self.providers.anthropic.default_model =
-            non_empty_or(&self.providers.anthropic.default_model, "claude-sonnet-4-20250514");
+        self.providers.anthropic.base_url = non_empty_or(
+            &self.providers.anthropic.base_url,
+            "https://api.anthropic.com/v1",
+        );
+        self.providers.anthropic.default_model = non_empty_or(
+            &self.providers.anthropic.default_model,
+            "claude-sonnet-4-20250514",
+        );
 
         self.providers.openai.base_url =
             non_empty_or(&self.providers.openai.base_url, "https://api.openai.com/v1");
@@ -511,35 +531,49 @@ impl Config {
         self.providers.gemini.default_model =
             non_empty_or(&self.providers.gemini.default_model, "gemini-2.0-flash");
 
-        self.providers.groq.base_url =
-            non_empty_or(&self.providers.groq.base_url, "https://api.groq.com/openai/v1");
-        self.providers.groq.default_model =
-            non_empty_or(&self.providers.groq.default_model, "llama-3.3-70b-versatile");
+        self.providers.groq.base_url = non_empty_or(
+            &self.providers.groq.base_url,
+            "https://api.groq.com/openai/v1",
+        );
+        self.providers.groq.default_model = non_empty_or(
+            &self.providers.groq.default_model,
+            "llama-3.3-70b-versatile",
+        );
 
         self.providers.grok.base_url =
             non_empty_or(&self.providers.grok.base_url, "https://api.x.ai/v1");
         self.providers.grok.default_model =
             non_empty_or(&self.providers.grok.default_model, "grok-3");
 
-        self.providers.openrouter.base_url =
-            non_empty_or(&self.providers.openrouter.base_url, "https://openrouter.ai/api/v1");
+        self.providers.openrouter.base_url = non_empty_or(
+            &self.providers.openrouter.base_url,
+            "https://openrouter.ai/api/v1",
+        );
         self.providers.openrouter.default_model = non_empty_or(
             &self.providers.openrouter.default_model,
             "anthropic/claude-sonnet-4-20250514",
         );
 
-        self.providers.mistral.base_url =
-            non_empty_or(&self.providers.mistral.base_url, "https://api.mistral.ai/v1");
-        self.providers.mistral.default_model =
-            non_empty_or(&self.providers.mistral.default_model, "mistral-large-latest");
+        self.providers.mistral.base_url = non_empty_or(
+            &self.providers.mistral.base_url,
+            "https://api.mistral.ai/v1",
+        );
+        self.providers.mistral.default_model = non_empty_or(
+            &self.providers.mistral.default_model,
+            "mistral-large-latest",
+        );
 
-        self.providers.deepseek.base_url =
-            non_empty_or(&self.providers.deepseek.base_url, "https://api.deepseek.com/v1");
+        self.providers.deepseek.base_url = non_empty_or(
+            &self.providers.deepseek.base_url,
+            "https://api.deepseek.com/v1",
+        );
         self.providers.deepseek.default_model =
             non_empty_or(&self.providers.deepseek.default_model, "deepseek-chat");
 
-        self.providers.together.base_url =
-            non_empty_or(&self.providers.together.base_url, "https://api.together.xyz/v1");
+        self.providers.together.base_url = non_empty_or(
+            &self.providers.together.base_url,
+            "https://api.together.xyz/v1",
+        );
         self.providers.together.default_model = non_empty_or(
             &self.providers.together.default_model,
             "meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -554,8 +588,10 @@ impl Config {
             "accounts/fireworks/models/llama-v3p3-70b-instruct",
         );
 
-        self.providers.perplexity.base_url =
-            non_empty_or(&self.providers.perplexity.base_url, "https://api.perplexity.ai");
+        self.providers.perplexity.base_url = non_empty_or(
+            &self.providers.perplexity.base_url,
+            "https://api.perplexity.ai",
+        );
         self.providers.perplexity.default_model =
             non_empty_or(&self.providers.perplexity.default_model, "sonar-pro");
 

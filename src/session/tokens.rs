@@ -17,14 +17,15 @@ impl TokenCounter {
         use std::sync::OnceLock;
         static ENCODER: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
         ENCODER.get_or_init(|| {
-            tiktoken_rs::cl100k_base()
-                .expect("cl100k_base tokenizer is baked into the binary")
+            tiktoken_rs::cl100k_base().expect("cl100k_base tokenizer is baked into the binary")
         })
     }
 
     /// Count tokens in an arbitrary text string.
     pub fn count_text(text: &str) -> u32 {
-        if text.is_empty() { return 0; }
+        if text.is_empty() {
+            return 0;
+        }
         let enc = Self::encoder();
         enc.encode_with_special_tokens(text).len() as u32
     }
@@ -203,8 +204,10 @@ mod tests {
         // better estimator.
         let code = "def foo(x, y): return x + y";
         let precise = TokenCounter::count_text(code);
-        assert!(precise >= 8 && precise <= 14,
-            "tiktoken count should be in the realistic range, got {precise}");
+        assert!(
+            precise >= 8 && precise <= 14,
+            "tiktoken count should be in the realistic range, got {precise}"
+        );
     }
 
     #[test]

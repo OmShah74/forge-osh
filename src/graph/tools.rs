@@ -22,7 +22,9 @@ impl GraphQueryTool {
 
 #[async_trait]
 impl Tool for GraphQueryTool {
-    fn name(&self) -> &str { "graph_query" }
+    fn name(&self) -> &str {
+        "graph_query"
+    }
 
     fn description(&self) -> &str {
         "Query the semantic code graph built by /forge-graph. Provides deterministic, \
@@ -71,11 +73,11 @@ impl Tool for GraphQueryTool {
             return ToolOutput::success(
                 "No forge-graph loaded for this project.\n\
                 Run `/forge-graph` in the TUI to build the semantic code graph.\n\
-                Once built, this tool provides O(1) lookups for any symbol without reading files."
+                Once built, this tool provides O(1) lookups for any symbol without reading files.",
             );
         };
 
-        let q  = GraphQuery::new(cg);
+        let q = GraphQuery::new(cg);
         let op = input["operation"].as_str().unwrap_or("stats");
 
         match op {
