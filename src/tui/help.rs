@@ -3,7 +3,7 @@ pub fn help_text() -> &'static str {
     r#"forge-osh Help  (v1.0.5)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
-  /help              Show this help screen
+  /help              Show this help screen (scroll: ↑↓/jk, PgUp/PgDn, g/G)
   /clear             Clear the conversation display
   /cost              Show token usage and cost
   /model             Open model selector
@@ -21,11 +21,14 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /save              Save session to disk
   /session           Show session info
   /sessions          Open session browser (load / delete past sessions)
+  /rename [name]     Rename the active session (opens modal if no arg)
   /init              Generate CLAUDE.md project instructions file
   /find <pattern>    Search files (gitignore-aware glob, e.g. /find *.rs)
   /config [key val]  View or set config (theme/trust/vim). E.g. /config theme dark
   /stats             Show detailed session statistics (tokens, tools, context %)
-  /skills                   List all available skills (grouped by source)
+  /skills                   Open the Skills browser modal (list / invoke / edit / new / delete)
+                              keys inside:  ↑↓/jk nav · Enter invoke · s show · e edit
+                                            n new · d delete · r reload · o off · Esc close
   /skill <name> [args]      Invoke a skill. Inline skills narrow tool access;
                             fork skills run in an isolated worker.
   /skill show <name>        Display a skill's full SKILL.md body
