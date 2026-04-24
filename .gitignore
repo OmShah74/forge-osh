@@ -10,7 +10,7 @@ Thumbs.db
 tempp/
 .claude/
 todo.txt
-tests/
+
 
 # forge-osh user data — safety net in case a .forge-osh/ directory is
 # accidentally created inside the repo root (e.g. if FORGE_CONFIG_DIR is
