@@ -10,7 +10,10 @@ use ratatui::{
 };
 
 use super::themes::Theme;
-use super::{AppState, KeyManagerState, MessageRole, Modal, SessionBrowserState, OSH_SPLASH_LINES};
+use super::{
+    AppState, DetailViewerState, HelpState, KeyManagerState, MessageRole, Modal,
+    SessionBrowserState, SkillBrowserState, OSH_SPLASH_LINES,
+};
 
 /// Render the entire TUI
 pub fn render(frame: &mut Frame, state: &mut AppState) {
@@ -58,8 +61,17 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             } => {
                 render_confirmation(frame, tool_name, description, &theme);
             }
-            Modal::Help => {
-                render_help(frame, &theme);
+            Modal::Help(h) => {
+                render_help(frame, &theme, h);
+            }
+            Modal::DetailViewer(dv) => {
+                render_detail_viewer(frame, dv, &theme);
+            }
+            Modal::RenameSession { input_buffer } => {
+                render_rename_session(frame, input_buffer, &theme);
+            }
+            Modal::SkillBrowser(browser) => {
+                render_skill_browser(frame, browser, &theme);
             }
             Modal::Picker(picker) => {
                 render_picker(frame, picker, &theme);
@@ -255,16 +267,21 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 )]));
 
-                let content_lines: Vec<&str> = msg.content.lines().collect();
-
-                // Detect diff content: any line starts with + or - (but not +++ or ---)
-                let is_diff = content_lines.iter().any(|l| {
+                // Performance: only inspect the first max_lines+1 lines. For
+                // huge tool outputs (e.g. 10k-line file reads) the previous
+                // `.lines().collect::<Vec<_>>()` + full is_diff scan dominated
+                // every frame, making scroll feel frozen. We cap both work
+                // items at `max_lines` instead.
+                let max_lines: usize = 50;
+                let preview: Vec<&str> = msg.content.split('\n').take(max_lines + 1).collect();
+                let is_diff = preview.iter().take(max_lines).any(|l| {
                     (l.starts_with('+') && !l.starts_with("+++"))
                         || (l.starts_with('-') && !l.starts_with("---"))
                 });
+                // Cheap O(1) count of total newlines for the "hidden lines" footer.
+                let total_line_count = msg.content.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
 
-                let max_lines = 50;
-                for text_line in content_lines.iter().take(max_lines) {
+                for text_line in preview.iter().take(max_lines) {
                     if is_diff {
                         if text_line.starts_with('+') && !text_line.starts_with("+++") {
                             // Addition — bright green text on dark green background
@@ -300,11 +317,11 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                         )));
                     }
                 }
-                if content_lines.len() > max_lines {
+                if total_line_count > max_lines {
                     lines.push(Line::from(Span::styled(
                         format!(
                             "    … ({} more lines hidden)",
-                            content_lines.len() - max_lines
+                            total_line_count - max_lines
                         ),
                         Style::default()
                             .fg(theme.muted_fg)
@@ -898,21 +915,194 @@ fn render_confirmation(frame: &mut Frame, tool_name: &str, description: &str, th
     frame.render_widget(dialog, area);
 }
 
-fn render_help(frame: &mut Frame, theme: &Theme) {
+fn render_help(frame: &mut Frame, theme: &Theme, h: &HelpState) {
     let area = centered_rect(82, 85, frame.area());
     frame.render_widget(Clear, area);
 
-    let help = Paragraph::new(super::help::help_text())
+    // Clamp scroll to the visible body height so scrolling past the end just
+    // pins the bottom of the text in view.
+    let body_text = super::help::help_text();
+    let total_lines = body_text.lines().count() as u16;
+    let inner_h = area.height.saturating_sub(2); // borders
+    let max_scroll = total_lines.saturating_sub(inner_h);
+    let scroll = h.scroll.min(max_scroll);
+
+    let help = Paragraph::new(body_text)
         .style(Style::default().fg(theme.fg))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border_fg))
-                .title(" Help  (Esc or q to close) "),
+                .title(" Help  ↑↓/jk scroll · PgUp/PgDn page · g/G top/bottom · Esc close "),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
 
     frame.render_widget(help, area);
+
+    // Scrollbar column on the right edge.
+    if max_scroll > 0 {
+        let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+        frame.render_stateful_widget(sb, area, &mut sb_state);
+    }
+}
+
+fn render_detail_viewer(frame: &mut Frame, dv: &DetailViewerState, theme: &Theme) {
+    let area = centered_rect(82, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let total_lines = dv.body.lines().count() as u16;
+    let inner_h = area.height.saturating_sub(2);
+    let max_scroll = total_lines.saturating_sub(inner_h);
+    let scroll = dv.scroll.min(max_scroll);
+
+    let title = format!("{} (↑↓/jk scroll · Esc close)", dv.title);
+    let p = Paragraph::new(dv.body.as_str())
+        .style(Style::default().fg(theme.fg))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border_fg))
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(p, area);
+
+    if max_scroll > 0 {
+        let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+        frame.render_stateful_widget(sb, area, &mut sb_state);
+    }
+}
+
+fn render_rename_session(frame: &mut Frame, input: &str, theme: &Theme) {
+    use ratatui::layout::Rect;
+    let area_outer = centered_rect(60, 20, frame.area());
+    // Small box — clamp height.
+    let area = Rect {
+        height: area_outer.height.min(7),
+        ..area_outer
+    };
+    frame.render_widget(Clear, area);
+
+    let body = format!(
+        "Enter a new name for this session, then press Enter.\n\n  › {}_",
+        input
+    );
+    let p = Paragraph::new(body)
+        .style(Style::default().fg(theme.fg))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.spinner_fg))
+                .title(" Rename session  (Esc to cancel) "),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(p, area);
+}
+
+fn render_skill_browser(frame: &mut Frame, browser: &SkillBrowserState, theme: &Theme) {
+    use ratatui::layout::Rect;
+    let area = centered_rect(82, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let title = if browser.confirm_delete.is_some() {
+        " Skills  Press D again to confirm delete, any other key to cancel ".to_string()
+    } else if browser.name_input.is_some() {
+        " Skills  Enter name, Enter to create, Esc to cancel ".to_string()
+    } else {
+        " Skills  ↑↓/jk nav · Enter invoke · s show · e edit · n new · d delete · r reload · o off · Esc close ".to_string()
+    };
+
+    if browser.entries.is_empty() {
+        let text = "No skills found.\n\n\
+                    Press `n` to create a new project skill, or add one manually at:\n  \
+                    • ./.claude/skills/<name>/SKILL.md (project)\n  \
+                    • ~/.forge-osh/skills/<name>/SKILL.md (user)\n\n\
+                    Press Esc to close.";
+        let p = Paragraph::new(text)
+            .style(Style::default().fg(theme.muted_fg))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border_fg))
+                    .title(title),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(p, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = browser
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let is_deleting = browser.confirm_delete.as_deref() == Some(e.name.as_str());
+            let style = if i == browser.selected {
+                Style::default()
+                    .fg(theme.fg)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            let active_marker = if browser.active_skill.as_deref() == Some(e.name.as_str()) {
+                " ●"
+            } else {
+                "  "
+            };
+            let delete_mark = if is_deleting { "  ← DELETE?" } else { "" };
+            let text = format!(
+                " {active_marker} [{:<7}] {:<22}  {}{}",
+                e.source,
+                truncate(&e.name, 22),
+                truncate(&e.description, 60),
+                delete_mark,
+            );
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border_fg))
+            .title(title),
+    );
+
+    let mut list_state = ListState::default().with_selected(Some(browser.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
+
+    // Footer: help line + in-progress name input (if any)
+    let footer_area = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    let footer_text = if let Some((_intent, buf)) = &browser.name_input {
+        format!("  new skill name: {}_", buf)
+    } else if let Some(e) = browser.selected_entry() {
+        let when = e.when_to_use.as_deref().unwrap_or("");
+        if when.is_empty() {
+            format!("  mode: {}   tools: {}",
+                e.execution_mode,
+                if e.allowed_tools.is_empty() { "(unrestricted)".to_string() } else { e.allowed_tools.join(", ") })
+        } else {
+            format!("  ↳ {}", truncate(when, (area.width.saturating_sub(4)) as usize))
+        }
+    } else {
+        String::new()
+    };
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.muted_fg));
+    frame.render_widget(footer, footer_area);
 }
 
 fn render_picker(frame: &mut Frame, picker: &super::picker::PickerState, theme: &Theme) {

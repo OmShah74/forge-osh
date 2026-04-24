@@ -84,7 +84,7 @@ pub enum Modal {
         description: String,
         response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
     },
-    Help,
+    Help(HelpState),
     Picker(PickerState),
     TokenInfo,
     KeyManager(KeyManagerState),
@@ -95,6 +95,80 @@ pub enum Modal {
     },
     /// Session browser — list, load, delete past sessions
     SessionBrowser(SessionBrowserState),
+    /// Rename the current session
+    RenameSession {
+        input_buffer: String,
+    },
+    /// Skill browser — list/invoke/new/edit/delete skills
+    SkillBrowser(SkillBrowserState),
+    /// Scrollable detail viewer used for `/skill show` and similar long text.
+    DetailViewer(DetailViewerState),
+}
+
+#[derive(Debug, Default)]
+pub struct HelpState {
+    pub scroll: u16,
+}
+
+#[derive(Debug)]
+pub struct DetailViewerState {
+    pub title: String,
+    pub body: String,
+    pub scroll: u16,
+}
+
+impl DetailViewerState {
+    pub fn new(title: impl Into<String>, body: impl Into<String>) -> Self {
+        Self { title: title.into(), body: body.into(), scroll: 0 }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillBrowserEntry {
+    pub name: String,
+    pub description: String,
+    pub source: String,        // "bundled" | "user" | "project"
+    pub when_to_use: Option<String>,
+    pub execution_mode: String,
+    pub allowed_tools: Vec<String>,
+    pub canonical_path: Option<std::path::PathBuf>,
+    pub body: String,
+}
+
+#[derive(Debug)]
+pub struct SkillBrowserState {
+    pub entries: Vec<SkillBrowserEntry>,
+    pub selected: usize,
+    pub confirm_delete: Option<String>,
+    /// When `Some(name)`, user pressed `n`/`r` and we're capturing the new name.
+    pub name_input: Option<(SkillNameIntent, String)>,
+    pub active_skill: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillNameIntent {
+    New,
+}
+
+impl SkillBrowserState {
+    pub fn new(entries: Vec<SkillBrowserEntry>, active_skill: Option<String>) -> Self {
+        Self {
+            entries,
+            selected: 0,
+            confirm_delete: None,
+            name_input: None,
+            active_skill,
+        }
+    }
+    pub fn move_up(&mut self) {
+        if self.selected > 0 { self.selected -= 1; }
+    }
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.entries.len() { self.selected += 1; }
+    }
+    pub fn selected_entry(&self) -> Option<&SkillBrowserEntry> {
+        self.entries.get(self.selected)
+    }
 }
 
 /// State for the API key manager modal
@@ -248,6 +322,14 @@ pub struct AppState {
     pub skill_registry: Option<crate::skills::SharedSkillRegistry>,
     /// Currently-active skill name shown in the status bar (None = no scope).
     pub active_skill_label: Option<String>,
+    // ── Pending UI actions (consumed in main loop, set by modal handlers) ──
+    pub rename_session_pending: Option<String>,
+    pub skill_invoke_pending: Option<String>,
+    pub skill_edit_pending: Option<String>,
+    pub skill_new_pending: Option<String>,
+    pub skill_delete_pending: Option<String>,
+    pub skill_reload_pending: bool,
+    pub skill_off_pending: bool,
 }
 
 impl AppState {
@@ -297,6 +379,13 @@ impl AppState {
             file_cache: None,
             skill_registry: None,
             active_skill_label: None,
+            rename_session_pending: None,
+            skill_invoke_pending: None,
+            skill_edit_pending: None,
+            skill_new_pending: None,
+            skill_delete_pending: None,
+            skill_reload_pending: false,
+            skill_off_pending: false,
         }
     }
 
@@ -377,7 +466,7 @@ async fn handle_slash_command(
 
     match cmd {
         "/help" | "/?" => {
-            state.modal = Some(Modal::Help);
+            state.modal = Some(Modal::Help(HelpState::default()));
         }
 
         "/clear" | "/cls" => {
@@ -588,6 +677,24 @@ async fn handle_slash_command(
                 state.format_tokens,
                 state.format_cost,
             ));
+        }
+
+        "/rename" => {
+            if arg.trim().is_empty() {
+                // Open a small input modal seeded with the current session name.
+                let current = { session.lock().await.name.clone() };
+                state.modal = Some(Modal::RenameSession { input_buffer: current });
+            } else {
+                let new_name = arg.trim().to_string();
+                let mut sess = session.lock().await;
+                sess.name = new_name.clone();
+                if let Err(e) = sess.save() {
+                    state.push_system(format!("Renamed (in-memory) to '{new_name}', but save failed: {e}"));
+                } else {
+                    state.push_system(format!("Session renamed to '{new_name}'."));
+                }
+                state.session_name = new_name;
+            }
         }
 
         "/sessions" | "/history" => match crate::session::checkpoint::Checkpoint::list() {
@@ -1032,52 +1139,36 @@ async fn handle_slash_command(
                 crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
             }
             let registry = crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
-            if registry.skills.is_empty() {
-                state.push_system(format!(
-                    "No skills found.\n\
-                     Create a skill file at either:\n  \
-                       • Project:  {}\n  \
-                       • User:     {}\n\
-                     Then run `/skill new <name>` to scaffold one.",
-                    project_skills_dir_display(&working_dir),
-                    user_skills_dir_display(),
-                ));
-            } else {
-                let mut by_source: std::collections::BTreeMap<&str, Vec<_>> =
-                    std::collections::BTreeMap::new();
-                for s in &registry.skills {
-                    by_source.entry(s.source.label()).or_default().push(s);
-                }
-                let mut lines = vec![
-                    format!("Available skills ({}):", registry.skills.len()),
-                    String::new(),
-                ];
-                for (src, skills) in &by_source {
-                    lines.push(format!("[{}]", src));
-                    for s in skills {
-                        let active_marker = if state.active_skill_label.as_deref()
-                            == Some(s.name.as_str())
-                        {
-                            " ● ACTIVE"
-                        } else {
-                            ""
-                        };
-                        lines.push(format!(
-                            "  /skill {:<22}  {}{}",
-                            s.name, s.description, active_marker
-                        ));
-                        if let Some(when) = &s.when_to_use {
-                            lines.push(format!("  {:<23}  ↳ use when: {}", "", when));
-                        }
-                    }
-                    lines.push(String::new());
-                }
-                lines.push(
-                    "Subcommands: /skill <name> [args] | show | new | edit | delete | reload | path | off"
-                        .to_string(),
-                );
-                state.push_system(lines.join("\n"));
-            }
+            // Sort entries: bundled → user → project, then alphabetical.
+            let mut entries: Vec<SkillBrowserEntry> = registry
+                .skills
+                .iter()
+                .map(|s| SkillBrowserEntry {
+                    name: s.name.clone(),
+                    description: s.description.clone(),
+                    source: s.source.label().to_string(),
+                    when_to_use: s.when_to_use.clone(),
+                    execution_mode: s.execution_mode.as_str().to_string(),
+                    allowed_tools: s.allowed_tools.clone(),
+                    canonical_path: s.canonical_path.clone(),
+                    body: s.content.clone(),
+                })
+                .collect();
+            entries.sort_by(|a, b| {
+                let rank = |s: &str| match s {
+                    "bundled" => 0,
+                    "user" => 1,
+                    "project" => 2,
+                    _ => 3,
+                };
+                rank(&a.source)
+                    .cmp(&rank(&b.source))
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+            state.modal = Some(Modal::SkillBrowser(SkillBrowserState::new(
+                entries,
+                state.active_skill_label.clone(),
+            )));
         }
 
         "/skill" => {
@@ -1118,25 +1209,26 @@ async fn handle_slash_command(
                     match registry.find(&rest) {
                         None => state.push_system(format!("No skill named '{rest}'.")),
                         Some(s) => {
-                            let path_line = s
-                                .canonical_path
-                                .as_ref()
-                                .map(|p| format!("  path: {}\n", p.display()))
-                                .unwrap_or_default();
-                            state.push_system(format!(
-                                "[skill: {} | {}]\n  desc: {}\n{}  allowed_tools: {}\n  mode: {}\n\n--- body ---\n{}",
+                            let header = format!(
+                                "name: {}\nsource: {}\ndesc: {}\nmode: {}\nallowed_tools: {}\npath: {}\n\n---\n\n",
                                 s.name,
                                 s.source.label(),
                                 s.description,
-                                path_line,
+                                s.execution_mode.as_str(),
                                 if s.allowed_tools.is_empty() {
                                     "(unrestricted)".to_string()
                                 } else {
                                     s.allowed_tools.join(", ")
                                 },
-                                s.execution_mode.as_str(),
-                                s.content,
-                            ));
+                                s.canonical_path
+                                    .as_ref()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|| "(bundled)".to_string()),
+                            );
+                            state.modal = Some(Modal::DetailViewer(DetailViewerState::new(
+                                format!(" Skill: {} ", s.name),
+                                format!("{}{}", header, s.content),
+                            )));
                         }
                     }
                     return true;
@@ -2100,6 +2192,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/session",
         "/sessions",
         "/history",
+        "/rename",
         "/commit",
         "/diff",
         "/export",
@@ -3406,6 +3499,140 @@ pub async fn run_tui(
             }
         }
 
+        // ---- Process pending session rename ----
+        if let Some(new_name) = state.rename_session_pending.take() {
+            let mut sess = session.lock().await;
+            sess.name = new_name.clone();
+            let save_result = sess.save();
+            drop(sess);
+            match save_result {
+                Ok(_) => state.push_system(format!("Session renamed to '{new_name}'.")),
+                Err(e) => state.push_system(format!("Renamed (in-memory) to '{new_name}', but save failed: {e}")),
+            }
+            state.session_name = new_name;
+        }
+
+        // ---- Process pending skill actions (from SkillBrowser modal) ----
+        if state.skill_reload_pending {
+            state.skill_reload_pending = false;
+            let working_dir = { session.lock().await.working_dir.clone() };
+            if let Some(shared) = state.skill_registry.clone() {
+                crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+                let n = shared.read().skills.len();
+                state.push_system(format!("Skill registry reloaded: {n} skill(s)."));
+            }
+        }
+        if state.skill_off_pending {
+            state.skill_off_pending = false;
+            let had = {
+                let mut sess = session.lock().await;
+                let had = sess.active_skill_scope.is_some();
+                sess.active_skill_scope = None;
+                had
+            };
+            state.active_skill_label = None;
+            if had {
+                state.push_system("Active skill scope cleared.");
+            }
+        }
+        if let Some(name) = state.skill_delete_pending.take() {
+            let working_dir = { session.lock().await.working_dir.clone() };
+            match delete_project_skill(&working_dir, &name) {
+                Ok(path) => {
+                    if let Some(shared) = state.skill_registry.clone() {
+                        crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+                    }
+                    state.push_system(format!("Deleted {}.", path.display()));
+                }
+                Err(e) => state.push_system(format!("Delete failed: {e}")),
+            }
+        }
+        if let Some(raw_name) = state.skill_new_pending.take() {
+            let working_dir = { session.lock().await.working_dir.clone() };
+            match scaffold_project_skill(&working_dir, &raw_name) {
+                Ok(path) => {
+                    if let Some(shared) = state.skill_registry.clone() {
+                        crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+                    }
+                    open_in_editor(&path);
+                    state.push_system(format!(
+                        "Created skill at {}. Edit then reload with `/skills` → r.",
+                        path.display()
+                    ));
+                }
+                Err(e) => state.push_system(format!("Failed to create skill: {e}")),
+            }
+        }
+        if let Some(name) = state.skill_edit_pending.take() {
+            let working_dir = { session.lock().await.working_dir.clone() };
+            let registry = crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+            match registry.find(&name).and_then(|s| s.canonical_path.clone()) {
+                Some(path) => {
+                    open_in_editor(&path);
+                    state.push_system(format!(
+                        "Opened {} in $EDITOR. Reload with `/skills` → r.",
+                        path.display()
+                    ));
+                }
+                None => state.push_system(format!(
+                    "No editable file for '{name}'. Bundled skills must be overridden with a new project skill."
+                )),
+            }
+        }
+        if let Some(name) = state.skill_invoke_pending.take() {
+            if !config.agent.skills_enabled {
+                state.push_system("Skills are disabled in config.");
+            } else {
+                let (working_dir, session_id) = {
+                    let sess = session.lock().await;
+                    (sess.working_dir.clone(), sess.id.clone())
+                };
+                if let Some(shared) = state.skill_registry.clone() {
+                    crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+                }
+                let registry = crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+                match crate::skills::apply_skill(&registry, &name, None, &session_id) {
+                    Ok(applied) => {
+                        let skill_name = applied.skill_name.clone();
+                        {
+                            let mut sess = session.lock().await;
+                            if applied.mode == crate::skills::SkillExecutionMode::Inline {
+                                sess.active_skill_scope = Some(crate::skills::ActiveSkillScope {
+                                    skill_name: applied.skill_name.clone(),
+                                    allowed_tools: applied.allowed_tools.clone(),
+                                    model_override: applied.model_override.clone(),
+                                    hooks: applied.hooks.clone(),
+                                    execution_mode: applied.mode,
+                                });
+                            } else {
+                                sess.active_skill_scope = None;
+                            }
+                            sess.push_invoked_skill(crate::skills::SkillInvocationRecord {
+                                skill_name: applied.skill_name.clone(),
+                                source: applied.source,
+                                canonical_path: applied.canonical_path.clone(),
+                                materialized_prompt: applied.materialized_prompt.clone(),
+                                invoked_at: chrono::Utc::now(),
+                                worker_id: None,
+                            });
+                        }
+                        if applied.mode == crate::skills::SkillExecutionMode::Inline {
+                            state.active_skill_label = Some(skill_name.clone());
+                            state.push_system(format!(
+                                "Skill '{skill_name}' activated (inline). Follow with your request."
+                            ));
+                        } else {
+                            state.active_skill_label = None;
+                            state.push_system(format!(
+                                "Skill '{skill_name}' ran in fork mode."
+                            ));
+                        }
+                    }
+                    Err(e) => state.push_system(format!("Failed to invoke '{name}': {e}")),
+                }
+            }
+        }
+
         // ---- Process pending session delete ----
         if let Some(id) = state.session_delete_pending.take() {
             match crate::session::checkpoint::Checkpoint::delete(&id) {
@@ -3770,7 +3997,7 @@ pub async fn run_tui(
                                 state.push_system(format!("Theme: {next}"));
                             }
                             Action::ShowHelp => {
-                                state.modal = Some(Modal::Help);
+                                state.modal = Some(Modal::Help(HelpState::default()));
                             }
                             Action::ShowTokenInfo => {
                                 state.modal = Some(Modal::TokenInfo);
@@ -3996,11 +4223,211 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             }
         }
 
-        Some(Modal::Help) => {
-            if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
-                // Closed
+        Some(Modal::Help(mut h)) => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {} // close
+                KeyCode::Down | KeyCode::Char('j') => {
+                    h.scroll = h.scroll.saturating_add(1);
+                    state.modal = Some(Modal::Help(h));
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    h.scroll = h.scroll.saturating_sub(1);
+                    state.modal = Some(Modal::Help(h));
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    h.scroll = h.scroll.saturating_add(10);
+                    state.modal = Some(Modal::Help(h));
+                }
+                KeyCode::PageUp => {
+                    h.scroll = h.scroll.saturating_sub(10);
+                    state.modal = Some(Modal::Help(h));
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    h.scroll = 0;
+                    state.modal = Some(Modal::Help(h));
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    h.scroll = u16::MAX / 2;
+                    state.modal = Some(Modal::Help(h));
+                }
+                _ => {
+                    state.modal = Some(Modal::Help(h));
+                }
+            }
+        }
+
+        Some(Modal::DetailViewer(mut dv)) => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {}
+                KeyCode::Down | KeyCode::Char('j') => {
+                    dv.scroll = dv.scroll.saturating_add(1);
+                    state.modal = Some(Modal::DetailViewer(dv));
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    dv.scroll = dv.scroll.saturating_sub(1);
+                    state.modal = Some(Modal::DetailViewer(dv));
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    dv.scroll = dv.scroll.saturating_add(10);
+                    state.modal = Some(Modal::DetailViewer(dv));
+                }
+                KeyCode::PageUp => {
+                    dv.scroll = dv.scroll.saturating_sub(10);
+                    state.modal = Some(Modal::DetailViewer(dv));
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    dv.scroll = 0;
+                    state.modal = Some(Modal::DetailViewer(dv));
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    dv.scroll = u16::MAX / 2;
+                    state.modal = Some(Modal::DetailViewer(dv));
+                }
+                _ => {
+                    state.modal = Some(Modal::DetailViewer(dv));
+                }
+            }
+        }
+
+        Some(Modal::RenameSession { mut input_buffer }) => {
+            let is_enter = key.code == KeyCode::Enter
+                || (key.code == KeyCode::Char('m')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if key.code == KeyCode::Esc {
+                // cancel
+            } else if is_enter {
+                let new_name = input_buffer.trim().to_string();
+                if !new_name.is_empty() {
+                    state.rename_session_pending = Some(new_name);
+                }
+            } else if key.code == KeyCode::Backspace {
+                input_buffer.pop();
+                state.modal = Some(Modal::RenameSession { input_buffer });
+            } else if let KeyCode::Char(c) = key.code {
+                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    input_buffer.push(c);
+                }
+                state.modal = Some(Modal::RenameSession { input_buffer });
             } else {
-                state.modal = Some(Modal::Help);
+                state.modal = Some(Modal::RenameSession { input_buffer });
+            }
+        }
+
+        Some(Modal::SkillBrowser(mut browser)) => {
+            let is_enter = key.code == KeyCode::Enter
+                || (key.code == KeyCode::Char('m')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+
+            // In-progress name input (from pressing 'n')
+            if let Some((intent, mut buf)) = browser.name_input.take() {
+                if key.code == KeyCode::Esc {
+                    // cancel; drop the pending input
+                    state.modal = Some(Modal::SkillBrowser(browser));
+                } else if is_enter {
+                    let trimmed = buf.trim().to_string();
+                    if !trimmed.is_empty() {
+                        match intent {
+                            SkillNameIntent::New => {
+                                state.skill_new_pending = Some(trimmed);
+                            }
+                        }
+                    }
+                    // Close modal; main loop will act and reopen on next frame.
+                } else if key.code == KeyCode::Backspace {
+                    buf.pop();
+                    browser.name_input = Some((intent, buf));
+                    state.modal = Some(Modal::SkillBrowser(browser));
+                } else if let KeyCode::Char(c) = key.code {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        buf.push(c);
+                    }
+                    browser.name_input = Some((intent, buf));
+                    state.modal = Some(Modal::SkillBrowser(browser));
+                } else {
+                    browser.name_input = Some((intent, buf));
+                    state.modal = Some(Modal::SkillBrowser(browser));
+                }
+                return;
+            }
+
+            if let Some(ref _pending_id) = browser.confirm_delete {
+                if key.code == KeyCode::Char('d') {
+                    let name = match browser.confirm_delete.take() {
+                        Some(n) => n,
+                        None => {
+                            state.modal = Some(Modal::SkillBrowser(browser));
+                            return;
+                        }
+                    };
+                    state.skill_delete_pending = Some(name.clone());
+                    browser.entries.retain(|e| e.name != name);
+                    if browser.selected >= browser.entries.len() && !browser.entries.is_empty() {
+                        browser.selected = browser.entries.len() - 1;
+                    }
+                    state.modal = Some(Modal::SkillBrowser(browser));
+                } else {
+                    browser.confirm_delete = None;
+                    state.modal = Some(Modal::SkillBrowser(browser));
+                }
+            } else if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+                // close
+            } else if key.code == KeyCode::Up || key.code == KeyCode::Char('k') {
+                browser.move_up();
+                state.modal = Some(Modal::SkillBrowser(browser));
+            } else if key.code == KeyCode::Down || key.code == KeyCode::Char('j') {
+                browser.move_down();
+                state.modal = Some(Modal::SkillBrowser(browser));
+            } else if is_enter {
+                if let Some(entry) = browser.selected_entry() {
+                    state.skill_invoke_pending = Some(entry.name.clone());
+                }
+                // close; main loop invokes skill
+            } else if key.code == KeyCode::Char('s') {
+                // Show body in a detail viewer
+                if let Some(entry) = browser.selected_entry().cloned() {
+                    let header = format!(
+                        "name: {}\nsource: {}\nmode: {}\nallowed_tools: {}\npath: {}\n\n---\n\n",
+                        entry.name,
+                        entry.source,
+                        entry.execution_mode,
+                        if entry.allowed_tools.is_empty() { "(unrestricted)".to_string() } else { entry.allowed_tools.join(", ") },
+                        entry.canonical_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(bundled)".to_string()),
+                    );
+                    state.modal = Some(Modal::DetailViewer(DetailViewerState::new(
+                        format!(" Skill: {} ", entry.name),
+                        format!("{}{}", header, entry.body),
+                    )));
+                } else {
+                    state.modal = Some(Modal::SkillBrowser(browser));
+                }
+            } else if key.code == KeyCode::Char('e') {
+                if let Some(entry) = browser.selected_entry() {
+                    state.skill_edit_pending = Some(entry.name.clone());
+                }
+                state.modal = Some(Modal::SkillBrowser(browser));
+            } else if key.code == KeyCode::Char('n') {
+                browser.name_input = Some((SkillNameIntent::New, String::new()));
+                state.modal = Some(Modal::SkillBrowser(browser));
+            } else if key.code == KeyCode::Char('d') || key.code == KeyCode::Delete {
+                if let Some(entry) = browser.selected_entry() {
+                    // Bundled skills cannot be deleted.
+                    if entry.source == "bundled" {
+                        // no-op; keep browser open
+                    } else {
+                        browser.confirm_delete = Some(entry.name.clone());
+                    }
+                }
+                state.modal = Some(Modal::SkillBrowser(browser));
+            } else if key.code == KeyCode::Char('r') {
+                state.skill_reload_pending = true;
+                state.modal = Some(Modal::SkillBrowser(browser));
+            } else if key.code == KeyCode::Char('o') {
+                // clear active scope
+                state.skill_off_pending = true;
+                browser.active_skill = None;
+                state.modal = Some(Modal::SkillBrowser(browser));
+            } else {
+                state.modal = Some(Modal::SkillBrowser(browser));
             }
         }
 
