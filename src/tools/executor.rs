@@ -110,7 +110,8 @@ impl ToolExecutor {
         // ── Execute with cancellation race ───────────────────────────────────
         debug!(tool = %tool_call.name, "executing");
         let start = std::time::Instant::now();
-        let execute_fut = AssertUnwindSafe(tool.execute(tool_call.input.clone(), ctx)).catch_unwind();
+        let execute_fut =
+            AssertUnwindSafe(tool.execute(tool_call.input.clone(), ctx)).catch_unwind();
         let execute_result = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -317,7 +318,7 @@ mod tests {
             permission_mode: PermissionMode::Bypass,
             file_cache: None,
             active_skill_scope: None,
-                skill_registry: None,
+            skill_registry: None,
         };
         match decide_permission(
             "bash",
@@ -342,7 +343,7 @@ mod tests {
             permission_mode: PermissionMode::Plan,
             file_cache: None,
             active_skill_scope: None,
-                skill_registry: None,
+            skill_registry: None,
         };
         match decide_permission(
             "write_file",
@@ -372,7 +373,7 @@ mod tests {
             permission_mode: PermissionMode::Default,
             file_cache: None,
             active_skill_scope: None,
-                skill_registry: None,
+            skill_registry: None,
         };
         match decide_permission(
             "bash",

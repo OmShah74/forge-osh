@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::Tool;
 use super::executor::maybe_truncate_chars;
+use super::Tool;
 use crate::types::*;
 
 // ─── web_fetch ────────────────────────────────────────────────────────────

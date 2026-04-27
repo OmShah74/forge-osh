@@ -279,7 +279,13 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                         || (l.starts_with('-') && !l.starts_with("---"))
                 });
                 // Cheap O(1) count of total newlines for the "hidden lines" footer.
-                let total_line_count = msg.content.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
+                let total_line_count = msg
+                    .content
+                    .as_bytes()
+                    .iter()
+                    .filter(|&&b| b == b'\n')
+                    .count()
+                    + 1;
 
                 for text_line in preview.iter().take(max_lines) {
                     if is_diff {
@@ -319,10 +325,7 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 }
                 if total_line_count > max_lines {
                     lines.push(Line::from(Span::styled(
-                        format!(
-                            "    … ({} more lines hidden)",
-                            total_line_count - max_lines
-                        ),
+                        format!("    … ({} more lines hidden)", total_line_count - max_lines),
                         Style::default()
                             .fg(theme.muted_fg)
                             .add_modifier(Modifier::ITALIC),
@@ -1092,11 +1095,20 @@ fn render_skill_browser(frame: &mut Frame, browser: &SkillBrowserState, theme: &
     } else if let Some(e) = browser.selected_entry() {
         let when = e.when_to_use.as_deref().unwrap_or("");
         if when.is_empty() {
-            format!("  mode: {}   tools: {}",
+            format!(
+                "  mode: {}   tools: {}",
                 e.execution_mode,
-                if e.allowed_tools.is_empty() { "(unrestricted)".to_string() } else { e.allowed_tools.join(", ") })
+                if e.allowed_tools.is_empty() {
+                    "(unrestricted)".to_string()
+                } else {
+                    e.allowed_tools.join(", ")
+                }
+            )
         } else {
-            format!("  ↳ {}", truncate(when, (area.width.saturating_sub(4)) as usize))
+            format!(
+                "  ↳ {}",
+                truncate(when, (area.width.saturating_sub(4)) as usize)
+            )
         }
     } else {
         String::new()

@@ -468,7 +468,7 @@ mod tests {
             permission_mode: crate::types::PermissionMode::Default,
             file_cache: None,
             active_skill_scope: None,
-                skill_registry: None,
+            skill_registry: None,
         }
     }
 
