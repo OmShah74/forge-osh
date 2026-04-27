@@ -1392,7 +1392,14 @@ fn render_session_browser(frame: &mut Frame, browser: &SessionBrowserState, them
 
 /// Truncate a string to at most `max` chars, appending '…' if cut.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() > max {
+        if max == 0 {
+            return String::new();
+        }
+        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+        return format!("{prefix}â€¦");
+    }
+    if s.chars().count() <= max {
         s.to_string()
     } else {
         format!("{}…", &s[..max.saturating_sub(1)])

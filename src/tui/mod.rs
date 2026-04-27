@@ -2248,18 +2248,19 @@ fn common_prefix(strings: &[&str]) -> String {
     if strings.is_empty() {
         return String::new();
     }
-    let first = strings[0];
-    let mut len = first.len();
+    let mut prefix = strings[0].to_string();
     for s in &strings[1..] {
-        len = len.min(s.len());
-        for (i, (a, b)) in first.chars().zip(s.chars()).enumerate() {
-            if a != b {
-                len = len.min(i);
-                break;
+        while !s.starts_with(&prefix) {
+            if prefix.pop().is_none() {
+                return String::new();
             }
         }
     }
-    first[..len].to_string()
+    prefix
+}
+
+fn first_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2900,15 +2901,16 @@ async fn compact_history_llm(
             // arrives, which feels like compaction did nothing.
             refresh_context_display(state, session, provider_router).await;
 
-            let preview_end = summary.len().min(500);
+            let preview = first_chars(&summary, 500);
+            let is_truncated = summary.chars().count() > 500;
             state.push_system(format!(
                 "Compacted: {removed} messages replaced by AI summary ({} words, {} chars). \
                  {keep} message(s) kept verbatim.\n\
                  --- Summary preview ---\n{}{}",
                 summary.split_whitespace().count(),
-                summary.len(),
-                &summary[..preview_end],
-                if summary.len() > preview_end {
+                summary.chars().count(),
+                preview,
+                if is_truncated {
                     " …"
                 } else {
                     ""
@@ -3317,12 +3319,13 @@ pub async fn run_tui(
                     replace_rendered_for_compaction(&mut state, kept, summary_for_display);
                     refresh_context_display(&mut state, &session, &provider_router).await;
                     if succeeded {
-                        let preview_end = summary_preview.len().min(500);
+                        let preview = first_chars(&summary_preview, 500);
+                        let is_truncated = summary_preview.chars().count() > 500;
                         state.push_system(format!(
                             "Auto-compacted: {removed} message(s) replaced by AI summary. \
                              {kept} kept verbatim.\n--- Summary preview ---\n{}{}",
-                            &summary_preview[..preview_end],
-                            if summary_preview.len() > preview_end {
+                            preview,
+                            if is_truncated {
                                 " …"
                             } else {
                                 ""

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use futures::FutureExt;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -756,8 +758,9 @@ impl AgentLoop {
                 let working_dir = working_dir_pb.clone();
                 let sid = session_id.to_string();
 
-                futs.push(tokio::spawn(async move {
-                    let output = Self::execute_single(
+                let join_tc = tc.clone();
+                futs.push((idx, join_tc, tokio::spawn(async move {
+                    let output = match AssertUnwindSafe(Self::execute_single(
                         executor.as_ref(),
                         &tc,
                         ctx.as_ref(),
@@ -769,8 +772,17 @@ impl AgentLoop {
                         sid,
                         event_tx.clone(),
                         perm_tx,
-                    )
-                    .await;
+                    ))
+                    .catch_unwind()
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(payload) => ToolOutput::error(format!(
+                            "Tool '{}' panicked: {}",
+                            tc.name,
+                            crate::tools::executor::panic_message(payload)
+                        )),
+                    };
 
                     let _ = event_tx.send(AgentEvent::ToolEnd {
                         name: tc.name.clone(),
@@ -779,12 +791,24 @@ impl AgentLoop {
                     });
 
                     (idx, tc, output)
-                }));
+                })));
             }
 
-            for f in futs {
-                if let Ok(triple) = f.await {
-                    results.push(triple);
+            for (idx, tc, f) in futs {
+                match f.await {
+                    Ok(triple) => results.push(triple),
+                    Err(e) => {
+                        let output = ToolOutput::error(format!(
+                            "Tool '{}' task failed: {e}",
+                            tc.name
+                        ));
+                        let _ = self.event_tx.send(AgentEvent::ToolEnd {
+                            name: tc.name.clone(),
+                            output: output.content.clone(),
+                            is_error: true,
+                        });
+                        results.push((idx, tc, output));
+                    }
                 }
             }
         }
@@ -802,7 +826,7 @@ impl AgentLoop {
                 name: tc.name.clone(),
                 input: tc.input.clone(),
             });
-            let output = Self::execute_single(
+            let output = match AssertUnwindSafe(Self::execute_single(
                 executor.as_ref(),
                 &tc,
                 ctx.as_ref(),
@@ -814,8 +838,17 @@ impl AgentLoop {
                 session_id.to_string(),
                 self.event_tx.clone(),
                 self.permission_tx.clone(),
-            )
-            .await;
+            ))
+            .catch_unwind()
+            .await
+            {
+                Ok(output) => output,
+                Err(payload) => ToolOutput::error(format!(
+                    "Tool '{}' panicked: {}",
+                    tc.name,
+                    crate::tools::executor::panic_message(payload)
+                )),
+            };
             let _ = self.event_tx.send(AgentEvent::ToolEnd {
                 name: tc.name.clone(),
                 output: output.content.clone(),
