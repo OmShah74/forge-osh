@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::executor::maybe_truncate_chars;
 use super::Tool;
 use crate::types::*;
 
@@ -26,7 +27,10 @@ impl Tool for WebFetchTool {
             "type": "object",
             "properties": {
                 "url": { "type": "string" },
-                "max_length": { "type": "integer", "default": 10000 }
+                "max_length": {
+                    "type": "integer",
+                    "description": "Optional maximum number of Unicode characters to return. Omit or set 0 for full fetched content."
+                }
             },
             "required": ["url"]
         })
@@ -41,7 +45,7 @@ impl Tool for WebFetchTool {
             Some(u) => u,
             None => return ToolOutput::error("Missing 'url' parameter"),
         };
-        let max_length = input["max_length"].as_u64().unwrap_or(10000) as usize;
+        let max_length = input["max_length"].as_u64().map(|n| n as usize);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -79,18 +83,7 @@ impl Tool for WebFetchTool {
                             body
                         };
 
-                        let truncated = if text.len() > max_length {
-                            format!(
-                                "{}\n\n... [truncated at {} chars, total {}]",
-                                &text[..max_length],
-                                max_length,
-                                text.len()
-                            )
-                        } else {
-                            text
-                        };
-
-                        ToolOutput::success(truncated)
+                        ToolOutput::success(maybe_truncate_chars(text, max_length))
                     }
                     Err(e) => ToolOutput::error(format!("Failed to read response: {e}")),
                 }

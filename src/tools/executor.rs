@@ -1,3 +1,6 @@
+use futures::FutureExt;
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
@@ -107,8 +110,9 @@ impl ToolExecutor {
         // ── Execute with cancellation race ───────────────────────────────────
         debug!(tool = %tool_call.name, "executing");
         let start = std::time::Instant::now();
-        let execute_fut = tool.execute(tool_call.input.clone(), ctx);
-        let mut output = tokio::select! {
+        let execute_fut =
+            AssertUnwindSafe(tool.execute(tool_call.input.clone(), ctx)).catch_unwind();
+        let execute_result = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 return ToolOutput::error(format!(
@@ -118,14 +122,24 @@ impl ToolExecutor {
             }
             o = execute_fut => o,
         };
+        let mut output = match execute_result {
+            Ok(output) => output,
+            Err(payload) => {
+                return ToolOutput::error(format!(
+                    "Tool '{}' panicked: {}",
+                    tool_call.name,
+                    panic_message(payload)
+                ));
+            }
+        };
 
         // Truncate output if too long
-        if output.content.len() > self.max_output_chars {
+        if self.max_output_chars > 0 && output.content.chars().count() > self.max_output_chars {
+            let shown = first_chars(&output.content, self.max_output_chars);
+            let total_chars = output.content.chars().count();
             output.content = format!(
                 "{}\n\n... [truncated, showing first {} of {} chars]",
-                &output.content[..self.max_output_chars],
-                self.max_output_chars,
-                output.content.len()
+                shown, self.max_output_chars, total_chars
             );
         }
 
@@ -136,6 +150,38 @@ impl ToolExecutor {
             "tool finished",
         );
         output
+    }
+}
+
+pub(crate) fn first_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
+pub(crate) fn maybe_truncate_chars(s: String, max_chars: Option<usize>) -> String {
+    let Some(max_chars) = max_chars.filter(|n| *n > 0) else {
+        return s;
+    };
+
+    let total_chars = s.chars().count();
+    if total_chars <= max_chars {
+        return s;
+    }
+
+    format!(
+        "{}\n\n... [truncated at {} chars, total {}]",
+        first_chars(&s, max_chars),
+        max_chars,
+        total_chars
+    )
+}
+
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
     }
 }
 
@@ -272,7 +318,7 @@ mod tests {
             permission_mode: PermissionMode::Bypass,
             file_cache: None,
             active_skill_scope: None,
-                skill_registry: None,
+            skill_registry: None,
         };
         match decide_permission(
             "bash",
@@ -297,7 +343,7 @@ mod tests {
             permission_mode: PermissionMode::Plan,
             file_cache: None,
             active_skill_scope: None,
-                skill_registry: None,
+            skill_registry: None,
         };
         match decide_permission(
             "write_file",
@@ -327,7 +373,7 @@ mod tests {
             permission_mode: PermissionMode::Default,
             file_cache: None,
             active_skill_scope: None,
-                skill_registry: None,
+            skill_registry: None,
         };
         match decide_permission(
             "bash",
@@ -339,5 +385,74 @@ mod tests {
             PermissionDecision::Allow => {}
             _ => panic!("Stored allow rule should skip prompt"),
         }
+    }
+
+    #[test]
+    fn test_unicode_truncation_is_char_safe() {
+        let text = "abc↵def".to_string();
+        let truncated = maybe_truncate_chars(text, Some(4));
+        assert!(truncated.starts_with("abc↵"));
+        assert!(truncated.contains("total 7"));
+    }
+
+    struct PanickingTool;
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for PanickingTool {
+        fn name(&self) -> &str {
+            "panic_tool"
+        }
+
+        fn description(&self) -> &str {
+            "Panics for executor recovery testing"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            PermissionLevel::ReadOnly
+        }
+
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+            panic!("intentional panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_executor_converts_tool_panic_to_error() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(PanickingTool));
+        let executor = ToolExecutor::new(0);
+        let ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("."),
+            home_dir: std::path::PathBuf::from("."),
+            session_id: "t".into(),
+            trust_mode: false,
+            permission_mode: PermissionMode::Default,
+            file_cache: None,
+            active_skill_scope: None,
+            skill_registry: None,
+        };
+        let call = ToolCall {
+            id: "panic-1".into(),
+            name: "panic_tool".into(),
+            input: serde_json::json!({}),
+        };
+        let output = executor
+            .execute(
+                &call,
+                &ctx,
+                &registry,
+                &PermissionStore::default(),
+                &CancellationToken::new(),
+                |_, _, _| async { PermissionResponse::Allow },
+            )
+            .await;
+
+        assert!(output.is_error);
+        assert!(output.content.contains("panicked"));
+        assert!(output.content.contains("intentional panic"));
     }
 }

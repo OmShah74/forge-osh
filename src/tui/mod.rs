@@ -119,7 +119,11 @@ pub struct DetailViewerState {
 
 impl DetailViewerState {
     pub fn new(title: impl Into<String>, body: impl Into<String>) -> Self {
-        Self { title: title.into(), body: body.into(), scroll: 0 }
+        Self {
+            title: title.into(),
+            body: body.into(),
+            scroll: 0,
+        }
     }
 }
 
@@ -127,7 +131,7 @@ impl DetailViewerState {
 pub struct SkillBrowserEntry {
     pub name: String,
     pub description: String,
-    pub source: String,        // "bundled" | "user" | "project"
+    pub source: String, // "bundled" | "user" | "project"
     pub when_to_use: Option<String>,
     pub execution_mode: String,
     pub allowed_tools: Vec<String>,
@@ -161,10 +165,14 @@ impl SkillBrowserState {
         }
     }
     pub fn move_up(&mut self) {
-        if self.selected > 0 { self.selected -= 1; }
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
     }
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.entries.len() { self.selected += 1; }
+        if self.selected + 1 < self.entries.len() {
+            self.selected += 1;
+        }
     }
     pub fn selected_entry(&self) -> Option<&SkillBrowserEntry> {
         self.entries.get(self.selected)
@@ -683,13 +691,17 @@ async fn handle_slash_command(
             if arg.trim().is_empty() {
                 // Open a small input modal seeded with the current session name.
                 let current = { session.lock().await.name.clone() };
-                state.modal = Some(Modal::RenameSession { input_buffer: current });
+                state.modal = Some(Modal::RenameSession {
+                    input_buffer: current,
+                });
             } else {
                 let new_name = arg.trim().to_string();
                 let mut sess = session.lock().await;
                 sess.name = new_name.clone();
                 if let Err(e) = sess.save() {
-                    state.push_system(format!("Renamed (in-memory) to '{new_name}', but save failed: {e}"));
+                    state.push_system(format!(
+                        "Renamed (in-memory) to '{new_name}', but save failed: {e}"
+                    ));
                 } else {
                     state.push_system(format!("Session renamed to '{new_name}'."));
                 }
@@ -1347,7 +1359,11 @@ async fn handle_slash_command(
             // Otherwise: treat `arg` as `<skill> [args...]` and invoke.
             {
                 let skill_name_in = head;
-                let skill_args = if rest.is_empty() { None } else { Some(rest.as_str()) };
+                let skill_args = if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.as_str())
+                };
                 let (working_dir, session_id) = {
                     let sess = session.lock().await;
                     (sess.working_dir.clone(), sess.id.clone())
@@ -1358,7 +1374,8 @@ async fn handle_slash_command(
                     crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
                 }
                 let registry = crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
-                match crate::skills::apply_skill(&registry, skill_name_in, skill_args, &session_id) {
+                match crate::skills::apply_skill(&registry, skill_name_in, skill_args, &session_id)
+                {
                     Ok(applied) => {
                         let skill_name = applied.skill_name.clone();
                         let materialized_prompt = applied.materialized_prompt.clone();
@@ -2081,10 +2098,7 @@ fn scaffold_project_skill(
     Ok(path)
 }
 
-fn delete_project_skill(
-    working_dir: &str,
-    raw_name: &str,
-) -> std::io::Result<std::path::PathBuf> {
+fn delete_project_skill(working_dir: &str, raw_name: &str) -> std::io::Result<std::path::PathBuf> {
     let name = sanitize_skill_name(raw_name);
     let dir = std::path::PathBuf::from(working_dir)
         .join(".claude")
@@ -2093,10 +2107,7 @@ fn delete_project_skill(
     if !dir.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!(
-                "no project skill named '{name}' at {}",
-                dir.display()
-            ),
+            format!("no project skill named '{name}' at {}", dir.display()),
         ));
     }
     std::fs::remove_dir_all(&dir)?;
@@ -2128,19 +2139,18 @@ fn tab_complete_slash(state: &mut AppState) {
     // --- Skill-name completion: `/skill <partial>` or `/skill show <partial>` ---
     if let Some(rest) = text.strip_prefix("/skill ") {
         if let Some(shared) = state.skill_registry.clone() {
-            let (prefix_static, partial) =
-                if let Some(p) = rest.strip_prefix("show ") {
-                    ("/skill show ", p)
-                } else if let Some(p) = rest.strip_prefix("edit ") {
-                    ("/skill edit ", p)
-                } else if let Some(p) = rest.strip_prefix("delete ") {
-                    ("/skill delete ", p)
-                } else if rest.contains(' ') {
-                    // already past the skill-name token — don't touch
-                    return;
-                } else {
-                    ("/skill ", rest)
-                };
+            let (prefix_static, partial) = if let Some(p) = rest.strip_prefix("show ") {
+                ("/skill show ", p)
+            } else if let Some(p) = rest.strip_prefix("edit ") {
+                ("/skill edit ", p)
+            } else if let Some(p) = rest.strip_prefix("delete ") {
+                ("/skill delete ", p)
+            } else if rest.contains(' ') {
+                // already past the skill-name token — don't touch
+                return;
+            } else {
+                ("/skill ", rest)
+            };
             let partial = partial.trim();
             let names: Vec<String> = shared
                 .read()
@@ -2248,18 +2258,19 @@ fn common_prefix(strings: &[&str]) -> String {
     if strings.is_empty() {
         return String::new();
     }
-    let first = strings[0];
-    let mut len = first.len();
+    let mut prefix = strings[0].to_string();
     for s in &strings[1..] {
-        len = len.min(s.len());
-        for (i, (a, b)) in first.chars().zip(s.chars()).enumerate() {
-            if a != b {
-                len = len.min(i);
-                break;
+        while !s.starts_with(&prefix) {
+            if prefix.pop().is_none() {
+                return String::new();
             }
         }
     }
-    first[..len].to_string()
+    prefix
+}
+
+fn first_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2764,7 +2775,11 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
 /// "rendered lines kept" (each history turn usually generates ~2 rendered
 /// items: user + assistant; tool turns add more, so we use 2× as a safe
 /// lower bound and let extras stay visible).
-fn drain_rendered_for_compaction(state: &mut AppState, history_keep_last: usize) {
+fn replace_rendered_for_compaction(
+    state: &mut AppState,
+    history_keep_last: usize,
+    summary: Option<&str>,
+) {
     // Preserve every Splash entry (startup banner) — they live at the top
     // of state.messages and aren't real conversation.
     let splash_end = state
@@ -2776,16 +2791,32 @@ fn drain_rendered_for_compaction(state: &mut AppState, history_keep_last: usize)
     let approx_keep_rendered = history_keep_last.saturating_mul(2);
     let total_non_splash = state.messages.len().saturating_sub(splash_end);
 
-    if total_non_splash <= approx_keep_rendered {
-        return; // nothing to drop
+    let mut kept_tail = Vec::new();
+    if approx_keep_rendered > 0 && total_non_splash > 0 {
+        let keep_from = state
+            .messages
+            .len()
+            .saturating_sub(approx_keep_rendered.min(total_non_splash));
+        kept_tail = state.messages.split_off(keep_from);
     }
 
-    // We want to keep the last `approx_keep_rendered` non-splash messages.
-    // Drain from `splash_end` up to `len - approx_keep_rendered`.
-    let drain_until = state.messages.len().saturating_sub(approx_keep_rendered);
-    if drain_until > splash_end {
-        state.messages.drain(splash_end..drain_until);
+    state.messages.truncate(splash_end);
+
+    if let Some(summary) = summary {
+        state.messages.push(RenderedMessage {
+            role: MessageRole::User,
+            content: format!("[Previous conversation summary]: {summary}"),
+        });
     }
+
+    state.messages.extend(kept_tail);
+}
+
+fn refresh_compacted_context_snapshot(sess: &mut Session) {
+    let live_estimate =
+        crate::session::tokens::TokenCounter::count_messages(sess.history.messages());
+    sess.cost_tracker.last_prompt_tokens = live_estimate;
+    sess.cost_tracker.last_output_tokens = 0;
 }
 
 /// LLM-based compact: summarize old messages with the active provider,
@@ -2862,40 +2893,56 @@ async fn compact_history_llm(
     match summary_result {
         Ok(summary) => {
             let removed = total.saturating_sub(keep);
-            {
+            let save_result = {
                 let mut sess = session.lock().await;
                 sess.history.summarize_old(summary.clone(), keep);
+                refresh_compacted_context_snapshot(&mut sess);
+                sess.save()
+            };
+            {
+                let sess = session.lock().await;
+                state.format_tokens = sess.format_tokens();
+                state.format_cost = sess.format_cost();
             }
-            drain_rendered_for_compaction(state, keep);
+            replace_rendered_for_compaction(state, keep, Some(&summary));
 
             // Refresh the context-window badge immediately. Without this the
             // user sees "still 90% used" until the next turn's record_usage
             // arrives, which feels like compaction did nothing.
             refresh_context_display(state, session, provider_router).await;
 
-            let preview_end = summary.len().min(500);
+            let preview = first_chars(&summary, 500);
+            let is_truncated = summary.chars().count() > 500;
             state.push_system(format!(
                 "Compacted: {removed} messages replaced by AI summary ({} words, {} chars). \
                  {keep} message(s) kept verbatim.\n\
                  --- Summary preview ---\n{}{}",
                 summary.split_whitespace().count(),
-                summary.len(),
-                &summary[..preview_end],
-                if summary.len() > preview_end {
-                    " …"
-                } else {
-                    ""
-                },
+                summary.chars().count(),
+                preview,
+                if is_truncated { " …" } else { "" },
             ));
+            if let Err(e) = save_result {
+                state.push_system(format!(
+                    "Warning: compacted history could not be saved to disk: {e}"
+                ));
+            }
         }
         Err(e) => {
             // Fall back to plain truncation — we still free the window.
             let removed = total.saturating_sub(keep);
-            {
+            let save_result = {
                 let mut sess = session.lock().await;
                 sess.history.compact(keep);
+                refresh_compacted_context_snapshot(&mut sess);
+                sess.save()
+            };
+            {
+                let sess = session.lock().await;
+                state.format_tokens = sess.format_tokens();
+                state.format_cost = sess.format_cost();
             }
-            drain_rendered_for_compaction(state, keep);
+            replace_rendered_for_compaction(state, keep, None);
             refresh_context_display(state, session, provider_router).await;
             state.push_system(format!(
                 "AI summary failed ({e}); fell back to plain truncation. \
@@ -2903,6 +2950,11 @@ async fn compact_history_llm(
                  Tip: run /model to switch to a cheaper/faster provider for compaction \
                  and retry /compact."
             ));
+            if let Err(save_err) = save_result {
+                state.push_system(format!(
+                    "Warning: truncated history could not be saved to disk: {save_err}"
+                ));
+            }
         }
     }
 }
@@ -3265,19 +3317,21 @@ pub async fn run_tui(
                     // context-% bar immediately against the fresh history,
                     // and (c) push a friendly system message showing what
                     // was kept.
-                    drain_rendered_for_compaction(&mut state, kept);
+                    let summary_for_display = if succeeded {
+                        Some(summary_preview.as_str())
+                    } else {
+                        None
+                    };
+                    replace_rendered_for_compaction(&mut state, kept, summary_for_display);
                     refresh_context_display(&mut state, &session, &provider_router).await;
                     if succeeded {
-                        let preview_end = summary_preview.len().min(500);
+                        let preview = first_chars(&summary_preview, 500);
+                        let is_truncated = summary_preview.chars().count() > 500;
                         state.push_system(format!(
                             "Auto-compacted: {removed} message(s) replaced by AI summary. \
                              {kept} kept verbatim.\n--- Summary preview ---\n{}{}",
-                            &summary_preview[..preview_end],
-                            if summary_preview.len() > preview_end {
-                                " …"
-                            } else {
-                                ""
-                            },
+                            preview,
+                            if is_truncated { " …" } else { "" },
                         ));
                     } else {
                         state.push_system(format!(
@@ -3507,7 +3561,9 @@ pub async fn run_tui(
             drop(sess);
             match save_result {
                 Ok(_) => state.push_system(format!("Session renamed to '{new_name}'.")),
-                Err(e) => state.push_system(format!("Renamed (in-memory) to '{new_name}', but save failed: {e}")),
+                Err(e) => state.push_system(format!(
+                    "Renamed (in-memory) to '{new_name}', but save failed: {e}"
+                )),
             }
             state.session_name = new_name;
         }
@@ -3540,7 +3596,10 @@ pub async fn run_tui(
             match delete_project_skill(&working_dir, &name) {
                 Ok(path) => {
                     if let Some(shared) = state.skill_registry.clone() {
-                        crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+                        crate::skills::refresh_registry(
+                            &shared,
+                            std::path::Path::new(&working_dir),
+                        );
                     }
                     state.push_system(format!("Deleted {}.", path.display()));
                 }
@@ -3552,7 +3611,10 @@ pub async fn run_tui(
             match scaffold_project_skill(&working_dir, &raw_name) {
                 Ok(path) => {
                     if let Some(shared) = state.skill_registry.clone() {
-                        crate::skills::refresh_registry(&shared, std::path::Path::new(&working_dir));
+                        crate::skills::refresh_registry(
+                            &shared,
+                            std::path::Path::new(&working_dir),
+                        );
                     }
                     open_in_editor(&path);
                     state.push_system(format!(
@@ -3623,9 +3685,7 @@ pub async fn run_tui(
                             ));
                         } else {
                             state.active_skill_label = None;
-                            state.push_system(format!(
-                                "Skill '{skill_name}' ran in fork mode."
-                            ));
+                            state.push_system(format!("Skill '{skill_name}' ran in fork mode."));
                         }
                     }
                     Err(e) => state.push_system(format!("Failed to invoke '{name}': {e}")),
@@ -3655,6 +3715,16 @@ pub async fn run_tui(
                     let sess_name = new_session.name.clone();
                     let sess_provider = new_session.provider_id.clone();
                     let sess_model = new_session.model_id.clone();
+
+                    let loaded_route_active = {
+                        let mut router = provider_router.write().await;
+                        router.set_active(&sess_provider, &sess_model).is_ok()
+                    };
+                    if !loaded_route_active {
+                        let router = provider_router.read().await;
+                        new_session.provider_id = router.active_provider_id().to_string();
+                        new_session.model_id = router.active_model_id().to_string();
+                    }
 
                     // Replace session contents
                     {
@@ -3693,25 +3763,30 @@ pub async fn run_tui(
                         };
                     }
                     state.session_name = sess_name.clone();
-                    state.provider_id = sess_provider.clone();
-                    state.model_id = sess_model.clone();
+                    state.provider_id = {
+                        let sess = session.lock().await;
+                        sess.provider_id.clone()
+                    };
+                    state.model_id = {
+                        let sess = session.lock().await;
+                        sess.model_id.clone()
+                    };
                     // Update display names
                     {
                         let router = provider_router.read().await;
+                        state.provider_name = state.provider_id.clone();
+                        state.model_name = state.model_id.clone();
                         for (id, name) in router.available_providers() {
-                            if id == sess_provider {
+                            if id == state.provider_id.as_str() {
                                 state.provider_name = name.to_string();
                                 break;
                             }
                         }
-                        for m in &crate::config::models::models_for_provider(&sess_provider) {
-                            if m.id == sess_model {
+                        for m in &crate::config::models::models_for_provider(&state.provider_id) {
+                            if m.id == state.model_id.as_str() {
                                 state.model_name = m.name.clone();
                                 break;
                             }
-                        }
-                        if state.model_name.is_empty() {
-                            state.model_name = sess_model.clone();
                         }
                     }
                     {
@@ -3719,6 +3794,11 @@ pub async fn run_tui(
                         restore_history_to_display(&mut state, &sess);
                     }
                     state.push_system(format!("Loaded session: {sess_name}"));
+                    if !loaded_route_active {
+                        state.push_system(format!(
+                            "Saved session model {sess_provider}/{sess_model} is not configured; using current active model instead."
+                        ));
+                    }
                 }
                 Err(e) => state.push_system(format!("Failed to load session: {e}")),
             }
@@ -4256,38 +4336,36 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             }
         }
 
-        Some(Modal::DetailViewer(mut dv)) => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {}
-                KeyCode::Down | KeyCode::Char('j') => {
-                    dv.scroll = dv.scroll.saturating_add(1);
-                    state.modal = Some(Modal::DetailViewer(dv));
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    dv.scroll = dv.scroll.saturating_sub(1);
-                    state.modal = Some(Modal::DetailViewer(dv));
-                }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    dv.scroll = dv.scroll.saturating_add(10);
-                    state.modal = Some(Modal::DetailViewer(dv));
-                }
-                KeyCode::PageUp => {
-                    dv.scroll = dv.scroll.saturating_sub(10);
-                    state.modal = Some(Modal::DetailViewer(dv));
-                }
-                KeyCode::Home | KeyCode::Char('g') => {
-                    dv.scroll = 0;
-                    state.modal = Some(Modal::DetailViewer(dv));
-                }
-                KeyCode::End | KeyCode::Char('G') => {
-                    dv.scroll = u16::MAX / 2;
-                    state.modal = Some(Modal::DetailViewer(dv));
-                }
-                _ => {
-                    state.modal = Some(Modal::DetailViewer(dv));
-                }
+        Some(Modal::DetailViewer(mut dv)) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {}
+            KeyCode::Down | KeyCode::Char('j') => {
+                dv.scroll = dv.scroll.saturating_add(1);
+                state.modal = Some(Modal::DetailViewer(dv));
             }
-        }
+            KeyCode::Up | KeyCode::Char('k') => {
+                dv.scroll = dv.scroll.saturating_sub(1);
+                state.modal = Some(Modal::DetailViewer(dv));
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                dv.scroll = dv.scroll.saturating_add(10);
+                state.modal = Some(Modal::DetailViewer(dv));
+            }
+            KeyCode::PageUp => {
+                dv.scroll = dv.scroll.saturating_sub(10);
+                state.modal = Some(Modal::DetailViewer(dv));
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                dv.scroll = 0;
+                state.modal = Some(Modal::DetailViewer(dv));
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                dv.scroll = u16::MAX / 2;
+                state.modal = Some(Modal::DetailViewer(dv));
+            }
+            _ => {
+                state.modal = Some(Modal::DetailViewer(dv));
+            }
+        },
 
         Some(Modal::RenameSession { mut input_buffer }) => {
             let is_enter = key.code == KeyCode::Enter
@@ -4390,8 +4468,16 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                         entry.name,
                         entry.source,
                         entry.execution_mode,
-                        if entry.allowed_tools.is_empty() { "(unrestricted)".to_string() } else { entry.allowed_tools.join(", ") },
-                        entry.canonical_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(bundled)".to_string()),
+                        if entry.allowed_tools.is_empty() {
+                            "(unrestricted)".to_string()
+                        } else {
+                            entry.allowed_tools.join(", ")
+                        },
+                        entry
+                            .canonical_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(bundled)".to_string()),
                     );
                     state.modal = Some(Modal::DetailViewer(DetailViewerState::new(
                         format!(" Skill: {} ", entry.name),

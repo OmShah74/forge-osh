@@ -20,10 +20,7 @@ fn mk_entry(name: &str, source: &str) -> SkillBrowserEntry {
 
 #[test]
 fn skill_browser_nav_clamps_at_ends() {
-    let mut b = SkillBrowserState::new(
-        vec![mk_entry("a", "project"), mk_entry("b", "user")],
-        None,
-    );
+    let mut b = SkillBrowserState::new(vec![mk_entry("a", "project"), mk_entry("b", "user")], None);
     assert_eq!(b.selected, 0);
     b.move_up(); // no-op at top
     assert_eq!(b.selected, 0);
@@ -46,10 +43,7 @@ fn skill_browser_empty_entries_is_safe() {
 
 #[test]
 fn skill_browser_active_tracking() {
-    let b = SkillBrowserState::new(
-        vec![mk_entry("demo", "project")],
-        Some("demo".into()),
-    );
+    let b = SkillBrowserState::new(vec![mk_entry("demo", "project")], Some("demo".into()));
     assert_eq!(b.active_skill.as_deref(), Some("demo"));
     assert_eq!(b.selected_entry().unwrap().name, "demo");
 }

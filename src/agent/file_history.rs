@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone)]
 pub struct FileSnapshot {
     pub path: std::path::PathBuf,
-    /// `None` means the file did not exist before — undo should delete it.
+    /// `None` means the file did not exist before - undo should delete it.
     pub content: Option<Vec<u8>>,
     pub timestamp: std::time::SystemTime,
 }
@@ -38,35 +38,59 @@ pub async fn take_snapshot(path: &Path) {
 /// Undo the last mutation: pop the most recent snapshot and restore it.
 /// Returns a human-readable status message suitable for TUI display.
 pub async fn undo_last() -> String {
-    let mut history = FILE_HISTORY.lock().await;
-    match history.pop() {
-        None => "Nothing to undo — snapshot history is empty.".to_string(),
-        Some(snapshot) => {
-            let path = &snapshot.path;
-            match snapshot.content {
-                None => {
-                    // The file was created by the last operation — delete it.
-                    match tokio::fs::remove_file(path).await {
-                        Ok(_) => format!("Undone: deleted {}", path.display()),
-                        Err(e) => format!("Undo failed (could not delete {}): {e}", path.display()),
-                    }
-                }
-                Some(content) => {
-                    // Restore the previous content.
-                    if let Some(parent) = path.parent() {
-                        let _ = tokio::fs::create_dir_all(parent).await;
-                    }
-                    match tokio::fs::write(path, &content).await {
-                        Ok(_) => format!(
-                            "Undone: restored {} ({} bytes)",
-                            path.display(),
-                            content.len()
-                        ),
-                        Err(e) => {
-                            format!("Undo failed (could not restore {}): {e}", path.display())
-                        }
-                    }
-                }
+    let snapshot = {
+        let mut history = FILE_HISTORY.lock().await;
+        history.pop()
+    };
+
+    match snapshot {
+        None => "Nothing to undo - snapshot history is empty.".to_string(),
+        Some(snapshot) => restore_snapshot(snapshot).await,
+    }
+}
+
+/// Undo the most recent snapshot for a specific path.
+///
+/// This leaves the global LIFO `/undo` behavior untouched, but gives tests and
+/// diagnostics a deterministic way to restore their own file without popping a
+/// snapshot created concurrently for another path.
+#[doc(hidden)]
+pub async fn undo_last_for_path(path: &Path) -> String {
+    let snapshot = {
+        let mut history = FILE_HISTORY.lock().await;
+        history
+            .iter()
+            .rposition(|snapshot| snapshot.path == path)
+            .map(|index| history.remove(index))
+    };
+
+    match snapshot {
+        None => format!(
+            "Nothing to undo for {} - no matching snapshot.",
+            path.display()
+        ),
+        Some(snapshot) => restore_snapshot(snapshot).await,
+    }
+}
+
+async fn restore_snapshot(snapshot: FileSnapshot) -> String {
+    let path = snapshot.path;
+    match snapshot.content {
+        None => match tokio::fs::remove_file(&path).await {
+            Ok(_) => format!("Undone: deleted {}", path.display()),
+            Err(e) => format!("Undo failed (could not delete {}): {e}", path.display()),
+        },
+        Some(content) => {
+            if let Some(parent) = path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            match tokio::fs::write(&path, &content).await {
+                Ok(_) => format!(
+                    "Undone: restored {} ({} bytes)",
+                    path.display(),
+                    content.len()
+                ),
+                Err(e) => format!("Undo failed (could not restore {}): {e}", path.display()),
             }
         }
     }
@@ -77,12 +101,35 @@ pub async fn history_depth() -> usize {
     FILE_HISTORY.lock().await.len()
 }
 
+/// Return how many snapshots are currently stored for a specific path.
+#[doc(hidden)]
+pub async fn history_depth_for_path(path: &Path) -> usize {
+    FILE_HISTORY
+        .lock()
+        .await
+        .iter()
+        .filter(|snapshot| snapshot.path == path)
+        .count()
+}
+
+/// Clear snapshot history. Intended for tests and explicit session resets.
+pub async fn clear_history() {
+    FILE_HISTORY.lock().await.clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
+    use tokio::sync::Mutex;
+
+    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[tokio::test]
     async fn test_snapshot_and_undo_existing_file() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_history().await;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         tokio::fs::write(&path, b"original content").await.unwrap();
@@ -97,7 +144,7 @@ mod tests {
         );
 
         // Undo
-        let msg = undo_last().await;
+        let msg = undo_last_for_path(&path).await;
         assert!(msg.contains("Undone"), "Expected undo message, got: {msg}");
         assert_eq!(
             tokio::fs::read_to_string(&path).await.unwrap(),
@@ -107,11 +154,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_undo_empty_history() {
-        // Drain any existing history from other tests (global state)
-        {
-            let mut h = FILE_HISTORY.lock().await;
-            h.clear();
-        }
+        let _guard = TEST_LOCK.lock().await;
+        clear_history().await;
+
         let msg = undo_last().await;
         assert!(msg.contains("empty"), "Expected empty message, got: {msg}");
     }

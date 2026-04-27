@@ -1,4 +1,6 @@
+use futures::FutureExt;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -470,36 +472,67 @@ impl AgentLoop {
 
                     match summary_result {
                         Ok(summary) => {
-                            let preview: String = summary.chars().take(400).collect();
                             let summary_word_count = summary.split_whitespace().count();
                             let removed = total_before.saturating_sub(keep_last);
-                            {
+                            let save_result = {
                                 let mut session = self.session.lock().await;
-                                session.history.summarize_old(summary, keep_last);
-                            }
+                                session.history.summarize_old(summary.clone(), keep_last);
+                                let live_estimate =
+                                    crate::session::tokens::TokenCounter::count_messages(
+                                        session.history.messages(),
+                                    );
+                                session.cost_tracker.last_prompt_tokens = live_estimate;
+                                session.cost_tracker.last_output_tokens = 0;
+                                if self.config.general.auto_save_sessions {
+                                    session.save()
+                                } else {
+                                    Ok(())
+                                }
+                            };
                             let _ = self.event_tx.send(AgentEvent::HistoryCompacted {
                                 kept: keep_last,
                                 removed,
-                                summary_preview: preview,
+                                summary_preview: summary,
                                 succeeded: true,
                             });
                             let _ = self.event_tx.send(AgentEvent::Token(format!(
                                 "[context auto-compacted — {removed} message(s) replaced by an AI summary ({} words)]\n",
                                 summary_word_count,
                             )));
+                            if let Err(e) = save_result {
+                                let _ = self.event_tx.send(AgentEvent::Error(format!(
+                                    "Auto-compacted history could not be saved to disk: {e}"
+                                )));
+                            }
                         }
                         Err(e) => {
                             let removed = total_before.saturating_sub(keep_last);
-                            {
+                            let save_result = {
                                 let mut session = self.session.lock().await;
                                 session.history.compact(keep_last);
-                            }
+                                let live_estimate =
+                                    crate::session::tokens::TokenCounter::count_messages(
+                                        session.history.messages(),
+                                    );
+                                session.cost_tracker.last_prompt_tokens = live_estimate;
+                                session.cost_tracker.last_output_tokens = 0;
+                                if self.config.general.auto_save_sessions {
+                                    session.save()
+                                } else {
+                                    Ok(())
+                                }
+                            };
                             let _ = self.event_tx.send(AgentEvent::HistoryCompacted {
                                 kept: keep_last,
                                 removed,
                                 summary_preview: String::new(),
                                 succeeded: false,
                             });
+                            if let Err(save_err) = save_result {
+                                let _ = self.event_tx.send(AgentEvent::Error(format!(
+                                    "Auto-compact fallback history could not be saved to disk: {save_err}"
+                                )));
+                            }
                             let _ = self.event_tx.send(AgentEvent::Error(format!(
                                 "Auto-compact summarizer failed ({e}); fell back to plain truncation. \
                                  {removed} message(s) removed from context."
@@ -725,35 +758,59 @@ impl AgentLoop {
                 let working_dir = working_dir_pb.clone();
                 let sid = session_id.to_string();
 
-                futs.push(tokio::spawn(async move {
-                    let output = Self::execute_single(
-                        executor.as_ref(),
-                        &tc,
-                        ctx.as_ref(),
-                        tools.as_ref(),
-                        &store_arc,
-                        &cancel,
-                        &hooks_cfg,
-                        working_dir,
-                        sid,
-                        event_tx.clone(),
-                        perm_tx,
-                    )
-                    .await;
+                let join_tc = tc.clone();
+                futs.push((
+                    idx,
+                    join_tc,
+                    tokio::spawn(async move {
+                        let output = match AssertUnwindSafe(Self::execute_single(
+                            executor.as_ref(),
+                            &tc,
+                            ctx.as_ref(),
+                            tools.as_ref(),
+                            &store_arc,
+                            &cancel,
+                            &hooks_cfg,
+                            working_dir,
+                            sid,
+                            event_tx.clone(),
+                            perm_tx,
+                        ))
+                        .catch_unwind()
+                        .await
+                        {
+                            Ok(output) => output,
+                            Err(payload) => ToolOutput::error(format!(
+                                "Tool '{}' panicked: {}",
+                                tc.name,
+                                crate::tools::executor::panic_message(payload)
+                            )),
+                        };
 
-                    let _ = event_tx.send(AgentEvent::ToolEnd {
-                        name: tc.name.clone(),
-                        output: output.content.clone(),
-                        is_error: output.is_error,
-                    });
+                        let _ = event_tx.send(AgentEvent::ToolEnd {
+                            name: tc.name.clone(),
+                            output: output.content.clone(),
+                            is_error: output.is_error,
+                        });
 
-                    (idx, tc, output)
-                }));
+                        (idx, tc, output)
+                    }),
+                ));
             }
 
-            for f in futs {
-                if let Ok(triple) = f.await {
-                    results.push(triple);
+            for (idx, tc, f) in futs {
+                match f.await {
+                    Ok(triple) => results.push(triple),
+                    Err(e) => {
+                        let output =
+                            ToolOutput::error(format!("Tool '{}' task failed: {e}", tc.name));
+                        let _ = self.event_tx.send(AgentEvent::ToolEnd {
+                            name: tc.name.clone(),
+                            output: output.content.clone(),
+                            is_error: true,
+                        });
+                        results.push((idx, tc, output));
+                    }
                 }
             }
         }
@@ -771,7 +828,7 @@ impl AgentLoop {
                 name: tc.name.clone(),
                 input: tc.input.clone(),
             });
-            let output = Self::execute_single(
+            let output = match AssertUnwindSafe(Self::execute_single(
                 executor.as_ref(),
                 &tc,
                 ctx.as_ref(),
@@ -783,8 +840,17 @@ impl AgentLoop {
                 session_id.to_string(),
                 self.event_tx.clone(),
                 self.permission_tx.clone(),
-            )
-            .await;
+            ))
+            .catch_unwind()
+            .await
+            {
+                Ok(output) => output,
+                Err(payload) => ToolOutput::error(format!(
+                    "Tool '{}' panicked: {}",
+                    tc.name,
+                    crate::tools::executor::panic_message(payload)
+                )),
+            };
             let _ = self.event_tx.send(AgentEvent::ToolEnd {
                 name: tc.name.clone(),
                 output: output.content.clone(),

@@ -99,8 +99,14 @@ pub async fn summarize_messages(
         if transcript.len() > max_chars {
             // Keep the TAIL of the transcript (newer messages are the most
             // load-bearing for ongoing work). Mark the head as truncated.
-            let cut = transcript.len() - max_chars;
-            let tail = &transcript[cut..];
+            let tail: String = transcript
+                .chars()
+                .rev()
+                .take(max_chars)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             transcript = format!(
                 "[…earlier conversation omitted because it exceeded the summarizer's context window…]\n\n{tail}"
             );

@@ -1,4 +1,4 @@
-//! Tests for src/agent/file_history.rs — snapshot/undo system
+//! Tests for src/agent/file_history.rs - snapshot/undo system
 
 use forge_agent::agent::file_history;
 
@@ -15,7 +15,7 @@ async fn snapshot_and_undo_existing_file() {
         "modified content"
     );
 
-    let msg = file_history::undo_last().await;
+    let msg = file_history::undo_last_for_path(&path).await;
     assert!(
         msg.contains("Undone") || msg.contains("restored"),
         "Got: {msg}"
@@ -31,14 +31,12 @@ async fn snapshot_and_undo_new_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("new_file.txt");
 
-    // Snapshot when file doesn't exist
+    // Snapshot when file doesn't exist.
     file_history::take_snapshot(&path).await;
-    // Then "create" the file
     tokio::fs::write(&path, b"new content").await.unwrap();
     assert!(path.exists());
 
-    // Undo should delete the file
-    let msg = file_history::undo_last().await;
+    let msg = file_history::undo_last_for_path(&path).await;
     assert!(
         msg.contains("Undone") || msg.contains("deleted"),
         "Got: {msg}"
@@ -48,24 +46,15 @@ async fn snapshot_and_undo_new_file() {
 
 #[tokio::test]
 async fn history_depth_increases() {
-    // `FILE_HISTORY` is a process-global stack shared with other tests that
-    // also call `take_snapshot` (e.g. write/edit/create/delete tool tests).
-    // We therefore cannot assert exact before+1 equality under `cargo test`'s
-    // parallel execution — only that a snapshot definitely increased depth
-    // from whatever the baseline was at the moment we observed it.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("depth_test.txt");
     tokio::fs::write(&path, b"content").await.unwrap();
 
-    let before = file_history::history_depth().await;
+    let before = file_history::history_depth_for_path(&path).await;
     file_history::take_snapshot(&path).await;
-    let after = file_history::history_depth().await;
-    assert!(
-        after >= before + 1,
-        "after ({after}) should be >= before+1 ({})",
-        before + 1
-    );
+    let after = file_history::history_depth_for_path(&path).await;
+    assert_eq!(after, before + 1);
 
-    // Clean up — pop our snapshot so other tests see a stable baseline.
-    file_history::undo_last().await;
+    file_history::undo_last_for_path(&path).await;
+    assert_eq!(file_history::history_depth_for_path(&path).await, before);
 }
