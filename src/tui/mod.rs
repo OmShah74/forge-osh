@@ -2764,7 +2764,11 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
 /// "rendered lines kept" (each history turn usually generates ~2 rendered
 /// items: user + assistant; tool turns add more, so we use 2× as a safe
 /// lower bound and let extras stay visible).
-fn drain_rendered_for_compaction(state: &mut AppState, history_keep_last: usize) {
+fn replace_rendered_for_compaction(
+    state: &mut AppState,
+    history_keep_last: usize,
+    summary: Option<&str>,
+) {
     // Preserve every Splash entry (startup banner) — they live at the top
     // of state.messages and aren't real conversation.
     let splash_end = state
@@ -2776,16 +2780,32 @@ fn drain_rendered_for_compaction(state: &mut AppState, history_keep_last: usize)
     let approx_keep_rendered = history_keep_last.saturating_mul(2);
     let total_non_splash = state.messages.len().saturating_sub(splash_end);
 
-    if total_non_splash <= approx_keep_rendered {
-        return; // nothing to drop
+    let mut kept_tail = Vec::new();
+    if approx_keep_rendered > 0 && total_non_splash > 0 {
+        let keep_from = state
+            .messages
+            .len()
+            .saturating_sub(approx_keep_rendered.min(total_non_splash));
+        kept_tail = state.messages.split_off(keep_from);
     }
 
-    // We want to keep the last `approx_keep_rendered` non-splash messages.
-    // Drain from `splash_end` up to `len - approx_keep_rendered`.
-    let drain_until = state.messages.len().saturating_sub(approx_keep_rendered);
-    if drain_until > splash_end {
-        state.messages.drain(splash_end..drain_until);
+    state.messages.truncate(splash_end);
+
+    if let Some(summary) = summary {
+        state.messages.push(RenderedMessage {
+            role: MessageRole::User,
+            content: format!("[Previous conversation summary]: {summary}"),
+        });
     }
+
+    state.messages.extend(kept_tail);
+}
+
+fn refresh_compacted_context_snapshot(sess: &mut Session) {
+    let live_estimate =
+        crate::session::tokens::TokenCounter::count_messages(sess.history.messages());
+    sess.cost_tracker.last_prompt_tokens = live_estimate;
+    sess.cost_tracker.last_output_tokens = 0;
 }
 
 /// LLM-based compact: summarize old messages with the active provider,
@@ -2862,11 +2882,18 @@ async fn compact_history_llm(
     match summary_result {
         Ok(summary) => {
             let removed = total.saturating_sub(keep);
-            {
+            let save_result = {
                 let mut sess = session.lock().await;
                 sess.history.summarize_old(summary.clone(), keep);
+                refresh_compacted_context_snapshot(&mut sess);
+                sess.save()
+            };
+            {
+                let sess = session.lock().await;
+                state.format_tokens = sess.format_tokens();
+                state.format_cost = sess.format_cost();
             }
-            drain_rendered_for_compaction(state, keep);
+            replace_rendered_for_compaction(state, keep, Some(&summary));
 
             // Refresh the context-window badge immediately. Without this the
             // user sees "still 90% used" until the next turn's record_usage
@@ -2887,15 +2914,27 @@ async fn compact_history_llm(
                     ""
                 },
             ));
+            if let Err(e) = save_result {
+                state.push_system(format!(
+                    "Warning: compacted history could not be saved to disk: {e}"
+                ));
+            }
         }
         Err(e) => {
             // Fall back to plain truncation — we still free the window.
             let removed = total.saturating_sub(keep);
-            {
+            let save_result = {
                 let mut sess = session.lock().await;
                 sess.history.compact(keep);
+                refresh_compacted_context_snapshot(&mut sess);
+                sess.save()
+            };
+            {
+                let sess = session.lock().await;
+                state.format_tokens = sess.format_tokens();
+                state.format_cost = sess.format_cost();
             }
-            drain_rendered_for_compaction(state, keep);
+            replace_rendered_for_compaction(state, keep, None);
             refresh_context_display(state, session, provider_router).await;
             state.push_system(format!(
                 "AI summary failed ({e}); fell back to plain truncation. \
@@ -2903,6 +2942,11 @@ async fn compact_history_llm(
                  Tip: run /model to switch to a cheaper/faster provider for compaction \
                  and retry /compact."
             ));
+            if let Err(save_err) = save_result {
+                state.push_system(format!(
+                    "Warning: truncated history could not be saved to disk: {save_err}"
+                ));
+            }
         }
     }
 }
@@ -3265,7 +3309,12 @@ pub async fn run_tui(
                     // context-% bar immediately against the fresh history,
                     // and (c) push a friendly system message showing what
                     // was kept.
-                    drain_rendered_for_compaction(&mut state, kept);
+                    let summary_for_display = if succeeded {
+                        Some(summary_preview.as_str())
+                    } else {
+                        None
+                    };
+                    replace_rendered_for_compaction(&mut state, kept, summary_for_display);
                     refresh_context_display(&mut state, &session, &provider_router).await;
                     if succeeded {
                         let preview_end = summary_preview.len().min(500);
@@ -3656,6 +3705,16 @@ pub async fn run_tui(
                     let sess_provider = new_session.provider_id.clone();
                     let sess_model = new_session.model_id.clone();
 
+                    let loaded_route_active = {
+                        let mut router = provider_router.write().await;
+                        router.set_active(&sess_provider, &sess_model).is_ok()
+                    };
+                    if !loaded_route_active {
+                        let router = provider_router.read().await;
+                        new_session.provider_id = router.active_provider_id().to_string();
+                        new_session.model_id = router.active_model_id().to_string();
+                    }
+
                     // Replace session contents
                     {
                         let mut sess = session.lock().await;
@@ -3693,25 +3752,30 @@ pub async fn run_tui(
                         };
                     }
                     state.session_name = sess_name.clone();
-                    state.provider_id = sess_provider.clone();
-                    state.model_id = sess_model.clone();
+                    state.provider_id = {
+                        let sess = session.lock().await;
+                        sess.provider_id.clone()
+                    };
+                    state.model_id = {
+                        let sess = session.lock().await;
+                        sess.model_id.clone()
+                    };
                     // Update display names
                     {
                         let router = provider_router.read().await;
+                        state.provider_name = state.provider_id.clone();
+                        state.model_name = state.model_id.clone();
                         for (id, name) in router.available_providers() {
-                            if id == sess_provider {
+                            if id == state.provider_id.as_str() {
                                 state.provider_name = name.to_string();
                                 break;
                             }
                         }
-                        for m in &crate::config::models::models_for_provider(&sess_provider) {
-                            if m.id == sess_model {
+                        for m in &crate::config::models::models_for_provider(&state.provider_id) {
+                            if m.id == state.model_id.as_str() {
                                 state.model_name = m.name.clone();
                                 break;
                             }
-                        }
-                        if state.model_name.is_empty() {
-                            state.model_name = sess_model.clone();
                         }
                     }
                     {
@@ -3719,6 +3783,11 @@ pub async fn run_tui(
                         restore_history_to_display(&mut state, &sess);
                     }
                     state.push_system(format!("Loaded session: {sess_name}"));
+                    if !loaded_route_active {
+                        state.push_system(format!(
+                            "Saved session model {sess_provider}/{sess_model} is not configured; using current active model instead."
+                        ));
+                    }
                 }
                 Err(e) => state.push_system(format!("Failed to load session: {e}")),
             }

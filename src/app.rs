@@ -90,7 +90,7 @@ impl App {
                 .to_string()
         });
 
-        let session = if let Some(resume_arg) = &cli.resume {
+        let mut session = if let Some(resume_arg) = &cli.resume {
             // --resume (no value)        → "__latest__" sentinel → load most recent
             // --resume <id> / <partial>  → load that session (exact id or id prefix,
             //                              falling back to name match)
@@ -143,6 +143,25 @@ impl App {
         } else {
             create_new_session(&provider_router, &None, &working_dir).await
         };
+
+        // Keep the runtime router and persisted session metadata aligned.
+        // Resuming/loading a session should route calls to the model shown in
+        // the UI; explicit CLI provider/model overrides intentionally win.
+        {
+            let mut router = provider_router.write().await;
+            if cli.provider.is_none() && cli.model.is_none() {
+                if router
+                    .set_active(&session.provider_id, &session.model_id)
+                    .is_err()
+                {
+                    session.provider_id = router.active_provider_id().to_string();
+                    session.model_id = router.active_model_id().to_string();
+                }
+            } else {
+                session.provider_id = router.active_provider_id().to_string();
+                session.model_id = router.active_model_id().to_string();
+            }
+        }
 
         let session = Arc::new(Mutex::new(session));
         let skills = shared_registry(std::path::Path::new(&working_dir));

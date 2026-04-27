@@ -470,36 +470,67 @@ impl AgentLoop {
 
                     match summary_result {
                         Ok(summary) => {
-                            let preview: String = summary.chars().take(400).collect();
                             let summary_word_count = summary.split_whitespace().count();
                             let removed = total_before.saturating_sub(keep_last);
-                            {
+                            let save_result = {
                                 let mut session = self.session.lock().await;
-                                session.history.summarize_old(summary, keep_last);
-                            }
+                                session.history.summarize_old(summary.clone(), keep_last);
+                                let live_estimate =
+                                    crate::session::tokens::TokenCounter::count_messages(
+                                        session.history.messages(),
+                                    );
+                                session.cost_tracker.last_prompt_tokens = live_estimate;
+                                session.cost_tracker.last_output_tokens = 0;
+                                if self.config.general.auto_save_sessions {
+                                    session.save()
+                                } else {
+                                    Ok(())
+                                }
+                            };
                             let _ = self.event_tx.send(AgentEvent::HistoryCompacted {
                                 kept: keep_last,
                                 removed,
-                                summary_preview: preview,
+                                summary_preview: summary,
                                 succeeded: true,
                             });
                             let _ = self.event_tx.send(AgentEvent::Token(format!(
                                 "[context auto-compacted — {removed} message(s) replaced by an AI summary ({} words)]\n",
                                 summary_word_count,
                             )));
+                            if let Err(e) = save_result {
+                                let _ = self.event_tx.send(AgentEvent::Error(format!(
+                                    "Auto-compacted history could not be saved to disk: {e}"
+                                )));
+                            }
                         }
                         Err(e) => {
                             let removed = total_before.saturating_sub(keep_last);
-                            {
+                            let save_result = {
                                 let mut session = self.session.lock().await;
                                 session.history.compact(keep_last);
-                            }
+                                let live_estimate =
+                                    crate::session::tokens::TokenCounter::count_messages(
+                                        session.history.messages(),
+                                    );
+                                session.cost_tracker.last_prompt_tokens = live_estimate;
+                                session.cost_tracker.last_output_tokens = 0;
+                                if self.config.general.auto_save_sessions {
+                                    session.save()
+                                } else {
+                                    Ok(())
+                                }
+                            };
                             let _ = self.event_tx.send(AgentEvent::HistoryCompacted {
                                 kept: keep_last,
                                 removed,
                                 summary_preview: String::new(),
                                 succeeded: false,
                             });
+                            if let Err(save_err) = save_result {
+                                let _ = self.event_tx.send(AgentEvent::Error(format!(
+                                    "Auto-compact fallback history could not be saved to disk: {save_err}"
+                                )));
+                            }
                             let _ = self.event_tx.send(AgentEvent::Error(format!(
                                 "Auto-compact summarizer failed ({e}); fell back to plain truncation. \
                                  {removed} message(s) removed from context."
