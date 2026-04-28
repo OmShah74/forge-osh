@@ -240,6 +240,18 @@ pub fn refresh_registry(registry: &SharedSkillRegistry, working_dir: &Path) {
     *registry.write() = SkillLoader::load(working_dir);
 }
 
+pub fn normalize_skill_name(input: &str) -> String {
+    sanitize_name(input)
+}
+
+pub fn project_skill_path(working_dir: &Path, name: &str) -> PathBuf {
+    project_skills_dir(working_dir).join(sanitize_name(name))
+}
+
+pub fn validate_skill_markdown(path: &Path, raw: &str) -> anyhow::Result<SkillDefinition> {
+    parse_markdown_skill(path, SkillSource::Project, raw)
+}
+
 fn parse_markdown_skill(
     path: &Path,
     source: SkillSource,
@@ -268,13 +280,16 @@ fn parse_markdown_skill(
     };
     let canonical_path = std::fs::canonicalize(path).ok();
 
+    let mut allowed_tools = parsed.allowed_tools.clone().unwrap_or_default();
+    normalize_generated_allowed_tools(&mut allowed_tools, &parsed, body);
+
     Ok(SkillDefinition {
         key: format!("{}:{name}", source.label()),
         name: name.clone(),
         display_name: parsed.name.clone().unwrap_or_else(|| name.clone()),
         description,
         when_to_use: parsed.when_to_use.clone(),
-        allowed_tools: parsed.allowed_tools.clone().unwrap_or_default(),
+        allowed_tools,
         model: parsed.model.clone(),
         execution_mode: mode,
         user_invocable: parsed.user_invocable.unwrap_or(true),
@@ -286,6 +301,41 @@ fn parse_markdown_skill(
         metadata: parsed,
         bundled_files: HashMap::new(),
     })
+}
+
+fn normalize_generated_allowed_tools(
+    allowed_tools: &mut Vec<String>,
+    metadata: &SkillFrontmatter,
+    body: &str,
+) {
+    let generated_by_forge = metadata
+        .extra
+        .get("generated_by")
+        .is_some_and(|v| v.eq_ignore_ascii_case("forge-osh"));
+    if !generated_by_forge {
+        return;
+    }
+
+    // v1.0.17 initially treated file-authoring tools as too risky for
+    // generated skills, which made code-producing generated skills block
+    // themselves while active. Preserve the user's accepted skill but restore
+    // the normal file-authoring family. The regular permission system still
+    // prompts/guards these tools; this only fixes the skill-scope allowlist.
+    let old_sanitizer_removed_file_tool = [
+        "Removed high-risk tool 'write_file'",
+        "Removed high-risk tool 'create_file'",
+        "Removed high-risk tool 'edit_file'",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle));
+
+    if old_sanitizer_removed_file_tool {
+        for tool in ["create_file", "write_file", "edit_file"] {
+            if !allowed_tools.iter().any(|existing| existing == tool) {
+                allowed_tools.push(tool.to_string());
+            }
+        }
+    }
 }
 
 fn parse_frontmatter(frontmatter: &str) -> SkillFrontmatter {
@@ -793,5 +843,20 @@ mod tests {
 
         let err = apply_skill(&registry, "hidden", None, "sess-1").unwrap_err();
         assert!(err.to_string().contains("not invocable"));
+    }
+
+    #[test]
+    fn generated_skill_migrates_old_removed_file_authoring_tools() {
+        let raw = "---\nname: generated-alpha\ndescription: Alpha workflow\nwhen_to_use: Generate simulation code.\nallowed_tools:\n  - read_file\n  - run_tests\ngenerated_by: forge-osh\nsafety_review: sanitized\n---\n# Alpha\n\n## Safety Adjustments Applied By forge-osh\n\n- Removed high-risk tool 'write_file' from generated skill allowlist.";
+        let skill = parse_markdown_skill(
+            Path::new("skills/generated-alpha/SKILL.md"),
+            SkillSource::Project,
+            raw,
+        )
+        .unwrap();
+
+        assert!(skill.allowed_tools.contains(&"create_file".to_string()));
+        assert!(skill.allowed_tools.contains(&"write_file".to_string()));
+        assert!(skill.allowed_tools.contains(&"edit_file".to_string()));
     }
 }

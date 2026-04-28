@@ -1,4 +1,4 @@
-# 🛠️ forge-osh
+# 🛠️ forge-osh (Open Source Harness)
 
 <div align="center">
   <h3>The Universal, Provider-Agnostic Coding Agent for the Terminal</h3>

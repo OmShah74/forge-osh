@@ -11,8 +11,8 @@ use ratatui::{
 
 use super::themes::Theme;
 use super::{
-    AppState, DetailViewerState, HelpState, KeyManagerState, MessageRole, Modal,
-    SessionBrowserState, SkillBrowserState, OSH_SPLASH_LINES,
+    AppState, DetailViewerState, GeneratedSkillPreviewState, HelpState, KeyManagerState,
+    MessageRole, Modal, SessionBrowserState, SkillBrowserState, OSH_SPLASH_LINES,
 };
 
 /// Render the entire TUI
@@ -66,6 +66,9 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             }
             Modal::DetailViewer(dv) => {
                 render_detail_viewer(frame, dv, &theme);
+            }
+            Modal::GeneratedSkillPreview(preview) => {
+                render_generated_skill_preview(frame, preview, &theme);
             }
             Modal::RenameSession { input_buffer } => {
                 render_rename_session(frame, input_buffer, &theme);
@@ -980,6 +983,50 @@ fn render_detail_viewer(frame: &mut Frame, dv: &DetailViewerState, theme: &Theme
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
+        frame.render_stateful_widget(sb, area, &mut sb_state);
+    }
+}
+
+fn render_generated_skill_preview(
+    frame: &mut Frame,
+    preview: &GeneratedSkillPreviewState,
+    theme: &Theme,
+) {
+    let area = centered_rect(86, 84, frame.area());
+    frame.render_widget(Clear, area);
+
+    let body = preview.body();
+    let total_lines = body.lines().count() as u16;
+    let inner_h = area.height.saturating_sub(2);
+    let max_scroll = total_lines.saturating_sub(inner_h);
+    let scroll = preview.scroll.min(max_scroll);
+    let mode = if preview.showing_raw {
+        "raw SKILL.md"
+    } else {
+        "review"
+    };
+    let title = format!(
+        " Generated Skill: {} ({mode})  Y create · E toggle raw · Esc cancel ",
+        preview.draft.name
+    );
+
+    let p = Paragraph::new(body)
+        .style(Style::default().fg(theme.fg))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.spinner_fg))
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(p, area);
+
+    if max_scroll > 0 {
+        let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("â–²"))
+            .end_symbol(Some("â–¼"));
         frame.render_stateful_widget(sb, area, &mut sb_state);
     }
 }
