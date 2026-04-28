@@ -6,6 +6,7 @@ pub mod hooks;
 pub mod r#loop;
 pub mod permissions;
 pub mod planner;
+pub mod skill_generation;
 pub mod system_prompt;
 pub mod worker;
 

@@ -33,6 +33,9 @@ SLASH COMMANDS  (type at the prompt and press Enter)
                             fork skills run in an isolated worker.
   /skill show <name>        Display a skill's full SKILL.md body
   /skill new <name>         Scaffold a new project skill + open $EDITOR
+  /skill generate <name> <task>
+                            Draft a project skill from the current conversation;
+                            review it, then press Y to create it.
   /skill edit <name>        Edit an existing skill in $EDITOR (reload after save)
   /skill delete <name>      Remove a project skill directory
   /skill reload             Re-scan skill directories

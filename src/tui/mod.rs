@@ -22,6 +22,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::agent::{AgentEvent, AgentLoop, PermissionRequest};
+use crate::agent::skill_generation::GeneratedSkillDraft;
 use crate::config::keyring::KeyStore;
 use crate::config::{self, Config};
 use crate::graph::{CodeGraph, GraphBuildMsg, SharedGraph};
@@ -103,6 +104,8 @@ pub enum Modal {
     SkillBrowser(SkillBrowserState),
     /// Scrollable detail viewer used for `/skill show` and similar long text.
     DetailViewer(DetailViewerState),
+    /// Preview generated skill content before writing it to disk.
+    GeneratedSkillPreview(GeneratedSkillPreviewState),
 }
 
 #[derive(Debug, Default)]
@@ -123,6 +126,31 @@ impl DetailViewerState {
             title: title.into(),
             body: body.into(),
             scroll: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedSkillPreviewState {
+    pub draft: GeneratedSkillDraft,
+    pub scroll: u16,
+    pub showing_raw: bool,
+}
+
+impl GeneratedSkillPreviewState {
+    pub fn new(draft: GeneratedSkillDraft) -> Self {
+        Self {
+            draft,
+            scroll: 0,
+            showing_raw: false,
+        }
+    }
+
+    pub fn body(&self) -> String {
+        if self.showing_raw {
+            self.draft.content.clone()
+        } else {
+            self.draft.preview_body()
         }
     }
 }
@@ -336,6 +364,7 @@ pub struct AppState {
     pub skill_edit_pending: Option<String>,
     pub skill_new_pending: Option<String>,
     pub skill_delete_pending: Option<String>,
+    pub skill_generated_accept_pending: Option<GeneratedSkillDraft>,
     pub skill_reload_pending: bool,
     pub skill_off_pending: bool,
 }
@@ -392,6 +421,7 @@ impl AppState {
             skill_edit_pending: None,
             skill_new_pending: None,
             skill_delete_pending: None,
+            skill_generated_accept_pending: None,
             skill_reload_pending: false,
             skill_off_pending: false,
         }
@@ -1210,6 +1240,94 @@ async fn handle_slash_command(
             let rest = parts.next().unwrap_or("").trim().to_string();
 
             match head {
+                "generate" | "gen" | "generate-from-conversation" => {
+                    let mut gen_parts = rest.splitn(2, ' ');
+                    let raw_name = gen_parts.next().unwrap_or("").trim();
+                    let task = gen_parts.next().unwrap_or("").trim();
+                    if raw_name.is_empty() || task.is_empty() {
+                        state.push_system("Usage: /skill generate <name> <task description>");
+                        return true;
+                    }
+
+                    let (working_dir, session_id, messages, invoked_skills) = {
+                        let sess = session.lock().await;
+                        (
+                            sess.working_dir.clone(),
+                            sess.id.clone(),
+                            sess.history.messages().to_vec(),
+                            sess.invoked_skills.clone(),
+                        )
+                    };
+                    let registry =
+                        crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+                    let existing_skill_names =
+                        registry.skills.iter().map(|s| s.name.clone()).collect();
+                    let known_tools = agent_loop.tools.tool_names();
+
+                    let (provider_id, model_id, provider_name, ctx_window) = {
+                        let router = provider_router.read().await;
+                        let provider_id = router.active_provider_id().to_string();
+                        let model_id = router.active_model_id().to_string();
+                        let provider_name = router
+                            .active()
+                            .map(|p| p.name().to_string())
+                            .unwrap_or_else(|_| provider_id.clone());
+                        let ctx_window = router
+                            .active()
+                            .map(|p| p.context_window())
+                            .unwrap_or(128_000);
+                        (provider_id, model_id, provider_name, ctx_window)
+                    };
+
+                    state.push_system(format!(
+                        "Generating skill draft via {provider_name} ({model_id}) from the current conversation..."
+                    ));
+
+                    let input = crate::agent::skill_generation::SkillGenerationInput {
+                        raw_name: raw_name.to_string(),
+                        task: task.to_string(),
+                        working_dir: std::path::PathBuf::from(&working_dir),
+                        session_id,
+                        messages,
+                        invoked_skills,
+                        existing_skill_names,
+                        known_tools,
+                    };
+
+                    let draft_result = {
+                        let router = provider_router.read().await;
+                        match router.active() {
+                            Ok(provider) => {
+                                crate::agent::skill_generation::generate_skill_from_conversation(
+                                    provider,
+                                    &provider_id,
+                                    &model_id,
+                                    ctx_window,
+                                    input,
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        }
+                    };
+
+                    match draft_result {
+                        Ok(draft) => {
+                            let warning_count = draft.warnings.len();
+                            state.push_system(format!(
+                                "Generated skill draft '{}'. Review the preview, then press Y to create it or Esc to cancel. Safety warning(s): {warning_count}.",
+                                draft.name
+                            ));
+                            state.modal = Some(Modal::GeneratedSkillPreview(
+                                GeneratedSkillPreviewState::new(draft),
+                            ));
+                        }
+                        Err(err) => {
+                            state.push_system(format!("Skill generation failed: {err}"));
+                        }
+                    }
+                    return true;
+                }
                 "show" => {
                     if rest.is_empty() {
                         state.push_system("Usage: /skill show <name>");
@@ -2038,6 +2156,56 @@ fn user_skills_dir_display() -> String {
         .join("skills")
         .display()
         .to_string()
+}
+
+fn skill_browser_entries_from_registry(
+    registry: &crate::skills::SkillRegistry,
+) -> Vec<SkillBrowserEntry> {
+    let mut entries: Vec<SkillBrowserEntry> = registry
+        .skills
+        .iter()
+        .map(|s| SkillBrowserEntry {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            source: s.source.label().to_string(),
+            when_to_use: s.when_to_use.clone(),
+            execution_mode: s.execution_mode.as_str().to_string(),
+            allowed_tools: s.allowed_tools.clone(),
+            canonical_path: s.canonical_path.clone(),
+            body: s.content.clone(),
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        let rank = |s: &str| match s {
+            "bundled" => 0,
+            "user" => 1,
+            "project" => 2,
+            _ => 3,
+        };
+        rank(&a.source)
+            .cmp(&rank(&b.source))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    entries
+}
+
+fn open_skill_browser_from_registry(
+    state: &mut AppState,
+    registry: &crate::skills::SkillRegistry,
+    selected_name: Option<&str>,
+) {
+    let entries = skill_browser_entries_from_registry(registry);
+    let mut browser = SkillBrowserState::new(entries, state.active_skill_label.clone());
+    if let Some(name) = selected_name {
+        if let Some(idx) = browser
+            .entries
+            .iter()
+            .position(|entry| entry.name.eq_ignore_ascii_case(name))
+        {
+            browser.selected = idx;
+        }
+    }
+    state.modal = Some(Modal::SkillBrowser(browser));
 }
 
 fn sanitize_skill_name(input: &str) -> String {
@@ -3625,6 +3793,29 @@ pub async fn run_tui(
                 Err(e) => state.push_system(format!("Failed to create skill: {e}")),
             }
         }
+        if let Some(draft) = state.skill_generated_accept_pending.take() {
+            let working_dir = { session.lock().await.working_dir.clone() };
+            match crate::agent::skill_generation::write_generated_skill(&draft) {
+                Ok(path) => {
+                    if let Some(shared) = state.skill_registry.clone() {
+                        crate::skills::refresh_registry(
+                            &shared,
+                            std::path::Path::new(&working_dir),
+                        );
+                    }
+                    let registry =
+                        crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
+                    state.push_system(format!(
+                        "Created generated skill '{}' at {}.\nInvoke with `/skill {}` or inspect it in `/skills`.",
+                        draft.name,
+                        path.display(),
+                        draft.name
+                    ));
+                    open_skill_browser_from_registry(&mut state, &registry, Some(&draft.name));
+                }
+                Err(e) => state.push_system(format!("Failed to create generated skill: {e}")),
+            }
+        }
         if let Some(name) = state.skill_edit_pending.take() {
             let working_dir = { session.lock().await.working_dir.clone() };
             let registry = crate::skills::SkillLoader::load(std::path::Path::new(&working_dir));
@@ -4364,6 +4555,45 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             }
             _ => {
                 state.modal = Some(Modal::DetailViewer(dv));
+            }
+        },
+
+        Some(Modal::GeneratedSkillPreview(mut preview)) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {}
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                state.skill_generated_accept_pending = Some(preview.draft.clone());
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                preview.showing_raw = !preview.showing_raw;
+                preview.scroll = 0;
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                preview.scroll = preview.scroll.saturating_add(1);
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                preview.scroll = preview.scroll.saturating_sub(1);
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                preview.scroll = preview.scroll.saturating_add(10);
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+            KeyCode::PageUp => {
+                preview.scroll = preview.scroll.saturating_sub(10);
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                preview.scroll = 0;
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                preview.scroll = u16::MAX / 2;
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+            _ => {
+                state.modal = Some(Modal::GeneratedSkillPreview(preview));
             }
         },
 
