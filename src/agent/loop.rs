@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -44,6 +45,12 @@ pub enum AgentEvent {
         used: u32,
         limit: u32,
     },
+    CompactionStart {
+        message_count: usize,
+        provider_name: String,
+        model_id: String,
+        automatic: bool,
+    },
     /// Auto-compaction finished (success or graceful fallback). The TUI uses
     /// this to drain its rendered message log and refresh the context bar so
     /// the user SEES the window free up, not just the next turn.
@@ -52,6 +59,8 @@ pub enum AgentEvent {
         removed: usize,
         summary_preview: String,
         succeeded: bool,
+        automatic: bool,
+        elapsed_ms: u64,
     },
     Done,
     Error(String),
@@ -195,6 +204,15 @@ fn normalize_messages(messages: &[Message]) -> Vec<Message> {
     normalize_messages_pub(messages)
 }
 
+fn latest_user_message_tokens(messages: &[Message]) -> u32 {
+    match messages.last() {
+        Some(Message::User(UserContent::Text(text))) => {
+            crate::session::tokens::TokenCounter::count_text(text)
+        }
+        _ => 0,
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SkillInvocationMetadata {
     success: bool,
@@ -315,6 +333,7 @@ impl AgentLoop {
             session_id,
             trust_mode: mode == PermissionMode::Bypass || self.config.general.trust_mode,
             permission_mode: mode,
+            diff_review: self.config.ui.diff_before_apply,
             file_cache: Some(self.file_cache.clone()),
             active_skill_scope,
             skill_registry: Some(self.skill_registry.clone()),
@@ -421,8 +440,6 @@ impl AgentLoop {
                     )
                     .await;
 
-                    let keep_last = compaction::DEFAULT_KEEP_LAST;
-
                     // Always route compaction through the CURRENTLY-ACTIVE
                     // provider+model. Reading `session.model_id` (which is
                     // set at session creation and not updated on /model
@@ -443,6 +460,21 @@ impl AgentLoop {
                         )
                     };
                     let total_before = messages_all.len();
+                    let latest_user_tokens = latest_user_message_tokens(&messages_all);
+                    let fresh_user_budget = ctx_window
+                        .saturating_sub(self.config.agent.max_tokens)
+                        .saturating_sub(2_048);
+                    if latest_user_tokens > fresh_user_budget {
+                        let _ = self.event_tx.send(AgentEvent::Error(format!(
+                            "Latest user message is ~{latest_user_tokens} tokens, which cannot fit safely in the active {ctx_window}-token context window after reserving response/tool budget. It was not auto-compacted away. Please switch to a larger model or submit a smaller chunk."
+                        )));
+                        break;
+                    }
+                    let keep_last = if latest_user_tokens > 0 {
+                        1
+                    } else {
+                        compaction::DEFAULT_KEEP_LAST
+                    };
 
                     let _ = self.event_tx.send(AgentEvent::Token(format!(
                         "\n[context window full — auto-compacting {} message(s) via {provider_name} ({model_id})…]\n",
@@ -452,6 +484,13 @@ impl AgentLoop {
                     let (to_summarize_slice, _) =
                         compaction::split_for_compaction(&messages_all, keep_last);
                     let to_summarize = to_summarize_slice.to_vec();
+                    let compaction_started_at = Instant::now();
+                    let _ = self.event_tx.send(AgentEvent::CompactionStart {
+                        message_count: to_summarize.len(),
+                        provider_name: provider_name.clone(),
+                        model_id: model_id.clone(),
+                        automatic: true,
+                    });
 
                     let summary_result = {
                         let router = self.provider_router.read().await;
@@ -494,6 +533,8 @@ impl AgentLoop {
                                 removed,
                                 summary_preview: summary,
                                 succeeded: true,
+                                automatic: true,
+                                elapsed_ms: compaction_started_at.elapsed().as_millis() as u64,
                             });
                             let _ = self.event_tx.send(AgentEvent::Token(format!(
                                 "[context auto-compacted — {removed} message(s) replaced by an AI summary ({} words)]\n",
@@ -527,6 +568,8 @@ impl AgentLoop {
                                 removed,
                                 summary_preview: String::new(),
                                 succeeded: false,
+                                automatic: true,
+                                elapsed_ms: compaction_started_at.elapsed().as_millis() as u64,
                             });
                             if let Err(save_err) = save_result {
                                 let _ = self.event_tx.send(AgentEvent::Error(format!(

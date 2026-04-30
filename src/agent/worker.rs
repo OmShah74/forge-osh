@@ -245,6 +245,7 @@ impl Worker {
                 session_id: self.id.clone(),
                 trust_mode: true, // Workers always run in trust mode
                 permission_mode: crate::types::PermissionMode::Bypass,
+                diff_review: false,
                 file_cache: None,
                 active_skill_scope: None,
                 skill_registry: None,

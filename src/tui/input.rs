@@ -26,6 +26,8 @@ pub enum Action {
     ScrollBottom,
     PageUp,
     PageDown,
+    InputScrollUp,
+    InputScrollDown,
 
     // Global
     Cancel,
@@ -72,6 +74,7 @@ pub struct InputState {
     pub history: Vec<String>,
     pub history_index: Option<usize>,
     pub multiline: bool,
+    pub scroll_top: usize,
 }
 
 impl Default for InputState {
@@ -88,12 +91,22 @@ impl InputState {
             history: Vec::new(),
             history_index: None,
             multiline: false,
+            scroll_top: 0,
         }
     }
 
     pub fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+    }
+
+    pub fn insert_str(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.text.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.history_index = None;
     }
 
     pub fn backspace(&mut self) {
@@ -171,6 +184,7 @@ impl InputState {
         self.text.clear();
         self.cursor = 0;
         self.history_index = None;
+        self.scroll_top = 0;
         text
     }
 
@@ -186,6 +200,7 @@ impl InputState {
         self.history_index = Some(idx);
         self.text = self.history[idx].clone();
         self.cursor = self.text.len();
+        self.scroll_top = 0;
     }
 
     pub fn history_down(&mut self) {
@@ -194,14 +209,24 @@ impl InputState {
                 self.history_index = Some(i + 1);
                 self.text = self.history[i + 1].clone();
                 self.cursor = self.text.len();
+                self.scroll_top = 0;
             }
             Some(_) => {
                 self.history_index = None;
                 self.text.clear();
                 self.cursor = 0;
+                self.scroll_top = 0;
             }
             None => {}
         }
+    }
+
+    pub fn scroll_up(&mut self, n: usize) {
+        self.scroll_top = self.scroll_top.saturating_sub(n);
+    }
+
+    pub fn scroll_down(&mut self, n: usize) {
+        self.scroll_top = self.scroll_top.saturating_add(n);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -210,7 +235,24 @@ impl InputState {
 
     /// Save the most recent 500 history entries to disk.
     pub fn save_history(&self, path: &std::path::Path) {
-        let recent: Vec<String> = self.history.iter().rev().take(500).rev().cloned().collect();
+        const MAX_FULL_HISTORY_ENTRY_CHARS: usize = 20_000;
+        let recent: Vec<String> = self
+            .history
+            .iter()
+            .rev()
+            .take(500)
+            .rev()
+            .map(|entry| {
+                if entry.chars().count() > MAX_FULL_HISTORY_ENTRY_CHARS {
+                    format!(
+                        "[large pasted prompt omitted from input history: {} chars]",
+                        entry.chars().count()
+                    )
+                } else {
+                    entry.clone()
+                }
+            })
+            .collect();
         if let Ok(json) = serde_json::to_string(&recent) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -263,6 +305,12 @@ pub fn map_key_normal(key: KeyEvent) -> Action {
         (KeyModifiers::SHIFT, KeyCode::Down) => Action::ScrollDown,
         (KeyModifiers::NONE, KeyCode::PageUp) => Action::PageUp,
         (KeyModifiers::NONE, KeyCode::PageDown) => Action::PageDown,
+        (KeyModifiers::ALT, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Up) => {
+            Action::InputScrollUp
+        }
+        (KeyModifiers::ALT, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Down) => {
+            Action::InputScrollDown
+        }
         (KeyModifiers::CONTROL, KeyCode::Home) => Action::ScrollTop,
         (KeyModifiers::CONTROL, KeyCode::End) => Action::ScrollBottom,
 

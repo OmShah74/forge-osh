@@ -7,13 +7,14 @@ pub mod spinner;
 pub mod themes;
 
 use crate::agent::Coordinator;
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -21,11 +22,12 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use crate::agent::{AgentEvent, AgentLoop, PermissionRequest};
 use crate::agent::skill_generation::GeneratedSkillDraft;
+use crate::agent::{AgentEvent, AgentLoop, PermissionRequest};
 use crate::config::keyring::KeyStore;
 use crate::config::{self, Config};
 use crate::graph::{CodeGraph, GraphBuildMsg, SharedGraph};
+use crate::lsp::SharedLspManager;
 use crate::provider::router::ProviderRouter;
 use crate::session::Session;
 use crate::tools::ToolRegistry;
@@ -83,6 +85,7 @@ pub enum Modal {
     Confirmation {
         tool_name: String,
         description: String,
+        scroll: u16,
         response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
     },
     Help(HelpState),
@@ -106,6 +109,33 @@ pub enum Modal {
     DetailViewer(DetailViewerState),
     /// Preview generated skill content before writing it to disk.
     GeneratedSkillPreview(GeneratedSkillPreviewState),
+    /// Large paste confirmation before inserting text into the prompt buffer.
+    PasteConfirm(PasteConfirmState),
+}
+
+#[derive(Debug, Clone)]
+pub struct PasteConfirmState {
+    pub text: String,
+    pub analysis: PasteAnalysis,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasteAnalysis {
+    pub chars: usize,
+    pub bytes: usize,
+    pub lines: usize,
+    pub estimated_tokens: u32,
+    pub context_limit: u32,
+    pub available_tokens_estimate: u32,
+    pub recommendation: PasteRecommendation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteRecommendation {
+    InsertInline,
+    InsertInlineWithWarning,
+    AskForStrategy,
+    RejectTooLarge,
 }
 
 #[derive(Debug, Default)]
@@ -341,6 +371,11 @@ pub struct AppState {
     /// Progress messages received from the background graph build thread
     pub graph_build_rx: Option<std::sync::mpsc::Receiver<GraphBuildMsg>>,
 
+    // ── LSP ──────────────────────────────────────────────────────────────
+    /// Shared LSP manager (shared with the LspXxxTool family). None until
+    /// run_tui populates it; cmd_lsp falls back to a friendly message.
+    pub lsp: Option<SharedLspManager>,
+
     // ── Agent-loop shared handles (populated post-boot) ─────────────────
     /// Cancellation token shared with the active AgentLoop. Ctrl+C / Esc calls
     /// `.read().cancel()` here to abort in-flight provider streams and tool
@@ -410,6 +445,7 @@ impl AppState {
             coordinator: None,
             shared_graph,
             graph_build_rx: None,
+            lsp: None,
             agent_cancel: None,
             permission_mode_state: None,
             thinking_state: None,
@@ -490,6 +526,11 @@ async fn handle_slash_command(
     // Delegate /forge-graph before reaching the big match
     if text.trim_start().starts_with("/forge-graph") {
         cmd_forge_graph(state, session, text.trim()).await;
+        return true;
+    }
+    // /lsp — language-server status / shutdown
+    if text.trim_start().starts_with("/lsp") {
+        cmd_lsp(state, text.trim()).await;
         return true;
     }
     // Split into command name and optional argument
@@ -675,7 +716,7 @@ async fn handle_slash_command(
             } else {
                 crate::agent::compaction::DEFAULT_KEEP_LAST
             };
-            compact_history_llm(state, session, provider_router, keep).await;
+            start_compact_history_llm(state, session, provider_router, agent_loop, keep).await;
         }
 
         "/undo" => {
@@ -1220,6 +1261,13 @@ async fn handle_slash_command(
                 return true;
             }
             if arg.is_empty() {
+                state.push_system(
+                    "Skill generation:\n  \
+                     /skill generate <name> <task>  - draft a project skill from this conversation\n  \
+                     /skill gen <name> <task>       - alias for /skill generate\n  \
+                     /skill generate-from-conversation <name> <task>  - explicit long-form alias\n  \
+                     Generated skills are previewed first; press Y to create or E to inspect raw.",
+                );
                 state.push_system(
                     "Usage:\n  \
                      /skill <name> [args]   — invoke a skill\n  \
@@ -2394,6 +2442,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/config",
         "/stats",
         "/forge-graph",
+        "/lsp",
         "/multithread",
     ];
     let prefix = text.as_str();
@@ -2934,6 +2983,80 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
     }
 }
 
+// ---------------------------------------------------------------------------
+// /lsp — language-server status and shutdown commands
+// ---------------------------------------------------------------------------
+
+async fn cmd_lsp(state: &mut AppState, text: &str) {
+    let arg = text.trim_start_matches("/lsp").trim();
+    let Some(lsp) = state.lsp.clone() else {
+        state.push_system("LSP not available in this session.");
+        return;
+    };
+
+    match arg {
+        "" | "status" => {
+            let supported = crate::lsp::LspManager::list_supported();
+            let running = lsp.running_clients().await;
+            let mut msg = String::from("LSP status\n\nSupported languages:\n");
+            for s in &supported {
+                let installed = match &s.installed {
+                    Some(p) => format!("installed ({p})"),
+                    None => format!(
+                        "NOT installed (tried: {})",
+                        s.candidates.join(", ")
+                    ),
+                };
+                msg.push_str(&format!(
+                    "  {:<11} [.{}]  {}\n",
+                    s.language,
+                    s.extensions.join(", ."),
+                    installed
+                ));
+            }
+            if running.is_empty() {
+                msg.push_str("\nNo servers currently running. Servers spawn lazily on first lsp_* tool call.");
+            } else {
+                msg.push_str("\nRunning servers:\n");
+                for r in &running {
+                    msg.push_str(&format!(
+                        "  {:<11} root={} initialized={}\n",
+                        r.language,
+                        r.root.display(),
+                        r.initialized
+                    ));
+                }
+            }
+            state.push_system(msg);
+        }
+        "shutdown" | "stop" => {
+            lsp.shutdown_all().await;
+            state.push_system("All LSP servers shut down. They'll re-spawn lazily on next use.");
+        }
+        s if s.starts_with("shutdown ") || s.starts_with("stop ") => {
+            let lang = s
+                .strip_prefix("shutdown ")
+                .or_else(|| s.strip_prefix("stop "))
+                .unwrap_or("")
+                .trim();
+            match lsp.shutdown_language(lang).await {
+                Ok(()) => state.push_system(format!("Shut down {lang} language server.")),
+                Err(e) => state.push_system(format!("/lsp shutdown {lang}: {e}")),
+            }
+        }
+        other => {
+            state.push_system(format!(
+                "Unknown /lsp subcommand: '{other}'\n\
+                Usage:\n\
+                  /lsp                — show language-server status\n\
+                  /lsp status         — same as above\n\
+                  /lsp shutdown       — stop all running servers\n\
+                  /lsp shutdown <lang>— stop one server (rust|typescript|python|go)"
+            ));
+        }
+    }
+}
+
 /// Drain the oldest rendered messages from the TUI so the visible
 /// conversation pane reflects the actual post-compaction history.
 ///
@@ -2987,6 +3110,603 @@ fn refresh_compacted_context_snapshot(sess: &mut Session) {
     sess.cost_tracker.last_output_tokens = 0;
 }
 
+fn compaction_spinner_message(
+    automatic: bool,
+    message_count: usize,
+    provider_name: &str,
+    model_id: &str,
+) -> String {
+    let mode = if automatic {
+        "Auto-compacting"
+    } else {
+        "Compacting"
+    };
+    format!("{mode} {message_count} message(s) via {provider_name} ({model_id})")
+}
+
+fn format_elapsed_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    }
+}
+
+async fn analyze_paste_text(
+    text: &str,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+    config: &Config,
+    tools: &Arc<ToolRegistry>,
+) -> PasteAnalysis {
+    const SAFETY_MARGIN_TOKENS: u32 = 2048;
+    const USER_MESSAGE_OVERHEAD_TOKENS: u32 = 4;
+
+    let chars = text.chars().count();
+    let bytes = text.len();
+    let lines = text.lines().count().max(1);
+    let estimated_tokens = crate::session::tokens::TokenCounter::count_text(text)
+        .saturating_add(USER_MESSAGE_OVERHEAD_TOKENS);
+
+    let (history_tokens, working_dir) = {
+        let sess = session.lock().await;
+        (
+            crate::session::tokens::TokenCounter::count_messages(sess.history.messages()),
+            sess.working_dir.clone(),
+        )
+    };
+
+    let (context_limit, tool_tokens) = {
+        let router = provider_router.read().await;
+        let context_limit = router
+            .active()
+            .map(|p| p.context_window())
+            .unwrap_or(128_000);
+        let tool_tokens = if router.active().map(|p| p.supports_tools()).unwrap_or(false) {
+            tools
+                .all_definitions()
+                .iter()
+                .map(|tool| {
+                    crate::session::tokens::TokenCounter::count_text(&tool.name)
+                        .saturating_add(crate::session::tokens::TokenCounter::count_text(
+                            &tool.description,
+                        ))
+                        .saturating_add(crate::session::tokens::TokenCounter::count_text(
+                            &tool.parameters.to_string(),
+                        ))
+                })
+                .fold(0u32, u32::saturating_add)
+        } else {
+            0
+        };
+        (context_limit, tool_tokens)
+    };
+
+    let system = crate::agent::system_prompt::build_system_prompt(
+        std::path::Path::new(&working_dir),
+        &config.general.system_prompt_extra,
+        None,
+        None,
+        config.agent.max_skill_listed_in_prompt,
+        config.agent.include_skills_in_system_prompt && config.agent.skills_enabled,
+    );
+    let system_tokens = crate::session::tokens::TokenCounter::count_text(&system);
+    let reserved = config
+        .agent
+        .max_tokens
+        .saturating_add(SAFETY_MARGIN_TOKENS)
+        .saturating_add(system_tokens)
+        .saturating_add(history_tokens)
+        .saturating_add(tool_tokens);
+    let available_tokens_estimate = context_limit.saturating_sub(reserved);
+
+    let recommendation = if estimated_tokens <= available_tokens_estimate.saturating_mul(7) / 10 {
+        PasteRecommendation::InsertInline
+    } else if estimated_tokens <= available_tokens_estimate {
+        PasteRecommendation::InsertInlineWithWarning
+    } else if estimated_tokens
+        >= context_limit
+            .saturating_sub(config.agent.max_tokens)
+            .saturating_sub(SAFETY_MARGIN_TOKENS)
+    {
+        PasteRecommendation::RejectTooLarge
+    } else {
+        PasteRecommendation::AskForStrategy
+    };
+
+    PasteAnalysis {
+        chars,
+        bytes,
+        lines,
+        estimated_tokens,
+        context_limit,
+        available_tokens_estimate,
+        recommendation,
+    }
+}
+
+fn paste_status_message(analysis: &PasteAnalysis) -> String {
+    format!(
+        "Pasted {} chars / {} line(s) / ~{} tokens. Estimated available context for new input: ~{} tokens.",
+        analysis.chars,
+        analysis.lines,
+        analysis.estimated_tokens,
+        analysis.available_tokens_estimate
+    )
+}
+
+fn insert_paste_into_input(state: &mut AppState, text: &str, analysis: &PasteAnalysis) {
+    state.input.insert_str(text);
+    match analysis.recommendation {
+        PasteRecommendation::InsertInline => state.push_system(paste_status_message(analysis)),
+        PasteRecommendation::InsertInlineWithWarning => state.push_system(format!(
+            "{} Warning: this paste is close to the active model context limit.",
+            paste_status_message(analysis)
+        )),
+        PasteRecommendation::AskForStrategy | PasteRecommendation::RejectTooLarge => {
+            state.push_system(format!(
+                "{} Inserted anyway by user choice; the next request may fail unless you compact, switch models, or reduce the text.",
+                paste_status_message(analysis)
+            ));
+        }
+    }
+}
+
+fn normalize_clipboard_text(raw: &str) -> String {
+    let mut text = raw.replace("\r\n", "\n").replace('\r', "\n");
+    text = text.replace("\u{1b}[200~", "").replace("\u{1b}[201~", "");
+
+    // Some Windows/raw-terminal paths split the ESC byte away from bracketed
+    // paste markers, leaving literal marker tails in the collected text.
+    if text.starts_with("[200~") && text.ends_with("[201~") {
+        text = text
+            .trim_start_matches("[200~")
+            .trim_end_matches("[201~")
+            .to_string();
+    }
+
+    text.replace('\0', "")
+}
+
+fn should_confirm_paste(text: &str, analysis: &PasteAnalysis) -> bool {
+    text.contains('\n')
+        || text.len() > 4_096
+        || matches!(
+            analysis.recommendation,
+            PasteRecommendation::AskForStrategy | PasteRecommendation::RejectTooLarge
+        )
+}
+
+async fn handle_clipboard_paste_text(
+    state: &mut AppState,
+    text: String,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+    config: &Config,
+    tools: &Arc<ToolRegistry>,
+) {
+    if state.modal.is_some() {
+        state.push_system("Paste ignored while a modal is open. Close the modal and paste again.");
+        return;
+    }
+
+    let text = normalize_clipboard_text(&text);
+    if text.is_empty() {
+        return;
+    }
+
+    let analysis = analyze_paste_text(&text, session, provider_router, config, tools).await;
+    if should_confirm_paste(&text, &analysis) {
+        state.modal = Some(Modal::PasteConfirm(PasteConfirmState { text, analysis }));
+    } else {
+        insert_paste_into_input(state, &text, &analysis);
+    }
+}
+
+fn key_event_to_paste_fragment(key: &KeyEvent) -> Option<String> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => Some(c.to_string()),
+        KeyCode::Enter => Some("\n".to_string()),
+        KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some("\n".to_string())
+        }
+        KeyCode::Tab => Some("\t".to_string()),
+        KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some("\t".to_string())
+        }
+        KeyCode::Esc => Some("\u{1b}".to_string()),
+        _ => None,
+    }
+}
+
+fn key_burst_to_text(keys: &[KeyEvent]) -> String {
+    keys.iter()
+        .filter_map(key_event_to_paste_fragment)
+        .collect::<String>()
+}
+
+fn should_treat_key_burst_as_paste(text: &str, key_count: usize) -> bool {
+    if key_count < 2 {
+        return false;
+    }
+
+    let has_bracketed_paste_markers = (text.contains("\u{1b}[200~")
+        && text.contains("\u{1b}[201~"))
+        || (text.contains("[200~") && text.contains("[201~"));
+    let chars = text.chars().count();
+    let newline_count = text.chars().filter(|&c| c == '\n').count();
+    let has_embedded_newline = text.contains('\n') && !text.ends_with('\n');
+
+    has_bracketed_paste_markers || has_embedded_newline || newline_count >= 1 || chars >= 80
+}
+
+fn append_fallback_paste_event(
+    ev: Event,
+    collected_events: &mut Vec<Event>,
+    text: &mut String,
+    fragment_count: &mut usize,
+    saw_explicit_paste: &mut bool,
+    deferred_events: &mut VecDeque<Event>,
+) {
+    match ev {
+        Event::Key(key) => {
+            if let Some(fragment) = key_event_to_paste_fragment(&key) {
+                text.push_str(&fragment);
+                *fragment_count = (*fragment_count).saturating_add(1);
+                collected_events.push(Event::Key(key));
+            } else {
+                deferred_events.push_back(Event::Key(key));
+            }
+        }
+        Event::Paste(pasted) => {
+            *saw_explicit_paste = true;
+            *fragment_count = (*fragment_count).saturating_add(pasted.chars().count().max(1));
+            text.push_str(&pasted);
+            collected_events.push(Event::Paste(pasted));
+        }
+        other => deferred_events.push_back(other),
+    }
+}
+
+fn collect_fallback_paste_burst(
+    first_key: KeyEvent,
+    deferred_events: &mut VecDeque<Event>,
+) -> anyhow::Result<(KeyEvent, Option<String>)> {
+    const FALLBACK_PASTE_INITIAL_GRACE: Duration = Duration::from_millis(12);
+    const FALLBACK_PASTE_QUIET_GAP: Duration = Duration::from_millis(250);
+    const FALLBACK_PASTE_MAX_COLLECT: Duration = Duration::from_secs(30);
+
+    let first = first_key.clone();
+    let mut collected_events = vec![Event::Key(first_key.clone())];
+    let mut text = key_event_to_paste_fragment(&first_key).unwrap_or_default();
+    let mut fragment_count = 1usize;
+    let mut saw_explicit_paste = false;
+
+    // First drain only events that are already queued. Normal typing usually
+    // has no immediately queued neighbor, so this keeps single-key latency at
+    // zero. Clipboard paste tends to arrive as a dense burst.
+    while event::poll(Duration::ZERO)? {
+        let next = event::read()?;
+        append_fallback_paste_event(
+            next,
+            &mut collected_events,
+            &mut text,
+            &mut fragment_count,
+            &mut saw_explicit_paste,
+            deferred_events,
+        );
+    }
+
+    if fragment_count == 1 && event::poll(FALLBACK_PASTE_INITIAL_GRACE)? {
+        let next = event::read()?;
+        append_fallback_paste_event(
+            next,
+            &mut collected_events,
+            &mut text,
+            &mut fragment_count,
+            &mut saw_explicit_paste,
+            deferred_events,
+        );
+
+        while event::poll(Duration::ZERO)? {
+            let next = event::read()?;
+            append_fallback_paste_event(
+                next,
+                &mut collected_events,
+                &mut text,
+                &mut fragment_count,
+                &mut saw_explicit_paste,
+                deferred_events,
+            );
+        }
+    }
+
+    if fragment_count == 1 {
+        return Ok((first, None));
+    }
+
+    if !saw_explicit_paste && !should_treat_key_burst_as_paste(&text, fragment_count) {
+        for ev in collected_events.into_iter().skip(1) {
+            deferred_events.push_back(ev);
+        }
+        return Ok((first, None));
+    }
+
+    // Once we have evidence of a burst, wait until the terminal goes quiet
+    // before showing the paste modal. Without this, later pasted characters
+    // can be misread as modal shortcuts (`c` cancels, Enter accepts).
+    let started = Instant::now();
+    while started.elapsed() < FALLBACK_PASTE_MAX_COLLECT && event::poll(FALLBACK_PASTE_QUIET_GAP)? {
+        let next = event::read()?;
+        append_fallback_paste_event(
+            next,
+            &mut collected_events,
+            &mut text,
+            &mut fragment_count,
+            &mut saw_explicit_paste,
+            deferred_events,
+        );
+
+        while event::poll(Duration::ZERO)? {
+            let next = event::read()?;
+            append_fallback_paste_event(
+                next,
+                &mut collected_events,
+                &mut text,
+                &mut fragment_count,
+                &mut saw_explicit_paste,
+                deferred_events,
+            );
+        }
+    }
+
+    if saw_explicit_paste || should_treat_key_burst_as_paste(&text, fragment_count) {
+        Ok((first, Some(text)))
+    } else {
+        for ev in collected_events.into_iter().skip(1) {
+            deferred_events.push_back(ev);
+        }
+        Ok((first, None))
+    }
+}
+
+fn should_run_full_submit_preflight(text: &str) -> bool {
+    text.len() > 8_192 || text.contains('\n')
+}
+
+#[cfg(test)]
+mod paste_fallback_tests {
+    use super::*;
+    use crossterm::event::KeyEventState;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn coalesces_multiline_key_burst_as_paste() {
+        let keys = vec![
+            key(KeyCode::Char('a')),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('b')),
+        ];
+        let text = key_burst_to_text(&keys);
+        assert_eq!(text, "a\nb");
+        assert!(should_treat_key_burst_as_paste(&text, keys.len()));
+    }
+
+    #[test]
+    fn coalesces_short_trailing_newline_burst_as_paste() {
+        let keys = vec![key(KeyCode::Char('a')), key(KeyCode::Enter)];
+        let text = key_burst_to_text(&keys);
+        assert_eq!(text, "a\n");
+        assert!(should_treat_key_burst_as_paste(&text, keys.len()));
+    }
+
+    #[test]
+    fn does_not_treat_single_enter_as_paste() {
+        let keys = vec![key(KeyCode::Enter)];
+        let text = key_burst_to_text(&keys);
+        assert_eq!(text, "\n");
+        assert!(!should_treat_key_burst_as_paste(&text, keys.len()));
+    }
+
+    #[test]
+    fn does_not_treat_short_plain_text_burst_as_paste() {
+        let keys = vec![key(KeyCode::Char('a')), key(KeyCode::Char('b'))];
+        let text = key_burst_to_text(&keys);
+        assert_eq!(text, "ab");
+        assert!(!should_treat_key_burst_as_paste(&text, keys.len()));
+    }
+
+    #[test]
+    fn coalesces_long_single_line_key_burst_as_paste() {
+        let keys: Vec<KeyEvent> = "x"
+            .repeat(80)
+            .chars()
+            .map(|c| key(KeyCode::Char(c)))
+            .collect();
+        let text = key_burst_to_text(&keys);
+        assert_eq!(text.chars().count(), 80);
+        assert!(should_treat_key_burst_as_paste(&text, keys.len()));
+    }
+
+    #[test]
+    fn normalizes_clipboard_newlines_and_bracketed_markers() {
+        let raw = "\u{1b}[200~one\r\ntwo\rthree\0\u{1b}[201~";
+        assert_eq!(normalize_clipboard_text(raw), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn detects_raw_bracketed_paste_burst_even_when_small() {
+        let text = "\u{1b}[200~hi\u{1b}[201~";
+        assert!(should_treat_key_burst_as_paste(text, text.chars().count()));
+        assert_eq!(normalize_clipboard_text(text), "hi");
+    }
+
+    #[test]
+    fn does_not_strip_internal_marker_like_text() {
+        let text = "keep [200~ this [201~ text";
+        assert_eq!(normalize_clipboard_text(text), text);
+    }
+}
+
+/// Start LLM-based compaction in the background. Running provider
+/// summarization directly inside the TUI event loop freezes redraws, so this
+/// path reports progress via AgentEvent while the spinner keeps animating.
+async fn start_compact_history_llm(
+    state: &mut AppState,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+    agent_loop: &Arc<AgentLoop>,
+    keep: usize,
+) {
+    use crate::agent::compaction;
+
+    if state.agent_busy {
+        state.push_system("Cannot compact while another operation is running.");
+        return;
+    }
+
+    let (messages, invoked_skills) = {
+        let sess = session.lock().await;
+        (
+            sess.history.messages().to_vec(),
+            sess.invoked_skills.clone(),
+        )
+    };
+    let total = messages.len();
+
+    if total == 0 || (keep > 0 && total <= keep) {
+        state.push_system(format!(
+            "Conversation has {total} message(s). Nothing to compact (keeping last {keep})."
+        ));
+        return;
+    }
+
+    let (to_summarize, _) = compaction::split_for_compaction(&messages, keep);
+    let to_summarize = to_summarize.to_vec();
+    let message_count = to_summarize.len();
+
+    let (ctx_window, active_model_id, provider_name) = {
+        let router = provider_router.read().await;
+        let ctx = router
+            .active()
+            .map(|p| p.context_window())
+            .unwrap_or(128_000);
+        let model = router.active_model_id().to_string();
+        let pname = router
+            .active()
+            .map(|p| p.name().to_string())
+            .unwrap_or_default();
+        (ctx, model, pname)
+    };
+
+    state.agent_busy = true;
+    state.spinner.start(compaction_spinner_message(
+        false,
+        message_count,
+        &provider_name,
+        &active_model_id,
+    ));
+    state.push_system(format!(
+        "Compacting {message_count} message(s) via {provider_name} ({active_model_id})..."
+    ));
+
+    let loop_clone = agent_loop.clone();
+    let session_clone = session.clone();
+    let event_tx = loop_clone.event_tx.clone();
+    state.agent_task = Some(tokio::spawn(async move {
+        let started_at = Instant::now();
+        let _ = event_tx.send(AgentEvent::CompactionStart {
+            message_count,
+            provider_name: provider_name.clone(),
+            model_id: active_model_id.clone(),
+            automatic: false,
+        });
+
+        let summary_result = {
+            let router = loop_clone.provider_router.read().await;
+            match router.active() {
+                Ok(provider) => {
+                    compaction::summarize_messages(
+                        &to_summarize,
+                        &invoked_skills,
+                        provider,
+                        &active_model_id,
+                        ctx_window,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            }
+        };
+
+        match summary_result {
+            Ok(summary) => {
+                let removed = total.saturating_sub(keep);
+                let save_result = {
+                    let mut sess = session_clone.lock().await;
+                    sess.history.summarize_old(summary.clone(), keep);
+                    refresh_compacted_context_snapshot(&mut sess);
+                    sess.save()
+                };
+                let _ = event_tx.send(AgentEvent::HistoryCompacted {
+                    kept: keep,
+                    removed,
+                    summary_preview: summary,
+                    succeeded: true,
+                    automatic: false,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                });
+                if let Err(e) = save_result {
+                    let _ = event_tx.send(AgentEvent::Error(format!(
+                        "Warning: compacted history could not be saved to disk: {e}"
+                    )));
+                }
+            }
+            Err(e) => {
+                let removed = total.saturating_sub(keep);
+                let save_result = {
+                    let mut sess = session_clone.lock().await;
+                    sess.history.compact(keep);
+                    refresh_compacted_context_snapshot(&mut sess);
+                    sess.save()
+                };
+                let _ = event_tx.send(AgentEvent::HistoryCompacted {
+                    kept: keep,
+                    removed,
+                    summary_preview: String::new(),
+                    succeeded: false,
+                    automatic: false,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                });
+                if let Err(save_err) = save_result {
+                    let _ = event_tx.send(AgentEvent::Error(format!(
+                        "Warning: truncated history could not be saved to disk: {save_err}"
+                    )));
+                }
+                let _ = event_tx.send(AgentEvent::Error(format!(
+                    "AI summary failed ({e}); fell back to plain truncation. \
+                     Removed {removed} messages from the context window, {keep} remain. \
+                     Tip: run /model to switch to a cheaper/faster provider for compaction \
+                     and retry /compact."
+                )));
+            }
+        }
+    }));
+}
+
+#[allow(dead_code)]
 /// LLM-based compact: summarize old messages with the active provider,
 /// then replace them with the summary so the context window is freed.
 async fn compact_history_llm(
@@ -3204,12 +3924,18 @@ pub async fn run_tui(
     session: Arc<Mutex<Session>>,
     key_store: Arc<Mutex<KeyStore>>,
     shared_graph: SharedGraph,
+    lsp: SharedLspManager,
     skill_registry: crate::skills::SharedSkillRegistry,
 ) -> anyhow::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -3378,6 +4104,7 @@ pub async fn run_tui(
     state.thinking_state = Some(thinking_state.clone());
     state.file_cache = Some(file_cache.clone());
     state.skill_registry = Some(skill_registry.clone());
+    state.lsp = Some(lsp.clone());
     // Seed the status-bar label from the session's persisted scope (in case
     // the user resumed a session that was mid-skill).
     {
@@ -3391,6 +4118,7 @@ pub async fn run_tui(
     // -----------------------------------------------------------------------
     // Main event loop
     // -----------------------------------------------------------------------
+    let mut deferred_events: VecDeque<Event> = VecDeque::new();
     while state.running {
         // Draw frame
         terminal.draw(|frame| renderer::render(frame, &mut state))?;
@@ -3473,12 +4201,33 @@ pub async fn run_tui(
                         ),
                     });
                 }
+                AgentEvent::CompactionStart {
+                    message_count,
+                    provider_name,
+                    model_id,
+                    automatic,
+                } => {
+                    commit_streaming_text(&mut state);
+                    state.spinner.start(compaction_spinner_message(
+                        automatic,
+                        message_count,
+                        &provider_name,
+                        &model_id,
+                    ));
+                }
                 AgentEvent::HistoryCompacted {
                     kept,
                     removed,
                     summary_preview,
                     succeeded,
+                    automatic,
+                    elapsed_ms,
                 } => {
+                    state.spinner.stop();
+                    if !automatic {
+                        state.agent_busy = false;
+                        state.agent_task = None;
+                    }
                     // The agent loop already mutated `session.history`.
                     // Here we (a) drain the rendered conversation pane so
                     // the user visibly sees the log shrink, (b) refresh the
@@ -3492,18 +4241,37 @@ pub async fn run_tui(
                     };
                     replace_rendered_for_compaction(&mut state, kept, summary_for_display);
                     refresh_context_display(&mut state, &session, &provider_router).await;
-                    if succeeded {
+                    let elapsed = format_elapsed_ms(elapsed_ms);
+                    if !automatic {
+                        if succeeded {
+                            let preview = first_chars(&summary_preview, 500);
+                            let is_truncated = summary_preview.chars().count() > 500;
+                            state.push_system(format!(
+                                "Compacted in {elapsed}: {removed} message(s) replaced by AI summary ({} words, {} chars). \
+                                 {kept} message(s) kept verbatim.\n--- Summary preview ---\n{}{}",
+                                summary_preview.split_whitespace().count(),
+                                summary_preview.chars().count(),
+                                preview,
+                                if is_truncated { " â€¦" } else { "" },
+                            ));
+                        } else {
+                            state.push_system(format!(
+                                "Compact fell back to plain truncation after {elapsed}: {removed} message(s) \
+                                 removed from the context window, {kept} remain. Summary was not generated."
+                            ));
+                        }
+                    } else if succeeded {
                         let preview = first_chars(&summary_preview, 500);
                         let is_truncated = summary_preview.chars().count() > 500;
                         state.push_system(format!(
-                            "Auto-compacted: {removed} message(s) replaced by AI summary. \
+                            "Auto-compacted in {elapsed}: {removed} message(s) replaced by AI summary. \
                              {kept} kept verbatim.\n--- Summary preview ---\n{}{}",
                             preview,
                             if is_truncated { " …" } else { "" },
                         ));
                     } else {
                         state.push_system(format!(
-                            "Auto-compact fell back to plain truncation: {removed} message(s) \
+                            "Auto-compact fell back to plain truncation after {elapsed}: {removed} message(s) \
                              removed from the context window, {kept} remain. Summary was not \
                              generated — consider switching to a cheaper model for compaction \
                              via /model and running /compact manually."
@@ -3673,6 +4441,7 @@ pub async fn run_tui(
             state.modal = Some(Modal::Confirmation {
                 tool_name: req.tool_name,
                 description: req.description,
+                scroll: 0,
                 response_tx: req.response_tx,
             });
         }
@@ -4046,16 +4815,61 @@ pub async fn run_tui(
         }
 
         // ---- Poll terminal events ----
-        if event::poll(timeout)? {
+        if !deferred_events.is_empty() || event::poll(timeout)? {
             // Batch: read all pending events then redraw once
             loop {
-                let ev = event::read()?;
+                let mut ev = if let Some(ev) = deferred_events.pop_front() {
+                    ev
+                } else {
+                    event::read()?
+                };
+
+                if let Event::Key(first_key) = ev.clone() {
+                    if state.modal.is_none()
+                        && !state.vim_normal_mode
+                        && key_event_to_paste_fragment(&first_key).is_some()
+                    {
+                        let (key, fallback_paste) =
+                            collect_fallback_paste_burst(first_key, &mut deferred_events)?;
+                        if let Some(text) = fallback_paste {
+                            handle_clipboard_paste_text(
+                                &mut state,
+                                text,
+                                &session,
+                                &provider_router,
+                                &config,
+                                &tools,
+                            )
+                            .await;
+                            if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
+                                break;
+                            }
+                            continue;
+                        }
+                        ev = Event::Key(key);
+                    }
+                }
 
                 match ev {
+                    Event::Paste(text) => {
+                        handle_clipboard_paste_text(
+                            &mut state,
+                            text,
+                            &session,
+                            &provider_router,
+                            &config,
+                            &tools,
+                        )
+                        .await;
+                        if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
+                            break;
+                        }
+                        continue;
+                    }
                     Event::Key(key) => {
                         // Skip key-release events (Windows sends both Press and Release)
                         if key.kind != KeyEventKind::Press {
-                            if !event::poll(Duration::ZERO)? {
+                            if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
                                 break;
                             }
                             continue;
@@ -4064,7 +4878,7 @@ pub async fn run_tui(
                         // Modal input has priority over everything else
                         if state.modal.is_some() {
                             handle_modal_input(&mut state, key);
-                            if !event::poll(Duration::ZERO)? {
+                            if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
                                 break;
                             }
                             continue;
@@ -4112,7 +4926,7 @@ pub async fn run_tui(
                                 }
                                 _ => {}
                             }
-                            if !event::poll(Duration::ZERO)? {
+                            if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
                                 break;
                             }
                             continue;
@@ -4123,6 +4937,48 @@ pub async fn run_tui(
                             // ---- Submit / slash commands ----
                             Action::Submit => {
                                 if !state.input.is_empty() && !state.agent_busy {
+                                    let pending_text = state.input.text.clone();
+
+                                    if !pending_text.trim_start().starts_with('/')
+                                        && should_run_full_submit_preflight(&pending_text)
+                                    {
+                                        let analysis = analyze_paste_text(
+                                            &pending_text,
+                                            &session,
+                                            &provider_router,
+                                            &config,
+                                            &tools,
+                                        )
+                                        .await;
+                                        if matches!(
+                                            analysis.recommendation,
+                                            PasteRecommendation::AskForStrategy
+                                                | PasteRecommendation::RejectTooLarge
+                                        ) {
+                                            state.push_system(format!(
+                                                "Message not sent: ~{} tokens exceeds the estimated available context (~{} tokens) for the active {}-token model. Use /compact, switch to a larger model, shorten the text, or paste a smaller chunk.",
+                                                analysis.estimated_tokens,
+                                                analysis.available_tokens_estimate,
+                                                analysis.context_limit
+                                            ));
+                                            if deferred_events.is_empty()
+                                                && !event::poll(Duration::ZERO)?
+                                            {
+                                                break;
+                                            }
+                                            continue;
+                                        }
+                                        if analysis.recommendation
+                                            == PasteRecommendation::InsertInlineWithWarning
+                                        {
+                                            state.push_system(format!(
+                                                "Warning: this message is close to the active context limit (~{} / ~{} available tokens).",
+                                                analysis.estimated_tokens,
+                                                analysis.available_tokens_estimate
+                                            ));
+                                        }
+                                    }
+
                                     let text = state.input.submit();
 
                                     if text.trim_start().starts_with('/') {
@@ -4217,6 +5073,8 @@ pub async fn run_tui(
                                 state.auto_scroll = true;
                                 state.unread_count = 0;
                             }
+                            Action::InputScrollUp => state.input.scroll_up(1),
+                            Action::InputScrollDown => state.input.scroll_down(1),
 
                             // ---- Global ----
                             Action::Quit => {
@@ -4374,7 +5232,7 @@ pub async fn run_tui(
                     _ => {}
                 }
 
-                if !event::poll(Duration::ZERO)? {
+                if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
                     break;
                 }
             }
@@ -4398,7 +5256,8 @@ pub async fn run_tui(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
@@ -4466,6 +5325,7 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
         Some(Modal::Confirmation {
             tool_name,
             description,
+            mut scroll,
             response_tx,
         }) => {
             let action = input::map_key_confirm(key);
@@ -4484,10 +5344,31 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                     let _ = response_tx.send(PermissionResponse::TrustMode);
                 }
                 _ => {
-                    // Not a recognised confirmation key — keep the modal open
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            scroll = scroll.saturating_add(1);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            scroll = scroll.saturating_sub(1);
+                        }
+                        KeyCode::PageDown => {
+                            scroll = scroll.saturating_add(10);
+                        }
+                        KeyCode::PageUp => {
+                            scroll = scroll.saturating_sub(10);
+                        }
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            scroll = 0;
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            scroll = u16::MAX / 2;
+                        }
+                        _ => {}
+                    }
                     state.modal = Some(Modal::Confirmation {
                         tool_name,
                         description,
+                        scroll,
                         response_tx,
                     });
                 }
@@ -4594,6 +5475,22 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             }
             _ => {
                 state.modal = Some(Modal::GeneratedSkillPreview(preview));
+            }
+        },
+
+        Some(Modal::PasteConfirm(paste)) => match key.code {
+            KeyCode::Char('y')
+            | KeyCode::Char('Y')
+            | KeyCode::Char('i')
+            | KeyCode::Char('I')
+            | KeyCode::Enter => {
+                insert_paste_into_input(state, &paste.text, &paste.analysis);
+            }
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => {
+                state.push_system("Clipboard paste cancelled.");
+            }
+            _ => {
+                state.modal = Some(Modal::PasteConfirm(paste));
             }
         },
 

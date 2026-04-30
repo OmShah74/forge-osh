@@ -4,6 +4,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::cli::*;
 use crate::config::{self, keyring::KeyStore, Config};
 use crate::graph::{new_shared_graph, SharedGraph};
+use crate::lsp::{LspManager, SharedLspManager};
 use crate::provider::router::ProviderRouter;
 use crate::session::{checkpoint::Checkpoint, Session};
 use crate::skills::{shared_registry, SharedSkillRegistry};
@@ -17,6 +18,8 @@ pub struct App {
     pub key_store: KeyStore,
     /// Shared semantic code graph (None until /forge-graph has been built)
     pub shared_graph: SharedGraph,
+    /// Shared LSP manager — language servers are spawned lazily on first use.
+    pub lsp: SharedLspManager,
     pub skills: SharedSkillRegistry,
 }
 
@@ -71,7 +74,19 @@ impl App {
 
         let provider_router = Arc::new(RwLock::new(router));
 
-        // Initialize tools (always register graph_query — it self-disables when no graph)
+        // Initialize session working directory first (LSP manager needs it).
+        let working_dir = cli.dir.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
+
+        // Initialize shared LSP manager (servers spawn lazily on first use).
+        let lsp = LspManager::shared(std::path::PathBuf::from(&working_dir));
+
+        // Initialize tools (always register graph_query and lsp_* — they
+        // self-disable when no graph / no language server is available).
         let tools = Arc::new(if cli.no_tools {
             ToolRegistry::new()
         } else {
@@ -79,15 +94,24 @@ impl App {
             registry.register(Box::new(crate::graph::tools::GraphQueryTool::new(
                 shared_graph.clone(),
             )));
+            registry.register(Box::new(crate::lsp::tools::LspDiagnosticsTool::new(
+                lsp.clone(),
+            )));
+            registry.register(Box::new(crate::lsp::tools::LspDefinitionTool::new(
+                lsp.clone(),
+            )));
+            registry.register(Box::new(crate::lsp::tools::LspReferencesTool::new(
+                lsp.clone(),
+            )));
+            registry.register(Box::new(crate::lsp::tools::LspHoverTool::new(lsp.clone())));
+            registry.register(Box::new(crate::lsp::tools::LspDocumentSymbolsTool::new(
+                lsp.clone(),
+            )));
+            registry.register(Box::new(crate::lsp::tools::LspWorkspaceSymbolsTool::new(
+                lsp.clone(),
+            )));
+            registry.register(Box::new(crate::lsp::tools::LspRenameTool::new(lsp.clone())));
             registry
-        });
-
-        // Initialize session
-        let working_dir = cli.dir.clone().unwrap_or_else(|| {
-            std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
         });
 
         let mut session = if let Some(resume_arg) = &cli.resume {
@@ -184,6 +208,7 @@ impl App {
             session,
             key_store,
             shared_graph,
+            lsp,
             skills,
         })
     }
@@ -197,6 +222,7 @@ impl App {
             self.session.clone(),
             Arc::new(Mutex::new(self.key_store.clone())),
             self.shared_graph.clone(),
+            self.lsp.clone(),
             self.skills.clone(),
         )
         .await

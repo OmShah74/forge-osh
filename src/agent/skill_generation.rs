@@ -175,8 +175,9 @@ pub fn write_generated_skill(draft: &GeneratedSkillDraft) -> Result<PathBuf> {
 
     validate_final_draft(draft)?;
 
-    let parsed = skills::validate_skill_markdown(&draft.path, &draft.content)
-        .map_err(|err| ForgeError::Config(format!("generated skill failed final validation: {err}")))?;
+    let parsed = skills::validate_skill_markdown(&draft.path, &draft.content).map_err(|err| {
+        ForgeError::Config(format!("generated skill failed final validation: {err}"))
+    })?;
     if parsed.name != draft.name {
         return Err(ForgeError::Config(format!(
             "generated skill parsed as '{}' instead of '{}'",
@@ -289,7 +290,10 @@ fn build_compaction_aware_transcript(
     }
 
     let summary_text = summaries.join("\n");
-    let reserve = summary_text.chars().count().saturating_add(invoked.chars().count());
+    let reserve = summary_text
+        .chars()
+        .count()
+        .saturating_add(invoked.chars().count());
     let tail_budget = max_chars.saturating_sub(reserve).max(max_chars / 3);
     let full_tail = chunks.join("\n");
     let tail = take_tail_chars(&full_tail, tail_budget);
@@ -339,8 +343,8 @@ fn sanitize_generated_skill(
     let when_to_use = frontmatter_value(&frontmatter, "when_to_use")
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("Use when the user asks for the workflow: {task}."));
-    let execution_mode = frontmatter_value(&frontmatter, "execution_mode")
-        .unwrap_or_else(|| "inline".to_string());
+    let execution_mode =
+        frontmatter_value(&frontmatter, "execution_mode").unwrap_or_else(|| "inline".to_string());
     if execution_mode != "inline" {
         warnings.push(format!(
             "Changed execution_mode from '{execution_mode}' to 'inline' for generated-skill safety."
@@ -452,8 +456,7 @@ fn validate_final_draft(draft: &GeneratedSkillDraft) -> Result<()> {
     }
     if draft.description.trim().is_empty() || draft.when_to_use.trim().is_empty() {
         return Err(ForgeError::Config(
-            "generated skill is missing description or when_to_use at final validation"
-                .to_string(),
+            "generated skill is missing description or when_to_use at final validation".to_string(),
         ));
     }
     if draft.content.contains("[REDACTED_SECRET]") {
@@ -475,9 +478,7 @@ fn split_frontmatter_strict(raw: &str) -> Result<(&str, &str)> {
         .strip_prefix("---\n")
         .or_else(|| normalized.strip_prefix("---\r\n"))
         .ok_or_else(|| {
-            ForgeError::Provider(
-                "generated skill did not start with YAML frontmatter".to_string(),
-            )
+            ForgeError::Provider("generated skill did not start with YAML frontmatter".to_string())
         })?;
 
     for marker in ["\n---\n", "\n---\r\n", "\r\n---\n", "\r\n---\r\n"] {
@@ -532,7 +533,8 @@ fn extract_fenced_skill_document(raw: &str) -> Option<String> {
         if trimmed.starts_with("```") {
             if in_fence {
                 let content = block.join("\n").trim().to_string();
-                if content.contains("allowed_tools:") || first_frontmatter_marker(&content).is_some()
+                if content.contains("allowed_tools:")
+                    || first_frontmatter_marker(&content).is_some()
                 {
                     return Some(content);
                 }
@@ -747,15 +749,27 @@ fn safe_default_tools(known_tools: &[String], task: &str, body: &str) -> Vec<Str
 
     candidates
         .into_iter()
-    .filter(|tool| known_tools.iter().any(|known| known == tool))
-    .map(str::to_string)
-    .collect()
+        .filter(|tool| known_tools.iter().any(|known| known == tool))
+        .map(str::to_string)
+        .collect()
 }
 
 fn looks_like_file_authoring_task(text: &str) -> bool {
     let action = [
-        "create", "write", "edit", "modify", "implement", "code", "script", "file",
-        "simulation", "simulator", "python", "rust", "javascript", "typescript",
+        "create",
+        "write",
+        "edit",
+        "modify",
+        "implement",
+        "code",
+        "script",
+        "file",
+        "simulation",
+        "simulator",
+        "python",
+        "rust",
+        "javascript",
+        "typescript",
     ];
     action.iter().any(|needle| text.contains(needle))
 }
@@ -924,10 +938,7 @@ Summarize the final result with files checked, commands run, and any residual ri
 
         assert_eq!(draft.name, "generated-alpha");
         assert!(draft.content.starts_with("---\n"));
-        assert!(draft
-            .warnings
-            .iter()
-            .any(|w| w.contains("code fence")));
+        assert!(draft.warnings.iter().any(|w| w.contains("code fence")));
     }
 
     #[test]

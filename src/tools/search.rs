@@ -466,6 +466,7 @@ mod tests {
             session_id: "test".to_string(),
             trust_mode: true,
             permission_mode: crate::types::PermissionMode::Default,
+            diff_review: true,
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,

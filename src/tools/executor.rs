@@ -90,7 +90,15 @@ impl ToolExecutor {
                 return ToolOutput::error(reason);
             }
             PermissionDecision::Ask => {
-                let description = format_tool_description(&tool_call.name, &tool_call.input);
+                let mut description = format_tool_description(&tool_call.name, &tool_call.input);
+                if ctx.diff_review && is_file_mutation_tool(&tool_call.name) {
+                    if let Some(preview) =
+                        super::fs::preview_file_tool_change(&tool_call.name, &tool_call.input, ctx)
+                            .await
+                    {
+                        description = format!("{description}\n\n{preview}");
+                    }
+                }
                 let response = permission_fn(tool_call.name.clone(), description, perm_level).await;
 
                 match response {
@@ -229,8 +237,26 @@ fn decide_permission(
         return PermissionDecision::Allow;
     }
 
-    // 4. Consult the persistent permission rules store.
-    match effective_permission(tool_name, input, level, false, store) {
+    // 4. Consult the persistent permission rules store. Explicit deny rules
+    // must still win over diff review; allow rules are intentionally reviewed
+    // below for file mutations.
+    let stored_permission = effective_permission(tool_name, input, level, false, store);
+    if let EffectivePermission::Deny = stored_permission {
+        return PermissionDecision::Deny(format!(
+            "Tool '{tool_name}' denied by stored permission rule. \
+             Run `/permissions` to inspect or edit rules."
+        ));
+    }
+
+    // 4.5 Diff-review mode: file mutations must be explicitly reviewed as
+    // patches before touching disk. This intentionally overrides stored allow
+    // rules and AcceptEdits. Bypass/trust mode above remains the explicit
+    // escape hatch for users who want zero prompts.
+    if ctx.diff_review && is_file_mutation_tool(tool_name) {
+        return PermissionDecision::Ask;
+    }
+
+    match stored_permission {
         EffectivePermission::Allow => PermissionDecision::Allow,
         EffectivePermission::Deny => PermissionDecision::Deny(format!(
             "Tool '{tool_name}' denied by stored permission rule. \
@@ -246,6 +272,13 @@ fn decide_permission(
             PermissionDecision::Ask
         }
     }
+}
+
+fn is_file_mutation_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "write_file" | "edit_file" | "create_file" | "delete_file" | "copy_file" | "move_file"
+    )
 }
 
 /// Format a human-readable description of a tool call for the confirmation dialog
@@ -316,6 +349,7 @@ mod tests {
             session_id: "t".into(),
             trust_mode: true,
             permission_mode: PermissionMode::Bypass,
+            diff_review: true,
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
@@ -341,6 +375,7 @@ mod tests {
             session_id: "t".into(),
             trust_mode: false,
             permission_mode: PermissionMode::Plan,
+            diff_review: true,
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
@@ -371,6 +406,7 @@ mod tests {
             session_id: "t".into(),
             trust_mode: false,
             permission_mode: PermissionMode::Default,
+            diff_review: true,
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
@@ -384,6 +420,97 @@ mod tests {
         ) {
             PermissionDecision::Allow => {}
             _ => panic!("Stored allow rule should skip prompt"),
+        }
+    }
+
+    #[test]
+    fn test_diff_review_forces_file_mutation_prompt() {
+        let mut store = PermissionStore::default();
+        store
+            .rules
+            .push(crate::agent::permissions::PermissionRule::new_allow(
+                "write_file",
+                "*",
+            ));
+        let ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("."),
+            home_dir: std::path::PathBuf::from("."),
+            session_id: "t".into(),
+            trust_mode: false,
+            permission_mode: PermissionMode::AcceptEdits,
+            diff_review: true,
+            file_cache: None,
+            active_skill_scope: None,
+            skill_registry: None,
+        };
+        match decide_permission(
+            "write_file",
+            &serde_json::json!({"path":"demo.txt","content":"hello"}),
+            &PermissionLevel::Mutating,
+            &ctx,
+            &store,
+        ) {
+            PermissionDecision::Ask => {}
+            _ => panic!("Diff review should prompt even with AcceptEdits/stored allow"),
+        }
+    }
+
+    #[test]
+    fn test_diff_review_keeps_stored_deny_rules_authoritative() {
+        let mut store = PermissionStore::default();
+        store
+            .rules
+            .push(crate::agent::permissions::PermissionRule::new_deny(
+                "write_file",
+                "*",
+            ));
+        let ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("."),
+            home_dir: std::path::PathBuf::from("."),
+            session_id: "t".into(),
+            trust_mode: false,
+            permission_mode: PermissionMode::AcceptEdits,
+            diff_review: true,
+            file_cache: None,
+            active_skill_scope: None,
+            skill_registry: None,
+        };
+        match decide_permission(
+            "write_file",
+            &serde_json::json!({"path":"demo.txt","content":"hello"}),
+            &PermissionLevel::Mutating,
+            &ctx,
+            &store,
+        ) {
+            PermissionDecision::Deny(message) => {
+                assert!(message.contains("denied by stored permission rule"));
+            }
+            _ => panic!("Stored deny rules should win over diff review"),
+        }
+    }
+
+    #[test]
+    fn test_diff_review_does_not_affect_non_file_tools() {
+        let ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("."),
+            home_dir: std::path::PathBuf::from("."),
+            session_id: "t".into(),
+            trust_mode: false,
+            permission_mode: PermissionMode::AcceptEdits,
+            diff_review: true,
+            file_cache: None,
+            active_skill_scope: None,
+            skill_registry: None,
+        };
+        match decide_permission(
+            "task_create",
+            &serde_json::json!({"title":"demo"}),
+            &PermissionLevel::Mutating,
+            &ctx,
+            &PermissionStore::default(),
+        ) {
+            PermissionDecision::Allow => {}
+            _ => panic!("Diff review should only force file mutation prompts"),
         }
     }
 
@@ -431,6 +558,7 @@ mod tests {
             session_id: "t".into(),
             trust_mode: false,
             permission_mode: PermissionMode::Default,
+            diff_review: true,
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,

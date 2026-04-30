@@ -204,6 +204,7 @@ fn tool_context_construction() {
         session_id: "sess-123".into(),
         trust_mode: false,
         permission_mode: forge_agent::types::PermissionMode::Default,
+        diff_review: true,
         file_cache: None,
         active_skill_scope: None,
         skill_registry: None,

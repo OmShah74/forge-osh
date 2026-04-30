@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.5)
+    r#"forge-osh Help  (v1.0.17)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen (scroll: ↑↓/jk, PgUp/PgDn, g/G)
@@ -36,11 +36,19 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /skill generate <name> <task>
                             Draft a project skill from the current conversation;
                             review it, then press Y to create it.
+  /skill gen <name> <task>  Alias for /skill generate
+  /skill generate-from-conversation <name> <task>
+                            Explicit alias for conversation-based skill generation
   /skill edit <name>        Edit an existing skill in $EDITOR (reload after save)
   /skill delete <name>      Remove a project skill directory
   /skill reload             Re-scan skill directories
   /skill path               Print where skills are loaded from
   /skill off                Clear the currently-active skill scope
+
+  Generated skills:
+    â€¢ Created from the current conversation using the active provider/model
+    â€¢ Previewed in a modal before writing; press Y to create, E to inspect raw
+    â€¢ Saved as project skills under ./.claude/skills/generated-<name>/SKILL.md
 
   Skill locations:
     • Project:  ./.claude/skills/<name>/SKILL.md
@@ -86,6 +94,14 @@ INPUT LINE
   Ctrl+A         Move to line start     Ctrl+E       Move to line end
   Ctrl+U         Delete to line start   Ctrl+W       Delete previous word
   Up / Down      Navigate input history Tab          Auto-complete slash command
+  Alt+Up/Down    Scroll long input      Ctrl+Up/Down Scroll long input
+
+CLIPBOARD PASTE
+  Multiline paste is captured as one input batch when the terminal supports
+  bracketed paste. Large paste is token-estimated before insertion; if it may
+  overflow the active model context, forge-osh asks before inserting.
+  Very large submitted messages are blocked until shortened, compacted, or a
+  larger model is selected, so pasted text is not accidentally sent in pieces.
 
 SCROLLING
   Shift+Up/Down   Scroll by 3 lines     PgUp/PgDn    Scroll by 10 lines
@@ -109,6 +125,13 @@ QUICK ACTIONS
 CONFIRMATION DIALOGS  (when agent requests permission)
   Y / Enter   Allow once                N / Esc   Deny
   A           Always allow this tool    T         Enable trust mode
+  ↑/↓/jk      Scroll long diff preview  PgUp/PgDn Page preview
+
+PATCH / DIFF REVIEW
+  When ui.diff_before_apply = true, file mutations show a patch preview before
+  execution. Review the unified diff, then allow or deny. This review gate
+  overrides accept-edits and stored allow rules for file tools; trust/bypass
+  mode is the explicit no-prompt escape hatch.
 
 KEY MANAGER  (Ctrl+K)
   Up / Down   Navigate providers        Enter / e   Set or change key
