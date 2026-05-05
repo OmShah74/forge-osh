@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
 use crate::config::keyring::KeyStore;
+use crate::config::models;
 use crate::config::Config;
 use crate::error::{ForgeError, Result};
+use crate::types::ModelInfo;
 
 use super::anthropic::AnthropicProvider;
 use super::gemini::GeminiProvider;
@@ -18,6 +20,21 @@ pub struct ProviderRouter {
 }
 
 impl ProviderRouter {
+    /// Build a router from a single provider. This is useful for local
+    /// harnesses, deterministic evaluations, and custom embeddings where the
+    /// caller already owns a Provider implementation.
+    pub fn from_provider(provider_id: impl Into<String>, provider: Box<dyn Provider>) -> Self {
+        let provider_id = provider_id.into();
+        let active_model = provider.model_id().to_string();
+        let mut providers: HashMap<String, Box<dyn Provider>> = HashMap::new();
+        providers.insert(provider_id.clone(), provider);
+        Self {
+            providers,
+            active_provider: provider_id,
+            active_model,
+        }
+    }
+
     /// Build providers from config, only initializing those with keys available
     pub fn from_config(config: &Config, key_store: &KeyStore) -> Result<Self> {
         let mut providers: HashMap<String, Box<dyn Provider>> = HashMap::new();
@@ -35,9 +52,13 @@ impl ProviderRouter {
 
         // OpenAI
         if let Some(key) = key_store.get("openai") {
-            if let Ok(p) =
-                OpenAICompatProvider::openai(key, config.providers.openai.default_model.clone())
-            {
+            if let Ok(p) = openai_compat_from_config(
+                "openai",
+                "OpenAI",
+                key,
+                &config.providers.openai.base_url,
+                &config.providers.openai.default_model,
+            ) {
                 providers.insert("openai".to_string(), Box::new(p));
             }
         }
@@ -55,27 +76,38 @@ impl ProviderRouter {
 
         // Groq
         if let Some(key) = key_store.get("groq") {
-            if let Ok(p) =
-                OpenAICompatProvider::groq(key, config.providers.groq.default_model.clone())
-            {
+            if let Ok(p) = openai_compat_from_config(
+                "groq",
+                "Groq",
+                key,
+                &config.providers.groq.base_url,
+                &config.providers.groq.default_model,
+            ) {
                 providers.insert("groq".to_string(), Box::new(p));
             }
         }
 
         // Grok (xAI)
         if let Some(key) = key_store.get("grok") {
-            if let Ok(p) =
-                OpenAICompatProvider::grok(key, config.providers.grok.default_model.clone())
-            {
+            if let Ok(p) = openai_compat_from_config(
+                "grok",
+                "xAI (Grok)",
+                key,
+                &config.providers.grok.base_url,
+                &config.providers.grok.default_model,
+            ) {
                 providers.insert("grok".to_string(), Box::new(p));
             }
         }
 
         // OpenRouter
         if let Some(key) = key_store.get("openrouter") {
-            if let Ok(p) = OpenAICompatProvider::openrouter(
+            if let Ok(p) = openai_compat_from_config(
+                "openrouter",
+                "OpenRouter",
                 key,
-                config.providers.openrouter.default_model.clone(),
+                &config.providers.openrouter.base_url,
+                &config.providers.openrouter.default_model,
             ) {
                 providers.insert("openrouter".to_string(), Box::new(p));
             }
@@ -83,36 +115,51 @@ impl ProviderRouter {
 
         // Mistral
         if let Some(key) = key_store.get("mistral") {
-            if let Ok(p) =
-                OpenAICompatProvider::mistral(key, config.providers.mistral.default_model.clone())
-            {
+            if let Ok(p) = openai_compat_from_config(
+                "mistral",
+                "Mistral",
+                key,
+                &config.providers.mistral.base_url,
+                &config.providers.mistral.default_model,
+            ) {
                 providers.insert("mistral".to_string(), Box::new(p));
             }
         }
 
         // DeepSeek
         if let Some(key) = key_store.get("deepseek") {
-            if let Ok(p) =
-                OpenAICompatProvider::deepseek(key, config.providers.deepseek.default_model.clone())
-            {
+            if let Ok(p) = openai_compat_from_config(
+                "deepseek",
+                "DeepSeek",
+                key,
+                &config.providers.deepseek.base_url,
+                &config.providers.deepseek.default_model,
+            ) {
                 providers.insert("deepseek".to_string(), Box::new(p));
             }
         }
 
         // Together
         if let Some(key) = key_store.get("together") {
-            if let Ok(p) =
-                OpenAICompatProvider::together(key, config.providers.together.default_model.clone())
-            {
+            if let Ok(p) = openai_compat_from_config(
+                "together",
+                "Together AI",
+                key,
+                &config.providers.together.base_url,
+                &config.providers.together.default_model,
+            ) {
                 providers.insert("together".to_string(), Box::new(p));
             }
         }
 
         // Fireworks
         if let Some(key) = key_store.get("fireworks") {
-            if let Ok(p) = OpenAICompatProvider::fireworks(
+            if let Ok(p) = openai_compat_from_config(
+                "fireworks",
+                "Fireworks",
                 key,
-                config.providers.fireworks.default_model.clone(),
+                &config.providers.fireworks.base_url,
+                &config.providers.fireworks.default_model,
             ) {
                 providers.insert("fireworks".to_string(), Box::new(p));
             }
@@ -120,9 +167,12 @@ impl ProviderRouter {
 
         // Perplexity
         if let Some(key) = key_store.get("perplexity") {
-            if let Ok(p) = OpenAICompatProvider::perplexity(
+            if let Ok(p) = openai_compat_from_config(
+                "perplexity",
+                "Perplexity",
                 key,
-                config.providers.perplexity.default_model.clone(),
+                &config.providers.perplexity.base_url,
+                &config.providers.perplexity.default_model,
             ) {
                 providers.insert("perplexity".to_string(), Box::new(p));
             }
@@ -130,9 +180,13 @@ impl ProviderRouter {
 
         // Cohere
         if let Some(key) = key_store.get("cohere") {
-            if let Ok(p) =
-                OpenAICompatProvider::cohere(key, config.providers.cohere.default_model.clone())
-            {
+            if let Ok(p) = openai_compat_from_config(
+                "cohere",
+                "Cohere",
+                key,
+                &config.providers.cohere.base_url,
+                &config.providers.cohere.default_model,
+            ) {
                 providers.insert("cohere".to_string(), Box::new(p));
             }
         }
@@ -183,6 +237,55 @@ impl ProviderRouter {
     /// Get active model id
     pub fn active_model_id(&self) -> &str {
         &self.active_model
+    }
+
+    /// Metadata for the selected provider/model pair.
+    pub fn active_model_info(&self) -> Option<ModelInfo> {
+        models::models_for_provider(&self.active_provider)
+            .into_iter()
+            .find(|m| m.id == self.active_model)
+            .or_else(|| {
+                self.providers
+                    .get(&self.active_provider)
+                    .map(|p| ModelInfo {
+                        id: self.active_model.clone(),
+                        name: self.active_model.clone(),
+                        context_window: p.context_window(),
+                        supports_tools: p.supports_tools(),
+                        supports_vision: p.supports_vision(),
+                        input_cost_per_million: p.input_cost_per_million(),
+                        output_cost_per_million: p.output_cost_per_million(),
+                        provider_id: self.active_provider.clone(),
+                    })
+            })
+    }
+
+    /// Context window for the selected model, falling back to provider metadata.
+    pub fn active_context_window(&self) -> u32 {
+        self.active_model_info()
+            .map(|m| m.context_window)
+            .or_else(|| self.active().ok().map(|p| p.context_window()))
+            .unwrap_or(200_000)
+    }
+
+    /// Tool support for the selected model, falling back to provider metadata.
+    pub fn active_supports_tools(&self) -> bool {
+        self.active_model_info()
+            .map(|m| m.supports_tools)
+            .or_else(|| self.active().ok().map(|p| p.supports_tools()))
+            .unwrap_or(false)
+    }
+
+    /// Token pricing for the selected model, falling back to provider metadata.
+    pub fn active_costs(&self) -> (f64, f64) {
+        self.active_model_info()
+            .map(|m| (m.input_cost_per_million, m.output_cost_per_million))
+            .or_else(|| {
+                self.active()
+                    .ok()
+                    .map(|p| (p.input_cost_per_million(), p.output_cost_per_million()))
+            })
+            .unwrap_or((0.0, 0.0))
     }
 
     /// Switch provider and model
@@ -246,50 +349,80 @@ impl ProviderRouter {
                 config.providers.anthropic.base_url.clone(),
                 config.providers.anthropic.default_model.clone(),
             )?),
-            "openai" => Box::new(OpenAICompatProvider::openai(
+            "openai" => Box::new(openai_compat_from_config(
+                "openai",
+                "OpenAI",
                 key,
-                config.providers.openai.default_model.clone(),
+                &config.providers.openai.base_url,
+                &config.providers.openai.default_model,
             )?),
             "gemini" => Box::new(GeminiProvider::new(
                 key,
                 config.providers.gemini.base_url.clone(),
                 config.providers.gemini.default_model.clone(),
             )?),
-            "groq" => Box::new(OpenAICompatProvider::groq(
+            "groq" => Box::new(openai_compat_from_config(
+                "groq",
+                "Groq",
                 key,
-                config.providers.groq.default_model.clone(),
+                &config.providers.groq.base_url,
+                &config.providers.groq.default_model,
             )?),
-            "grok" => Box::new(OpenAICompatProvider::grok(
+            "grok" => Box::new(openai_compat_from_config(
+                "grok",
+                "xAI (Grok)",
                 key,
-                config.providers.grok.default_model.clone(),
+                &config.providers.grok.base_url,
+                &config.providers.grok.default_model,
             )?),
-            "openrouter" => Box::new(OpenAICompatProvider::openrouter(
+            "openrouter" => Box::new(openai_compat_from_config(
+                "openrouter",
+                "OpenRouter",
                 key,
-                config.providers.openrouter.default_model.clone(),
+                &config.providers.openrouter.base_url,
+                &config.providers.openrouter.default_model,
             )?),
-            "mistral" => Box::new(OpenAICompatProvider::mistral(
+            "mistral" => Box::new(openai_compat_from_config(
+                "mistral",
+                "Mistral",
                 key,
-                config.providers.mistral.default_model.clone(),
+                &config.providers.mistral.base_url,
+                &config.providers.mistral.default_model,
             )?),
-            "deepseek" => Box::new(OpenAICompatProvider::deepseek(
+            "deepseek" => Box::new(openai_compat_from_config(
+                "deepseek",
+                "DeepSeek",
                 key,
-                config.providers.deepseek.default_model.clone(),
+                &config.providers.deepseek.base_url,
+                &config.providers.deepseek.default_model,
             )?),
-            "together" => Box::new(OpenAICompatProvider::together(
+            "together" => Box::new(openai_compat_from_config(
+                "together",
+                "Together AI",
                 key,
-                config.providers.together.default_model.clone(),
+                &config.providers.together.base_url,
+                &config.providers.together.default_model,
             )?),
-            "fireworks" => Box::new(OpenAICompatProvider::fireworks(
+            "fireworks" => Box::new(openai_compat_from_config(
+                "fireworks",
+                "Fireworks",
                 key,
-                config.providers.fireworks.default_model.clone(),
+                &config.providers.fireworks.base_url,
+                &config.providers.fireworks.default_model,
             )?),
-            "perplexity" => Box::new(OpenAICompatProvider::perplexity(
+            "perplexity" => Box::new(openai_compat_from_config(
+                "perplexity",
+                "Perplexity",
                 key,
-                config.providers.perplexity.default_model.clone(),
+                &config.providers.perplexity.base_url,
+                &config.providers.perplexity.default_model,
             )?),
-            "cohere" => Box::new(OpenAICompatProvider::cohere(
+            "cohere" => Box::new(openai_compat_from_config(
+                "cohere",
+                "Cohere",
                 key,
-                config.providers.cohere.default_model.clone(),
+                &config.providers.cohere.base_url,
+                &config.providers.cohere.default_model,
             )?),
             other => {
                 return Err(crate::error::ForgeError::Provider(format!(
@@ -349,6 +482,7 @@ impl ProviderRouter {
             ("vllm", &config.providers.vllm.base_url, "vLLM"),
             ("jan", &config.providers.jan.base_url, "Jan"),
             ("localai", &config.providers.localai.base_url, "LocalAI"),
+            ("llamacpp", &config.providers.llamacpp.base_url, "llama.cpp"),
         ];
 
         for (id, url, name) in local_checks {
@@ -368,6 +502,7 @@ impl ProviderRouter {
                         "vllm" => &config.providers.vllm.default_model,
                         "jan" => &config.providers.jan.default_model,
                         "localai" => &config.providers.localai.default_model,
+                        "llamacpp" => &config.providers.llamacpp.default_model,
                         _ => &String::new(),
                     };
                     let model = if default_model.is_empty() {
@@ -385,4 +520,20 @@ impl ProviderRouter {
             }
         }
     }
+}
+
+fn openai_compat_from_config(
+    provider_id: &str,
+    provider_name: &str,
+    api_key: String,
+    base_url: &str,
+    model: &str,
+) -> Result<OpenAICompatProvider> {
+    OpenAICompatProvider::new(
+        provider_id.to_string(),
+        provider_name.to_string(),
+        api_key,
+        base_url.to_string(),
+        model.to_string(),
+    )
 }

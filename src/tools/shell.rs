@@ -8,6 +8,16 @@ use tokio::process::Command;
 use super::Tool;
 use crate::types::*;
 
+fn strip_copied_prompt_marker(command: &str) -> &str {
+    let trimmed = command.trim_start();
+    for marker in ["$ ", "% ", "> "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return rest.trim_start();
+        }
+    }
+    trimmed
+}
+
 // ---------------------------------------------------------------------------
 // Read-only command classification (from Claude Code BashTool analysis)
 // ---------------------------------------------------------------------------
@@ -111,27 +121,16 @@ const GIT_READ_ONLY_SUBCOMMANDS: &[&str] = &[
     "cat-file",
     "ls-files",
     "ls-remote",
-    "fetch",
-    "config",
     "format-patch",
     "cherry",
-    "cherry-pick", // cherry-pick can be mutating but we list what CC does
 ];
 
 /// Returns true if the command is safe to run without Shell-level permission.
 /// Heuristic — not exhaustive but covers the common read-only patterns.
 pub fn is_read_only_command(command: &str) -> bool {
-    let cmd = command.trim();
+    let cmd = strip_copied_prompt_marker(command).trim();
 
-    // Reject if it contains output redirection or assignment operators
-    // (these could write to files or mutate state)
-    if cmd.contains(" > ")
-        || cmd.starts_with("> ")
-        || cmd.contains(" >> ")
-        || cmd.starts_with(">> ")
-        || cmd.contains(";")
-    // chaining may include mutating commands
-    {
+    if has_shell_control_or_redirection(cmd) {
         return false;
     }
 
@@ -162,6 +161,21 @@ pub fn is_read_only_command(command: &str) -> bool {
     }
 
     READ_ONLY_COMMANDS.contains(&first_word)
+}
+
+fn has_shell_control_or_redirection(cmd: &str) -> bool {
+    for ch in cmd.chars() {
+        match ch {
+            '>' | '<' | ';' | '|' | '&' => return true,
+            _ => {}
+        }
+    }
+    let lower = cmd.to_ascii_lowercase();
+    lower.contains("$(")
+        || lower.contains('`')
+        || lower.contains(" -exec ")
+        || lower.contains(" -delete")
+        || lower.contains(" --delete")
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +255,7 @@ impl EndTruncatingAccumulator {
 // Dangerous command patterns (blocklist)
 // ---------------------------------------------------------------------------
 
-const BLOCKED_PATTERNS: &[&str] = &[
+const DEFAULT_BLOCKED_PATTERNS: &[&str] = &[
     "rm -rf /",
     "sudo rm -rf /",
     "mkfs",
@@ -252,13 +266,29 @@ const BLOCKED_PATTERNS: &[&str] = &[
     "> /dev/sda",
 ];
 
-fn is_blocked(command: &str) -> Option<&'static str> {
-    for pattern in BLOCKED_PATTERNS {
+fn is_blocked<'a>(command: &str, patterns: &'a [String]) -> Option<&'a str> {
+    for pattern in patterns {
         if command.contains(pattern) {
-            return Some(pattern);
+            return Some(pattern.as_str());
         }
     }
     None
+}
+
+fn is_allowed_by_config(command: &str, patterns: &[String]) -> bool {
+    let command = command.trim();
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim();
+        if pattern == "*" || pattern == command {
+            return true;
+        }
+        if let Ok(glob) = glob::Pattern::new(pattern) {
+            if glob.matches(command) {
+                return true;
+            }
+        }
+        command.starts_with(pattern)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +299,8 @@ pub struct BashTool {
     pub default_timeout: u64,
     pub max_timeout: u64,
     pub max_output_bytes: usize,
+    pub allowed_commands: Vec<String>,
+    pub blocked_patterns: Vec<String>,
 }
 
 impl Default for BashTool {
@@ -277,6 +309,25 @@ impl Default for BashTool {
             default_timeout: 30,
             max_timeout: 300,
             max_output_bytes: 200_000, // 200 KB — keeps tail of output
+            allowed_commands: Vec::new(),
+            blocked_patterns: DEFAULT_BLOCKED_PATTERNS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    }
+}
+
+impl BashTool {
+    pub fn from_config(config: &crate::config::BashToolConfig) -> Self {
+        Self {
+            default_timeout: config.timeout_seconds.max(1),
+            max_timeout: config
+                .max_timeout_seconds
+                .max(config.timeout_seconds.max(1)),
+            allowed_commands: config.allowed_commands.clone(),
+            blocked_patterns: config.blocked_commands.clone(),
+            ..Self::default()
         }
     }
 }
@@ -333,11 +384,19 @@ impl Tool for BashTool {
             Some(c) => c,
             None => return ToolOutput::error("Missing 'command' parameter"),
         };
+        let command = strip_copied_prompt_marker(command);
 
         // Safety check
-        if let Some(blocked) = is_blocked(command) {
+        if let Some(blocked) = is_blocked(command, &self.blocked_patterns) {
             return ToolOutput::error(format!(
                 "Command blocked for safety (matches pattern '{blocked}'): {command}"
+            ));
+        }
+        if !self.allowed_commands.is_empty()
+            && !is_allowed_by_config(command, &self.allowed_commands)
+        {
+            return ToolOutput::error(format!(
+                "Command not allowed by tools.bash.allowed_commands: {command}"
             ));
         }
 
@@ -490,6 +549,19 @@ mod tests {
         let output = tool.execute(json!({"command": "rm -rf /"}), &ctx).await;
         assert!(output.is_error);
         assert!(output.content.contains("blocked"));
+    }
+
+    #[test]
+    fn copied_prompt_marker_is_stripped_for_shell_commands() {
+        assert_eq!(
+            strip_copied_prompt_marker("$ rg -n needle src"),
+            "rg -n needle src"
+        );
+        assert_eq!(strip_copied_prompt_marker("> git status"), "git status");
+        assert_eq!(
+            strip_copied_prompt_marker("rg -n needle src"),
+            "rg -n needle src"
+        );
     }
 
     #[test]

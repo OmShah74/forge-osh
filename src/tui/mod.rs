@@ -84,6 +84,7 @@ pub const OSH_SPLASH_LINES: &[&str] = &[
 pub enum Modal {
     Confirmation {
         tool_name: String,
+        input_summary: String,
         description: String,
         scroll: u16,
         response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
@@ -697,7 +698,7 @@ async fn handle_slash_command(
         }
 
         "/trust" => {
-            state.trust_mode = !state.trust_mode;
+            set_trust_mode(state, !state.trust_mode);
             state.push_system(format!(
                 "Trust mode: {}",
                 if state.trust_mode {
@@ -795,7 +796,7 @@ async fn handle_slash_command(
 
         // ── /commit — AI-generated commit message ──────────────────────────
         "/commit" => {
-            cmd_commit(state, session).await;
+            cmd_commit(state, session, provider_router).await;
         }
 
         // ── /diff — show git diff ──────────────────────────────────────────
@@ -840,17 +841,12 @@ async fn handle_slash_command(
         "/status" => {
             let sess = session.lock().await;
             let router = provider_router.read().await;
-            let ctx_window = router
-                .active()
-                .map(|p| p.context_window())
-                .unwrap_or(128_000);
+            let ctx_window = router.active_context_window();
             let cumulative: u64 =
                 sess.cost_tracker.total_input_tokens + sess.cost_tracker.total_output_tokens;
             let used_tokens: u64 = sess.cost_tracker.context_tokens_estimate();
             let ctx_pct = (used_tokens as f64 / ctx_window as f64 * 100.0).min(100.0);
-            let tools_loaded = crate::tools::ToolRegistry::with_builtins()
-                .tool_names()
-                .len();
+            let tools_loaded = agent_loop.tools.tool_names().len();
             let permissions = crate::agent::permissions::PermissionStore::load();
 
             state.push_system(format!(
@@ -1172,6 +1168,74 @@ async fn handle_slash_command(
             }
         }
 
+        "/team" | "/teams" => {
+            let (subcmd, rest) = if let Some(space) = arg.find(' ') {
+                (&arg[..space], arg[space + 1..].trim())
+            } else {
+                (arg, "")
+            };
+
+            if subcmd.is_empty() || subcmd == "status" || subcmd == "board" {
+                if state.coordinator.is_none() {
+                    state.coordinator = Some(Coordinator::new(
+                        agent_loop.provider_router.clone(),
+                        agent_loop.tools.clone(),
+                        agent_loop.config.clone(),
+                        state.shared_graph.clone(),
+                        session.clone(),
+                        agent_loop.event_tx.clone(),
+                    ));
+                }
+                if let Some(coord) = state.coordinator.as_ref() {
+                    if let Some(board) = coord.team_status() {
+                        state.modal = Some(Modal::DetailViewer(DetailViewerState::new(
+                            "Agent Team Board".to_string(),
+                            board,
+                        )));
+                    } else {
+                        state.push_system(
+                            "No active team board. Start one with `/team start <goal>`.",
+                        );
+                    }
+                }
+            } else if subcmd == "start" || subcmd == "run" || subcmd == "spawn" {
+                if rest.is_empty() {
+                    state.push_system("Usage: /team start <goal or semicolon-separated subtasks>");
+                } else {
+                    if state.coordinator.is_none() {
+                        state.coordinator = Some(Coordinator::new(
+                            agent_loop.provider_router.clone(),
+                            agent_loop.tools.clone(),
+                            agent_loop.config.clone(),
+                            state.shared_graph.clone(),
+                            session.clone(),
+                            agent_loop.event_tx.clone(),
+                        ));
+                    }
+                    if let Some(coord) = state.coordinator.as_mut() {
+                        let board = coord.start_team(rest.to_string());
+                        state.multithread_mode = true;
+                        state.modal = Some(Modal::DetailViewer(DetailViewerState::new(
+                            "Agent Team Board".to_string(),
+                            board,
+                        )));
+                    }
+                }
+            } else if subcmd == "stop" || subcmd == "cancel" {
+                if let Some(coord) = state.coordinator.as_mut() {
+                    if coord.stop_team() {
+                        state.push_system("Agent team stopped. Existing board was saved.");
+                    } else {
+                        state.push_system("No active team board to stop.");
+                    }
+                } else {
+                    state.push_system("No coordinator active.");
+                }
+            } else {
+                state.push_system("Usage: /team start <goal> | /team status | /team stop");
+            }
+        }
+
         "/fast" => {
             state.fast_mode = !state.fast_mode;
             state.push_system(format!(
@@ -1320,10 +1384,7 @@ async fn handle_slash_command(
                             .active()
                             .map(|p| p.name().to_string())
                             .unwrap_or_else(|_| provider_id.clone());
-                        let ctx_window = router
-                            .active()
-                            .map(|p| p.context_window())
-                            .unwrap_or(128_000);
+                        let ctx_window = router.active_context_window();
                         (provider_id, model_id, provider_name, ctx_window)
                     };
 
@@ -1687,10 +1748,25 @@ async fn handle_slash_command(
     true // command was handled
 }
 
+fn set_trust_mode(state: &mut AppState, enabled: bool) {
+    state.trust_mode = enabled;
+    if let Some(mode) = &state.permission_mode_state {
+        *mode.write() = if enabled {
+            crate::types::PermissionMode::Bypass
+        } else {
+            crate::types::PermissionMode::Default
+        };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // /commit implementation
 // ---------------------------------------------------------------------------
-async fn cmd_commit(state: &mut AppState, session: &Arc<Mutex<Session>>) {
+async fn cmd_commit(
+    state: &mut AppState,
+    session: &Arc<Mutex<Session>>,
+    provider_router: &Arc<RwLock<ProviderRouter>>,
+) {
     let working_dir = {
         let sess = session.lock().await;
         sess.working_dir.clone()
@@ -1762,14 +1838,75 @@ async fn cmd_commit(state: &mut AppState, session: &Arc<Mutex<Session>>) {
         }
     );
 
-    state.push_system(format!(
-        "Suggested: use the agent to generate the commit message by sending:\n> {}",
-        &prompt[..prompt.len().min(200)]
-    ));
-    state.push_system(
-        "Type your commit message (or ask the agent to write one by describing the changes). \
-        Then run: bash git commit -m \"<message>\"",
-    );
+    let (stream_tx, _stream_rx) = mpsc::unbounded_channel();
+    let result =
+        {
+            let router = provider_router.read().await;
+            let model = router.active_model_id().to_string();
+            match router.active() {
+                Ok(provider) => provider
+                    .chat(
+                        crate::types::ChatRequest {
+                            model,
+                            messages: vec![crate::types::Message::User(
+                                crate::types::UserContent::Text(prompt),
+                            )],
+                            tools: None,
+                            max_tokens: 120,
+                            temperature: 0.2,
+                            system: Some(
+                                "You write concise git commit messages. Return only the message."
+                                    .to_string(),
+                            ),
+                            stop_sequences: Vec::new(),
+                            thinking: crate::types::ThinkingConfig::Disabled,
+                        },
+                        stream_tx,
+                    )
+                    .await,
+                Err(e) => Err(e),
+            }
+        };
+
+    match result {
+        Ok(response) => {
+            let message = response
+                .content
+                .text()
+                .map(sanitize_commit_message)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "chore: update staged changes".to_string());
+            state.push_system(format!(
+                "Suggested commit message:\n\n{message}\n\nRun:\n  git commit -m \"{}\"",
+                message.replace('"', "\\\"")
+            ));
+        }
+        Err(e) => {
+            state.push_system(format!("/commit: failed to generate commit message: {e}"));
+        }
+    }
+}
+
+fn sanitize_commit_message(text: &str) -> String {
+    let mut message = text.trim().to_string();
+    if let Some(stripped) = message.strip_prefix("```") {
+        message = stripped.trim().to_string();
+        if let Some(first_newline) = message.find('\n') {
+            let first = &message[..first_newline];
+            if !first.contains(':') && first.len() < 20 {
+                message = message[first_newline + 1..].trim().to_string();
+            }
+        }
+        if let Some(stripped) = message.strip_suffix("```") {
+            message = stripped.trim().to_string();
+        }
+    }
+    message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -2444,6 +2581,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/forge-graph",
         "/lsp",
         "/multithread",
+        "/team",
     ];
     let prefix = text.as_str();
     let matches: Vec<&str> = ALL_COMMANDS
@@ -2724,7 +2862,7 @@ fn cmd_config(state: &mut AppState, arg: &str) {
             }
             "trust" | "trust_mode" => {
                 let on = matches!(*value, "on" | "true" | "1" | "yes");
-                state.trust_mode = on;
+                set_trust_mode(state, on);
                 state.push_system(format!("Trust mode: {}", if on { "ON" } else { "OFF" }));
             }
             "vim" | "vim_mode" => {
@@ -2996,38 +3134,31 @@ async fn cmd_lsp(state: &mut AppState, text: &str) {
 
     match arg {
         "" | "status" => {
-            let supported = crate::lsp::LspManager::list_supported();
-            let running = lsp.running_clients().await;
-            let mut msg = String::from("LSP status\n\nSupported languages:\n");
-            for s in &supported {
-                let installed = match &s.installed {
-                    Some(p) => format!("installed ({p})"),
-                    None => format!(
-                        "NOT installed (tried: {})",
-                        s.candidates.join(", ")
-                    ),
-                };
-                msg.push_str(&format!(
-                    "  {:<11} [.{}]  {}\n",
-                    s.language,
-                    s.extensions.join(", ."),
-                    installed
-                ));
-            }
-            if running.is_empty() {
-                msg.push_str("\nNo servers currently running. Servers spawn lazily on first lsp_* tool call.");
+            let msg = format_lsp_status(&lsp).await;
+            state.modal = Some(Modal::DetailViewer(DetailViewerState::new(
+                "LSP Status",
+                msg,
+            )));
+        }
+        "install" | "setup" => {
+            state.push_system("Installing/starting LSP servers for detected project languages...");
+            let summary = lsp.install_and_start_detected().await;
+            state.push_system(format_lsp_install_summary(summary));
+        }
+        s if s.starts_with("install ") || s.starts_with("setup ") => {
+            let lang = s
+                .strip_prefix("install ")
+                .or_else(|| s.strip_prefix("setup "))
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if lang.is_empty() {
+                state.push_system("Usage: /lsp install <language>");
             } else {
-                msg.push_str("\nRunning servers:\n");
-                for r in &running {
-                    msg.push_str(&format!(
-                        "  {:<11} root={} initialized={}\n",
-                        r.language,
-                        r.root.display(),
-                        r.initialized
-                    ));
-                }
+                state.push_system(format!("Installing/starting LSP server for {lang}..."));
+                let result = lsp.install_and_start_language(&lang).await;
+                state.push_system(format_language_install_result(result));
             }
-            state.push_system(msg);
         }
         "shutdown" | "stop" => {
             lsp.shutdown_all().await;
@@ -3038,8 +3169,9 @@ async fn cmd_lsp(state: &mut AppState, text: &str) {
                 .strip_prefix("shutdown ")
                 .or_else(|| s.strip_prefix("stop "))
                 .unwrap_or("")
-                .trim();
-            match lsp.shutdown_language(lang).await {
+                .trim()
+                .to_ascii_lowercase();
+            match lsp.shutdown_language(&lang).await {
                 Ok(()) => state.push_system(format!("Shut down {lang} language server.")),
                 Err(e) => state.push_system(format!("/lsp shutdown {lang}: {e}")),
             }
@@ -3048,13 +3180,152 @@ async fn cmd_lsp(state: &mut AppState, text: &str) {
             state.push_system(format!(
                 "Unknown /lsp subcommand: '{other}'\n\
                 Usage:\n\
-                  /lsp                — show language-server status\n\
-                  /lsp status         — same as above\n\
-                  /lsp shutdown       — stop all running servers\n\
-                  /lsp shutdown <lang>— stop one server (rust|typescript|python|go)"
+                  /lsp                - show language-server status\n\
+                  /lsp status         - same as above\n\
+                  /lsp install        - install/start detected project language servers\n\
+                  /lsp install <lang> - install/start one server\n\
+                  /lsp shutdown       - stop all running servers\n\
+                  /lsp shutdown <lang>- stop one server by language key"
             ));
         }
     }
+}
+
+fn format_lsp_install_summary(summary: crate::lsp::manager::WarmupSummary) -> String {
+    let mut out = String::from("LSP setup result\n");
+    if summary.installed.is_empty() && summary.started.is_empty() && summary.skipped.is_empty() {
+        out.push_str("No supported project languages were detected.");
+        return out;
+    }
+    if !summary.installed.is_empty() {
+        out.push_str("\nInstalled into forge-managed cache:\n");
+        for (language, command) in summary.installed {
+            out.push_str(&format!("- {language}: {command}\n"));
+        }
+    }
+    if !summary.started.is_empty() {
+        out.push_str("\nRunning / ready:\n");
+        for language in summary.started {
+            out.push_str(&format!("- {language}\n"));
+        }
+    }
+    if !summary.skipped.is_empty() {
+        out.push_str("\nNot set up:\n");
+        for (language, reason) in summary.skipped {
+            out.push_str(&format!("- {language}: {reason}\n"));
+        }
+    }
+    out
+}
+
+fn format_language_install_result(result: crate::lsp::manager::LanguageInstallResult) -> String {
+    match result {
+        crate::lsp::manager::LanguageInstallResult::Started {
+            language,
+            installed_by,
+        } => match installed_by {
+            Some(command) => {
+                format!("LSP server for {language} installed via `{command}` and is running.")
+            }
+            None => format!("LSP server for {language} is already available and running."),
+        },
+        crate::lsp::manager::LanguageInstallResult::Skipped { language, reason } => {
+            format!("LSP server for {language} was not installed: {reason}")
+        }
+        crate::lsp::manager::LanguageInstallResult::Failed { language, error } => {
+            format!("LSP setup failed for {language}: {error}")
+        }
+    }
+}
+
+async fn format_lsp_status(lsp: &SharedLspManager) -> String {
+    let supported = lsp.supported_languages();
+    let running = lsp.running_clients().await;
+    let running_languages: std::collections::HashSet<String> =
+        running.iter().map(|r| r.language.clone()).collect();
+
+    let mut msg = String::from(
+        "Language Server Protocol\n\n\
+         forge-osh preconfigures common language servers, prefers bundled sidecars from ./lsp/bin, auto-provisions built-in servers into its managed data cache when an installer is known, and warms detected project servers automatically.\n\
+         The agent can use lsp_* tools without you running /lsp first. For custom languages, add an entry in ~/.forge-osh/lsp.toml.\n\n",
+    );
+
+    msg.push_str(
+        "Commands\n\
+         /lsp                  show this status view\n\
+         /lsp install          install/start servers for detected project languages\n\
+         /lsp install <lang>   install/start one language server\n\
+         /lsp shutdown         stop all running language servers\n\
+         /lsp shutdown <lang>  stop one running server by language key\n\n",
+    );
+
+    msg.push_str("Supported Languages\n");
+    msg.push_str("Language       Status       Source     Files / Extensions\n");
+    msg.push_str("------------   ----------   --------   ------------------\n");
+    for s in &supported {
+        let status = if running_languages.contains(&s.language) {
+            "running".to_string()
+        } else if let Some(program) = &s.installed {
+            if program.contains("forge-osh")
+                || program.contains("\\lsp\\")
+                || program.contains("/lsp/")
+            {
+                "ready:bundled".to_string()
+            } else {
+                format!("ready:{program}")
+            }
+        } else {
+            "missing".to_string()
+        };
+        let mut patterns: Vec<String> = s.extensions.iter().map(|e| format!(".{e}")).collect();
+        patterns.extend(s.file_names.iter().cloned());
+        msg.push_str(&format!(
+            "{:<12}   {:<10}   {:<8}   {}\n",
+            s.language,
+            first_chars(&status, 10),
+            s.source,
+            patterns.join(" ")
+        ));
+    }
+
+    msg.push_str("\nRunning Servers\n");
+    if running.is_empty() {
+        msg.push_str("No server is currently running yet. Installed servers start automatically in the background when matching project files are detected, and also on first lsp_* tool use.\n");
+    } else {
+        for r in &running {
+            msg.push_str(&format!(
+                "- {} | initialized={} | root={}\n",
+                r.language,
+                r.initialized,
+                r.root.display()
+            ));
+        }
+    }
+
+    msg.push_str("\nMissing Server Setup Hints\n");
+    for s in supported.iter().filter(|s| s.installed.is_none()) {
+        msg.push_str(&format!(
+            "- {}: tried [{}]. {}\n",
+            s.language,
+            s.candidates.join(", "),
+            s.install_hint
+        ));
+    }
+
+    msg.push_str(
+        "\nCustom Language Servers\n\
+         Create ~/.forge-osh/lsp.toml with entries like:\n\n\
+         [[servers]]\n\
+         language = \"zig\"\n\
+         language_id = \"zig\"\n\
+         extensions = [\"zig\"]\n\
+         command = \"zls\"\n\
+         args = []\n\
+         root_markers = [\"build.zig\", \".git\"]\n\
+         install_hint = \"Install zls and put it on PATH\"\n\n\
+         Keys: Esc closes this view. Up/Down or j/k scroll. PgUp/PgDn page.\n",
+    );
+    msg
 }
 
 /// Drain the oldest rendered messages from the TUI so the visible
@@ -3139,15 +3410,6 @@ async fn analyze_paste_text(
     config: &Config,
     tools: &Arc<ToolRegistry>,
 ) -> PasteAnalysis {
-    const SAFETY_MARGIN_TOKENS: u32 = 2048;
-    const USER_MESSAGE_OVERHEAD_TOKENS: u32 = 4;
-
-    let chars = text.chars().count();
-    let bytes = text.len();
-    let lines = text.lines().count().max(1);
-    let estimated_tokens = crate::session::tokens::TokenCounter::count_text(text)
-        .saturating_add(USER_MESSAGE_OVERHEAD_TOKENS);
-
     let (history_tokens, working_dir) = {
         let sess = session.lock().await;
         (
@@ -3158,11 +3420,8 @@ async fn analyze_paste_text(
 
     let (context_limit, tool_tokens) = {
         let router = provider_router.read().await;
-        let context_limit = router
-            .active()
-            .map(|p| p.context_window())
-            .unwrap_or(128_000);
-        let tool_tokens = if router.active().map(|p| p.supports_tools()).unwrap_or(false) {
+        let context_limit = router.active_context_window();
+        let tool_tokens = if router.active_supports_tools() {
             tools
                 .all_definitions()
                 .iter()
@@ -3191,23 +3450,58 @@ async fn analyze_paste_text(
         config.agent.include_skills_in_system_prompt && config.agent.skills_enabled,
     );
     let system_tokens = crate::session::tokens::TokenCounter::count_text(&system);
-    let reserved = config
-        .agent
-        .max_tokens
-        .saturating_add(SAFETY_MARGIN_TOKENS)
-        .saturating_add(system_tokens)
-        .saturating_add(history_tokens)
-        .saturating_add(tool_tokens);
-    let available_tokens_estimate = context_limit.saturating_sub(reserved);
+    analyze_paste_budget(
+        text,
+        PasteBudget {
+            history_tokens,
+            system_tokens,
+            tool_tokens,
+            context_limit,
+            max_response_tokens: config.agent.max_tokens,
+            safety_margin_tokens: 2048,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PasteBudget {
+    pub history_tokens: u32,
+    pub system_tokens: u32,
+    pub tool_tokens: u32,
+    pub context_limit: u32,
+    pub max_response_tokens: u32,
+    pub safety_margin_tokens: u32,
+}
+
+/// Pure paste-budget classifier used by the TUI and deterministic evaluation
+/// harnesses. It intentionally mirrors the async paste path without requiring
+/// a provider router, tool registry, or session lock.
+pub fn analyze_paste_budget(text: &str, budget: PasteBudget) -> PasteAnalysis {
+    const USER_MESSAGE_OVERHEAD_TOKENS: u32 = 4;
+
+    let chars = text.chars().count();
+    let bytes = text.len();
+    let lines = text.lines().count().max(1);
+    let estimated_tokens = crate::session::tokens::TokenCounter::count_text(text)
+        .saturating_add(USER_MESSAGE_OVERHEAD_TOKENS);
+
+    let reserved = budget
+        .max_response_tokens
+        .saturating_add(budget.safety_margin_tokens)
+        .saturating_add(budget.system_tokens)
+        .saturating_add(budget.history_tokens)
+        .saturating_add(budget.tool_tokens);
+    let available_tokens_estimate = budget.context_limit.saturating_sub(reserved);
 
     let recommendation = if estimated_tokens <= available_tokens_estimate.saturating_mul(7) / 10 {
         PasteRecommendation::InsertInline
     } else if estimated_tokens <= available_tokens_estimate {
         PasteRecommendation::InsertInlineWithWarning
     } else if estimated_tokens
-        >= context_limit
-            .saturating_sub(config.agent.max_tokens)
-            .saturating_sub(SAFETY_MARGIN_TOKENS)
+        >= budget
+            .context_limit
+            .saturating_sub(budget.max_response_tokens)
+            .saturating_sub(budget.safety_margin_tokens)
     {
         PasteRecommendation::RejectTooLarge
     } else {
@@ -3219,7 +3513,7 @@ async fn analyze_paste_text(
         bytes,
         lines,
         estimated_tokens,
-        context_limit,
+        context_limit: budget.context_limit,
         available_tokens_estimate,
         recommendation,
     }
@@ -3252,7 +3546,7 @@ fn insert_paste_into_input(state: &mut AppState, text: &str, analysis: &PasteAna
     }
 }
 
-fn normalize_clipboard_text(raw: &str) -> String {
+pub fn normalize_clipboard_text(raw: &str) -> String {
     let mut text = raw.replace("\r\n", "\n").replace('\r', "\n");
     text = text.replace("\u{1b}[200~", "").replace("\u{1b}[201~", "");
 
@@ -3599,10 +3893,7 @@ async fn start_compact_history_llm(
 
     let (ctx_window, active_model_id, provider_name) = {
         let router = provider_router.read().await;
-        let ctx = router
-            .active()
-            .map(|p| p.context_window())
-            .unwrap_or(128_000);
+        let ctx = router.active_context_window();
         let model = router.active_model_id().to_string();
         let pname = router
             .active()
@@ -3744,10 +4035,7 @@ async fn compact_history_llm(
     // user switched provider mid-conversation.
     let (ctx_window, active_model_id, provider_name) = {
         let router = provider_router.read().await;
-        let ctx = router
-            .active()
-            .map(|p| p.context_window())
-            .unwrap_or(128_000);
+        let ctx = router.active_context_window();
         let model = router.active_model_id().to_string();
         let pname = router
             .active()
@@ -3858,10 +4146,7 @@ async fn refresh_context_display(
 ) {
     let ctx_window = {
         let router = provider_router.read().await;
-        router
-            .active()
-            .map(|p| p.context_window())
-            .unwrap_or(128_000)
+        router.active_context_window()
     };
     state.context_limit = ctx_window;
 
@@ -3960,9 +4245,7 @@ pub async fn run_tui(
         // Pull the real context window from the active provider so the
         // progress bar scales correctly from the first turn — no more
         // hard-coded 128k default for providers with 200k/1M windows.
-        if let Ok(p) = router.active() {
-            state.context_limit = p.context_window();
-        }
+        state.context_limit = router.active_context_window();
 
         // Provider display name
         for (id, name) in router.available_providers() {
@@ -4091,6 +4374,7 @@ pub async fn run_tui(
         permission_tx: perm_req_tx,
         permission_rx: Arc::new(Mutex::new(perm_resp_rx)),
         graph: shared_graph.clone(),
+        lsp: lsp.clone(),
         file_cache: file_cache.clone(),
         permission_store: permission_store.clone(),
         cancel: agent_cancel.clone(),
@@ -4427,12 +4711,13 @@ pub async fn run_tui(
         }
 
         // ---- Drain coordinator worker notifications ----
-        if state.multithread_mode {
-            if let Some(ref mut coord) = state.coordinator {
-                let worker_events = coord.drain_notifications();
-                for ev in worker_events {
-                    let _ = agent_event_tx.send(ev);
-                }
+        // Drain whenever a coordinator exists. `/team` uses the same worker
+        // runtime but should keep advancing even if the user later toggles the
+        // ad-hoc `/multithread` mode off.
+        if let Some(ref mut coord) = state.coordinator {
+            let worker_events = coord.drain_notifications();
+            for ev in worker_events {
+                let _ = agent_event_tx.send(ev);
             }
         }
 
@@ -4440,6 +4725,7 @@ pub async fn run_tui(
         while let Ok(req) = perm_req_rx.try_recv() {
             state.modal = Some(Modal::Confirmation {
                 tool_name: req.tool_name,
+                input_summary: req.input_summary,
                 description: req.description,
                 scroll: 0,
                 response_tx: req.response_tx,
@@ -4711,9 +4997,7 @@ pub async fn run_tui(
                     // Context window + percentage come from provider + session.
                     {
                         let router = provider_router.read().await;
-                        if let Ok(p) = router.active() {
-                            state.context_limit = p.context_window();
-                        }
+                        state.context_limit = router.active_context_window();
                         let sess = session.lock().await;
                         let used = sess.cost_tracker.context_tokens_estimate();
                         state.context_pct = if state.context_limit > 0 {
@@ -4784,16 +5068,14 @@ pub async fn run_tui(
                     }
                     // Refresh context window from the NEW provider so the
                     // progress bar reflects the correct limit.
-                    if let Ok(p) = router.active() {
-                        state.context_limit = p.context_window();
-                        let sess = session.lock().await;
-                        let used = sess.cost_tracker.context_tokens_estimate();
-                        state.context_pct = if state.context_limit > 0 {
-                            ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100)
-                        } else {
-                            0
-                        };
-                    }
+                    state.context_limit = router.active_context_window();
+                    let sess = session.lock().await;
+                    let used = sess.cost_tracker.context_tokens_estimate();
+                    state.context_pct = if state.context_limit > 0 {
+                        ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100)
+                    } else {
+                        0
+                    };
                     for (id, name) in router.available_providers() {
                         if id == pid {
                             state.provider_name = name.to_string();
@@ -5113,7 +5395,8 @@ pub async fn run_tui(
 
                             // ---- Ctrl shortcuts (all preserved) ----
                             Action::ToggleTrustMode => {
-                                state.trust_mode = !state.trust_mode;
+                                let next_trust_mode = !state.trust_mode;
+                                set_trust_mode(&mut state, next_trust_mode);
                                 state.push_system(format!(
                                     "Trust mode: {}",
                                     if state.trust_mode { "ON" } else { "OFF" }
@@ -5324,6 +5607,7 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
     match modal {
         Some(Modal::Confirmation {
             tool_name,
+            input_summary,
             description,
             mut scroll,
             response_tx,
@@ -5337,10 +5621,17 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                     let _ = response_tx.send(PermissionResponse::Deny);
                 }
                 Action::AlwaysAllow => {
+                    let pattern = if input_summary.is_empty() {
+                        "*"
+                    } else {
+                        input_summary.as_str()
+                    };
+                    let mut store = crate::agent::permissions::PermissionStore::load();
+                    store.add_allow(&tool_name, pattern);
                     let _ = response_tx.send(PermissionResponse::AlwaysAllow);
                 }
                 Action::EnableTrustMode => {
-                    state.trust_mode = true;
+                    set_trust_mode(state, true);
                     let _ = response_tx.send(PermissionResponse::TrustMode);
                 }
                 _ => {
@@ -5367,6 +5658,7 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                     }
                     state.modal = Some(Modal::Confirmation {
                         tool_name,
+                        input_summary,
                         description,
                         scroll,
                         response_tx,

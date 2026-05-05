@@ -15,6 +15,7 @@ mod test_context;
 mod test_coordinator;
 mod test_edit_robust;
 mod test_error;
+mod test_evaluation_harness;
 mod test_file_history;
 mod test_graph_builder;
 mod test_graph_parser;

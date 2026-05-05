@@ -289,7 +289,7 @@ forge-osh --session feature-auth-refactor
 | `edit_file` | Mutating | Surgical find-and-replace edits (preferred over `write_file`) |
 | `create_file` | Mutating | Create a new file (errors if exists) |
 | `delete_file` | Destructive | Delete a file with confirmation |
-| `list_directory` | ReadOnly | List directory contents |
+| `list_directory` | ReadOnly | List directory contents with recursive traversal, path-aware filters, ignore handling, and result limits |
 | `move_file` | Mutating | Move or rename files |
 | `copy_file` | Mutating | Copy files |
 
@@ -299,8 +299,8 @@ Every mutating file operation automatically **snapshots** the file before modify
 
 | Tool | Permission | Description |
 |---|---|---|
-| `bash` | Varies | Run any shell command. Read-only commands (`ls`, `cat`, `grep`, `git log`) are **auto-allowed**. |
-| `powershell` | Varies | Run PowerShell commands (Windows). `Get-*` cmdlets are auto-allowed. |
+| `bash` | Varies | Run shell commands such as `rg`, `git`, `cargo`, `ls`, `cat`. Read-only commands are **auto-allowed**. Copied prompt markers like `$ rg ...` are ignored. |
+| `powershell` | Varies | Run PowerShell commands/scripts such as `Get-Content`, `$lines=...`, `for(...) { ... }`, `Select-Object`. `Get-*` cmdlets are auto-allowed; copied `$ ` / `PS> ` prompts are ignored. |
 
 Configurable timeouts (default: 30s, max: 300s) and a blocked-commands list prevent accidental damage.
 
@@ -327,8 +327,8 @@ Configurable timeouts (default: 30s, max: 300s) and a blocked-commands list prev
 
 | Tool | Description |
 |---|---|
-| `search_files` | Grep-based content search with context lines, file type filters, and output modes |
-| `find_files` | Glob-pattern file discovery across the entire project tree |
+| `search_files` | Native grep-style content search with regex/fixed-string modes, context lines, path globs, exclude globs, file type filters, hidden/ignored controls, and output modes |
+| `find_files` | Glob-pattern file discovery across the project tree; matches file names and relative paths while respecting ignore files by default |
 
 ### Web (2 tools)
 
@@ -490,6 +490,9 @@ Type these at the prompt and press Enter:
 | `/effort <1-5>` | Set response effort level |
 | `/copy` | Copy last assistant response to clipboard |
 | `/permissions` | View/edit permission rules |
+| `/team start <goal>` | Start a durable Agent Team board with parallel subtasks and review |
+| `/team status` | Open the scrollable Agent Team task board |
+| `/team stop` | Stop team workers and save the board |
 
 ### Git & Export
 | Command | Description |
@@ -535,6 +538,8 @@ Type these at the prompt and press Enter:
 |---|---|
 | `/lsp` | Show LSP status — supported languages, which servers are installed, which are running |
 | `/lsp status` | Same as `/lsp` |
+| `/lsp install` | Install/start detected project language servers into forge-osh's managed cache |
+| `/lsp install <lang>` | Install/start one built-in language server, e.g. `typescript`, `python`, `rust`, `go` |
 | `/lsp shutdown` | Stop every running language server (they will respawn lazily on next use) |
 | `/lsp shutdown <lang>` | Stop a single language server (`rust`, `typescript`, `python`, or `go`) |
 
@@ -846,16 +851,18 @@ LSP fills the gap that `forge-graph` (parser-based) cannot: live type informatio
 
 ### Supported Languages
 
+forge-osh ships a broad built-in LSP registry, prefers bundled sidecar servers from `lsp/bin` beside the executable, auto-provisions many built-in servers into its managed data cache when it knows a safe installer command, and also loads user-defined servers from `~/.forge-osh/lsp.toml`. The table below lists the core language set; `/lsp` shows the full live registry, including extra built-ins such as C/C++, Java, C#, PHP, Ruby, Lua, Bash, JSON/YAML, HTML/CSS, Vue, Svelte, Kotlin, Swift, Dart, and Dockerfile.
+
 | Language | Extensions | Servers tried (first found wins) | Project markers |
 |---|---|---|---|
 | Rust | `.rs` | `rust-analyzer` | `Cargo.toml`, `rust-project.json` |
-| TypeScript / JavaScript | `.ts .tsx .js .jsx .mjs .cjs` | `typescript-language-server --stdio`, `tsserver --stdio` | `package.json`, `tsconfig.json`, `jsconfig.json` |
+| TypeScript / JavaScript | `.ts .tsx .js .jsx .mjs .cjs` | `typescript-language-server --stdio` | `package.json`, `tsconfig.json`, `jsconfig.json` |
 | Python | `.py .pyi` | `pyright-langserver --stdio`, `pylsp`, `jedi-language-server` | `pyproject.toml`, `setup.py`, `requirements.txt`, `Pipfile` |
 | Go | `.go` | `gopls` | `go.mod`, `go.work` |
 
 ### Installing the Servers
 
-You only need to install servers for the languages you actually work in. forge-osh detects them at runtime; missing servers degrade gracefully (the tool returns a friendly install hint instead of failing your conversation).
+For built-in languages, forge-osh first looks for release-provided sidecars in `lsp/bin` and `lsp/node/node_modules/.bin` beside the executable. If a sidecar is not present and a known package-manager route exists, forge-osh attempts to install and start the server automatically when it detects matching project files. Node-based servers are installed into forge-osh's own data directory instead of requiring global `npm -g` installs. If a platform/package manager is missing or a language has no safe universal installer, the tool returns a friendly install hint instead of failing your conversation.
 
 ```bash
 # Rust
@@ -872,7 +879,22 @@ pip install python-lsp-server  # alternative
 go install golang.org/x/tools/gopls@latest
 ```
 
-Run `/lsp` inside the TUI to see which servers are detected on your `PATH`.
+Run `/lsp` inside the TUI to open a scrollable status view showing configured languages, installed/running servers, install hints, and custom-server instructions.
+
+### Custom Language Servers
+
+Create `~/.forge-osh/lsp.toml` to add or override language servers without rebuilding:
+
+```toml
+[[servers]]
+language = "zig"
+language_id = "zig"
+extensions = ["zig"]
+command = "zls"
+args = []
+root_markers = ["build.zig", ".git"]
+install_hint = "Install zls and put it on PATH"
+```
 
 ### How It Works
 
@@ -887,10 +909,11 @@ AgentLoop ─► ToolRegistry ─► lsp_* Tool ─► SharedLspManager
                                     └────────────────────────────┘
 ```
 
-- **Lazy spawn.** No language server is started at boot. The first time an `lsp_*` tool runs against a Rust file, `rust-analyzer` is spawned, `initialize`d, and cached for the remainder of the session. Boot time is unaffected.
+- **Bundled sidecars, managed provisioning, warm-up, and lazy fallback.** At startup, forge-osh scans the project lightly, prefers release-provided sidecars, installs known built-in language servers into its managed cache when missing, and warms detected servers in the background. If a server was not warmed yet, the first `lsp_*` tool use still spawns it lazily.
 - **Per-language root detection.** When a server is spawned, forge-osh walks up from the working directory looking for that language's project markers (e.g. `Cargo.toml`) so the server indexes the right workspace.
 - **Document sync.** Tools that operate on a file open it via `textDocument/didOpen` (or `didChange` if the on-disk text changed since the last call). You don't manage this — every tool that takes a `path` calls it transparently.
 - **Diagnostics cache.** Servers push `publishDiagnostics` asynchronously; forge-osh stores the latest snapshot per file, so `lsp_diagnostics` returns immediately if it's already arrived and otherwise polls briefly (default 2.5s, configurable via `wait_ms`).
+- **Post-edit diagnostics.** After successful file writes/edits/copies/moves, forge-osh tries a short LSP diagnostic check for the changed source file and appends the result to the tool output when a server is available.
 - **Pure stdio JSON-RPC.** No external `lsp-types` dependency — forge-osh ships its own minimal protocol implementation, which keeps the binary small and forwards-compatible with quirky servers.
 
 ### When to Use LSP Tools
@@ -943,7 +966,7 @@ Use LSP tools instead of plain text search when you care about **correctness**, 
 
 ### Caveats & Things to Know
 
-- **Servers must be installed separately.** forge-osh does not bundle any language server. If a server isn't on `PATH`, the relevant `lsp_*` tool returns a friendly install hint and the agent falls back to text search.
+- **Servers must be available before LSP tools can answer.** forge-osh checks bundled sidecars beside the executable, its managed LSP cache, and `PATH`. `/lsp install` can provision languages with known installers; otherwise the relevant `lsp_*` tool returns a friendly install hint and the agent falls back to text search.
 - **First request per language is slow.** Server spawn + `initialize` + workspace index can take 2–30 seconds (especially `rust-analyzer` on a cold cargo target dir). Subsequent calls are sub-second.
 - **`lsp_diagnostics` may need a longer wait_ms on large projects.** Some servers stream diagnostics over multiple seconds. If you get an empty result, retry with `"wait_ms": 8000`.
 - **Line/column are 1-based.** All forge-osh `lsp_*` tools accept human-friendly 1-based coordinates and convert internally — keep that in mind when scripting.
@@ -956,6 +979,8 @@ Use LSP tools instead of plain text search when you care about **correctness**, 
 ### Diagnostics & Troubleshooting
 
 - `/lsp` — see what's installed and what's running
+- `/lsp install` — install/start servers for detected project languages
+- `/lsp install typescript` — install/start one built-in language server
 - `/lsp shutdown` — kill every server (forces re-init on next use; useful if a server gets wedged)
 - `/lsp shutdown rust` — restart only `rust-analyzer`
 - Set `RUST_LOG=forge_agent::lsp=debug` in your environment to see protocol traffic in the tracing logs
@@ -1005,6 +1030,25 @@ The Coordinator manages these parallel threads via a message-passing Event Bus:
 You have full granular control over the swarm via dedicated commands:
 - `/multithread status`: Lists all currently executing workers, their unique `uuid` hashes, and the truncated description of what task they are currently solving.
 - `/multithread stop`: Broadcasts an abort signal (via tokio `JoinHandle::abort()`) to gracefully instantly kill all background workers running in the swarm.
+
+### 1.1 Agent Teams / Parallel Task Boards
+
+For larger tasks, `forge-osh` now adds a durable Agent Team layer on top of the worker runtime. Use it when a request should be split into independent workstreams, reviewed, and integrated cleanly instead of spawning loose background workers.
+
+```text
+/team start refactor the auth module; update tests; review regression risk
+/team status
+/team stop
+```
+
+What the team board adds:
+- **Coordinator plan:** the goal is converted into explicit subtasks. Semicolon-separated or multiline goals become direct task seeds; otherwise forge creates context-mapping, implementation, and review-oriented subtasks.
+- **Shared bus contract:** every team worker receives the same team id, goal, roster, conflict strategy, and artifact-reporting format.
+- **Durable status:** the board is saved under the forge data directory as JSON, so task status, results, artifact paths, and recent events are inspectable after the run.
+- **Peer review phase:** after worker subtasks finish, a review worker synthesizes outputs, checks conflicts, identifies missing verification, and produces an integration verdict.
+- **Conflict handling:** if multiple workers report the same artifact path, the board enters `conflict` instead of pretending the merge was clean.
+
+Use `/team status` to open the scrollable board modal. Use `/multithread` + `@worker` for quick one-off background tasks; use `/team start` for production-grade multi-agent work that needs lifecycle tracking and review.
 
 ---
 

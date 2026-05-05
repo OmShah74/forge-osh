@@ -46,7 +46,7 @@ struct OpenDoc {
 }
 
 pub struct LspClient {
-    pub spec: &'static ServerSpec,
+    pub spec: ServerSpec,
     pub root: PathBuf,
 
     next_id: AtomicU64,
@@ -76,12 +76,12 @@ pub struct LspClient {
 
 impl LspClient {
     /// Spawn the server and drive the initialize handshake.
-    pub async fn spawn(spec: &'static ServerSpec, root: PathBuf) -> Result<Self> {
-        let cand = super::config::resolve_candidate(spec)
+    pub async fn spawn(spec: ServerSpec, root: PathBuf) -> Result<Self> {
+        let cand = super::config::resolve_candidate(&spec)
             .ok_or_else(|| anyhow!("no language server found on PATH for {}", spec.language))?;
 
-        let mut cmd = Command::new(cand.program);
-        cmd.args(cand.args)
+        let mut cmd = Command::new(&cand.program);
+        cmd.args(&cand.args)
             .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -332,18 +332,17 @@ impl LspClient {
             None => {
                 let item = TextDocumentItem {
                     uri: uri.clone(),
-                    language_id: self.spec.language_id,
+                    language_id: self.spec.language_id.clone(),
                     version: 1,
                     text: text.clone(),
                 };
-                self.notify("textDocument/didOpen", DidOpenParams { text_document: item })?;
-                docs.insert(
-                    uri.clone(),
-                    OpenDoc {
-                        version: 1,
-                        text,
+                self.notify(
+                    "textDocument/didOpen",
+                    DidOpenParams {
+                        text_document: item,
                     },
-                );
+                )?;
+                docs.insert(uri.clone(), OpenDoc { version: 1, text });
             }
             Some(state) if state.text != text => {
                 state.version += 1;
@@ -416,7 +415,9 @@ impl LspClient {
                 ReferenceParams {
                     text_document: TextDocumentIdentifier { uri },
                     position: protocol::Position { line, character },
-                    context: ReferenceContext { include_declaration },
+                    context: ReferenceContext {
+                        include_declaration,
+                    },
                 },
                 Duration::from_secs(20),
             )
@@ -427,12 +428,7 @@ impl LspClient {
         Ok(parse_locations(env.result))
     }
 
-    pub async fn hover(
-        &self,
-        path: &Path,
-        line: u32,
-        character: u32,
-    ) -> Result<Option<String>> {
+    pub async fn hover(&self, path: &Path, line: u32, character: u32) -> Result<Option<String>> {
         let uri = self.ensure_open(path).await?;
         let env = self
             .request(
@@ -450,10 +446,7 @@ impl LspClient {
         Ok(parse_hover(env.result))
     }
 
-    pub async fn document_symbols(
-        &self,
-        path: &Path,
-    ) -> Result<Vec<DocumentSymbolInfo>> {
+    pub async fn document_symbols(&self, path: &Path) -> Result<Vec<DocumentSymbolInfo>> {
         let uri = self.ensure_open(path).await?;
         let env = self
             .request(
@@ -613,7 +606,10 @@ fn push_location(out: &mut Vec<protocol::Location>, v: Value) {
         return;
     }
     // LocationLink: { targetUri, targetSelectionRange | targetRange }
-    let uri = v.get("targetUri").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let uri = v
+        .get("targetUri")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     let range = v
         .get("targetSelectionRange")
         .or_else(|| v.get("targetRange"))
@@ -714,7 +710,9 @@ pub struct TextEdit {
 
 fn parse_workspace_edit(result: Option<Value>) -> WorkspaceEditPreview {
     let mut out = WorkspaceEditPreview::default();
-    let Some(v) = result else { return out; };
+    let Some(v) = result else {
+        return out;
+    };
 
     // Prefer documentChanges (newer), fall back to changes map.
     if let Some(doc_changes) = v.get("documentChanges").and_then(|x| x.as_array()) {

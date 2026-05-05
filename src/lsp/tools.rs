@@ -113,7 +113,7 @@ impl Tool for LspDiagnosticsTool {
     fn description(&self) -> &str {
         "Compiler-grade diagnostics (errors, warnings) for a source file via Language Server Protocol. \
         Use this BEFORE claiming code is correct — catches type errors, unused imports, borrow-check \
-        issues, missing methods, etc. that text-based tools miss. Supports Rust, TS/JS, Python, Go."
+        issues, missing methods, etc. that text-based tools miss. Supports every configured LSP language."
     }
     fn parameters_schema(&self) -> Value {
         json!({
@@ -159,15 +159,11 @@ impl Tool for LspDiagnosticsTool {
             ));
         }
 
-        let mut out = format!(
-            "{} diagnostic(s) for {}:\n",
-            diags.len(),
-            rel(&path, ctx)
-        );
+        let mut out = format!("{} diagnostic(s) for {}:\n", diags.len(), rel(&path, ctx));
         for d in &diags {
             let line = d.range.start.line + 1;
             let col = d.range.start.character + 1;
-            let src = d.source.as_deref().unwrap_or(client.spec.language);
+            let src = d.source.as_deref().unwrap_or(&client.spec.language);
             let code = d
                 .code
                 .as_ref()
@@ -515,7 +511,7 @@ impl Tool for LspWorkspaceSymbolsTool {
         "Search the entire workspace for symbols matching a query string via LSP. \
         Compiler-grade equivalent of `grep -n 'fn foo'` — returns only real declarations \
         of `foo`, not comments or string occurrences. Specify `language` to pick which \
-        server to query (default: rust)."
+        server to query by language key (default: rust)."
     }
     fn parameters_schema(&self) -> Value {
         json!({
@@ -524,7 +520,7 @@ impl Tool for LspWorkspaceSymbolsTool {
                 "query": { "type": "string" },
                 "language": {
                     "type": "string",
-                    "description": "Language key (rust, typescript, python, go). Default: rust."
+                    "description": "Language key (rust, typescript, python, go, etc.). Default: rust."
                 }
             },
             "required": ["query"]
@@ -636,7 +632,11 @@ impl Tool for LspRenameTool {
     }
 
     fn effective_permission_level(&self, input: &Value) -> PermissionLevel {
-        if input.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(true) {
+        if input
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+        {
             PermissionLevel::ReadOnly
         } else {
             PermissionLevel::Mutating
@@ -827,22 +827,40 @@ mod tests {
         let edits = vec![
             TextEdit {
                 range: Range {
-                    start: Position { line: 0, character: 4 },
-                    end: Position { line: 0, character: 7 },
+                    start: Position {
+                        line: 0,
+                        character: 4,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 7,
+                    },
                 },
                 new_text: "bar".into(),
             },
             TextEdit {
                 range: Range {
-                    start: Position { line: 1, character: 0 },
-                    end: Position { line: 1, character: 3 },
+                    start: Position {
+                        line: 1,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 3,
+                    },
                 },
                 new_text: "bar".into(),
             },
             TextEdit {
                 range: Range {
-                    start: Position { line: 1, character: 6 },
-                    end: Position { line: 1, character: 9 },
+                    start: Position {
+                        line: 1,
+                        character: 6,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 9,
+                    },
                 },
                 new_text: "bar".into(),
             },

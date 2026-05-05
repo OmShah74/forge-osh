@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -12,6 +12,7 @@ use crate::agent::permissions::PermissionStore;
 use crate::config::Config;
 use crate::error::{ForgeError, Result};
 use crate::graph::SharedGraph;
+use crate::lsp::SharedLspManager;
 use crate::provider::router::ProviderRouter;
 use crate::session::{FileStateCache, Session};
 use crate::skills::{
@@ -108,6 +109,8 @@ pub struct AgentLoop {
     pub permission_rx: Arc<Mutex<mpsc::UnboundedReceiver<PermissionResponse>>>,
     /// Shared semantic code graph (None when /forge-graph has not been built yet)
     pub graph: SharedGraph,
+    /// Shared LSP manager for automatic code intelligence checks.
+    pub lsp: SharedLspManager,
     /// Session-scoped file-state cache, shared with tool execution contexts.
     pub file_cache: Arc<FileStateCache>,
     /// Permission rules loaded from disk. Refreshed at the start of every turn.
@@ -127,6 +130,7 @@ pub struct AgentLoop {
 #[derive(Debug)]
 pub struct PermissionRequest {
     pub tool_name: String,
+    pub input_summary: String,
     pub description: String,
     pub level: PermissionLevel,
     pub response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
@@ -298,6 +302,23 @@ impl ConsecutiveFailureTracker {
     }
 }
 
+fn lsp_diagnostic_target(
+    tc: &ToolCall,
+    working_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let key = match tc.name.as_str() {
+        "write_file" | "edit_file" | "create_file" => "path",
+        "copy_file" | "move_file" => "destination",
+        _ => return None,
+    };
+    let path = std::path::Path::new(tc.input.get(key)?.as_str()?);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_dir.join(path)
+    })
+}
+
 impl AgentLoop {
     /// Trigger cancellation of the current turn. Safe to call from any thread.
     pub fn cancel_current_turn(&self) {
@@ -409,10 +430,7 @@ impl AgentLoop {
                 let (needs_compact, ctx_window) = {
                     let session = self.session.lock().await;
                     let router = self.provider_router.read().await;
-                    let ctx_window = router
-                        .active()
-                        .map(|p| p.context_window())
-                        .unwrap_or(128_000);
+                    let ctx_window = router.active_context_window();
                     let ctx_mgr = ContextManager::new(ctx_window);
                     let needs = match ctx_mgr.check(&session.history) {
                         ContextStatus::NeedsSummarization { used, limit } => {
@@ -589,7 +607,7 @@ impl AgentLoop {
             let request = {
                 let session = self.session.lock().await;
                 let router = self.provider_router.read().await;
-                let provider = router.active()?;
+                let _provider = router.active()?;
 
                 let graph_info = self.graph.read().ok().and_then(|g| {
                     g.as_ref().map(|cg| {
@@ -646,7 +664,7 @@ impl AgentLoop {
                     }
                 }
 
-                let tools = if provider.supports_tools() {
+                let tools = if router.active_supports_tools() {
                     Some(self.tools.all_definitions())
                 } else {
                     None
@@ -687,13 +705,8 @@ impl AgentLoop {
             {
                 let mut session = self.session.lock().await;
                 let router = self.provider_router.read().await;
-                if let Ok(provider) = router.active() {
-                    session.record_usage(
-                        &response.usage,
-                        provider.input_cost_per_million(),
-                        provider.output_cost_per_million(),
-                    );
-                }
+                let (input_cost, output_cost) = router.active_costs();
+                session.record_usage(&response.usage, input_cost, output_cost);
             }
 
             if !did_stream {
@@ -800,6 +813,7 @@ impl AgentLoop {
                 let hooks_cfg = hooks_config.clone();
                 let working_dir = working_dir_pb.clone();
                 let sid = session_id.to_string();
+                let lsp = self.lsp.clone();
 
                 let join_tc = tc.clone();
                 futs.push((
@@ -814,7 +828,7 @@ impl AgentLoop {
                             &store_arc,
                             &cancel,
                             &hooks_cfg,
-                            working_dir,
+                            working_dir.clone(),
                             sid,
                             event_tx.clone(),
                             perm_tx,
@@ -829,6 +843,13 @@ impl AgentLoop {
                                 crate::tools::executor::panic_message(payload)
                             )),
                         };
+                        let output = Self::append_lsp_post_write_diagnostics(
+                            &lsp,
+                            &tc,
+                            output,
+                            &working_dir,
+                        )
+                        .await;
 
                         let _ = event_tx.send(AgentEvent::ToolEnd {
                             name: tc.name.clone(),
@@ -894,6 +915,9 @@ impl AgentLoop {
                     crate::tools::executor::panic_message(payload)
                 )),
             };
+            let output =
+                Self::append_lsp_post_write_diagnostics(&self.lsp, &tc, output, working_dir_pb)
+                    .await;
             let _ = self.event_tx.send(AgentEvent::ToolEnd {
                 name: tc.name.clone(),
                 output: output.content.clone(),
@@ -934,6 +958,79 @@ impl AgentLoop {
                 failure_tracker.reset();
             }
         }
+    }
+
+    async fn append_lsp_post_write_diagnostics(
+        lsp: &SharedLspManager,
+        tc: &ToolCall,
+        mut output: ToolOutput,
+        working_dir: &std::path::Path,
+    ) -> ToolOutput {
+        if output.is_error {
+            return output;
+        }
+        let Some(path) = lsp_diagnostic_target(tc, working_dir) else {
+            return output;
+        };
+        if !path.exists() || lsp.language_for_path(&path).is_none() {
+            return output;
+        }
+
+        let client =
+            match tokio::time::timeout(Duration::from_secs(8), lsp.client_for_path(&path)).await {
+                Ok(Ok(client)) => client,
+                _ => return output,
+            };
+
+        let diagnostics = match client
+            .diagnostics_for(&path, Duration::from_millis(1200))
+            .await
+        {
+            Ok(diagnostics) => diagnostics,
+            Err(_) => return output,
+        };
+
+        let rel = path
+            .strip_prefix(working_dir)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        if diagnostics.is_empty() {
+            output.content.push_str(&format!(
+                "\n\nLSP post-edit check ({}) for {}: no diagnostics reported.",
+                client.spec.language, rel
+            ));
+            return output;
+        }
+
+        output.content.push_str(&format!(
+            "\n\nLSP post-edit check ({}) for {}: {} diagnostic(s):\n",
+            client.spec.language,
+            rel,
+            diagnostics.len()
+        ));
+        for diag in diagnostics.iter().take(12) {
+            let label = match diag.severity {
+                Some(1) => "error",
+                Some(2) => "warning",
+                Some(3) => "info",
+                Some(4) => "hint",
+                _ => "diag",
+            };
+            output.content.push_str(&format!(
+                "  {}:{}: {}: {}\n",
+                diag.range.start.line + 1,
+                diag.range.start.character + 1,
+                label,
+                diag.message.lines().next().unwrap_or(&diag.message)
+            ));
+        }
+        if diagnostics.len() > 12 {
+            output.content.push_str(&format!(
+                "  ... {} more diagnostic(s) omitted\n",
+                diagnostics.len() - 12
+            ));
+        }
+        output
     }
 
     async fn apply_special_tool_effects(&self, tc: &ToolCall, output: &ToolOutput) {
@@ -1123,6 +1220,7 @@ impl AgentLoop {
 
         let trust_mode = ctx.trust_mode;
         let store_snapshot = store.read().clone();
+        let input_summary = crate::agent::permissions::tool_input_summary(&tc.name, &tc.input);
         let output = executor
             .execute(
                 tc,
@@ -1137,6 +1235,7 @@ impl AgentLoop {
                     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                     let req = PermissionRequest {
                         tool_name: name,
+                        input_summary,
                         description: desc,
                         level,
                         response_tx: resp_tx,

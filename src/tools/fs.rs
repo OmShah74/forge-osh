@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ignore::WalkBuilder;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -935,7 +936,9 @@ impl Tool for ListDirectoryTool {
                 "recursive": { "type": "boolean", "default": false },
                 "max_depth": { "type": "integer", "default": 3 },
                 "include_hidden": { "type": "boolean", "default": false },
-                "filter": { "type": "string", "description": "Glob pattern filter (e.g., '*.rs')" }
+                "include_ignored": { "type": "boolean", "default": false, "description": "Include files ignored by .gitignore/.ignore" },
+                "filter": { "type": "string", "description": "Glob pattern filter matched against names and relative paths (e.g., '*.rs', 'src/**/*.rs')" },
+                "max_results": { "type": "integer", "default": 500, "description": "Maximum entries to return" }
             },
             "required": ["path"]
         })
@@ -954,7 +957,9 @@ impl Tool for ListDirectoryTool {
         let recursive = input["recursive"].as_bool().unwrap_or(false);
         let max_depth = input["max_depth"].as_u64().unwrap_or(3) as usize;
         let include_hidden = input["include_hidden"].as_bool().unwrap_or(false);
+        let include_ignored = input["include_ignored"].as_bool().unwrap_or(false);
         let filter = input["filter"].as_str();
+        let max_results = input["max_results"].as_u64().unwrap_or(500) as usize;
 
         if !path.exists() {
             return ToolOutput::error(format!("Directory not found: {}", path.display()));
@@ -964,26 +969,41 @@ impl Tool for ListDirectoryTool {
             return ToolOutput::error(format!("Not a directory: {}", path.display()));
         }
 
-        let glob_pattern = filter.and_then(|f| glob::Pattern::new(f).ok());
+        let glob_pattern = match filter.map(glob::Pattern::new).transpose() {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(format!("Invalid filter glob: {e}")),
+        };
 
         let mut entries = Vec::new();
-        let walker = walkdir::WalkDir::new(&path)
-            .max_depth(if recursive { max_depth } else { 1 })
-            .follow_links(false);
+        let mut builder = WalkBuilder::new(&path);
+        builder
+            .hidden(!include_hidden)
+            .ignore(!include_ignored)
+            .git_ignore(!include_ignored)
+            .git_global(!include_ignored)
+            .git_exclude(!include_ignored)
+            .follow_links(false)
+            .max_depth(Some(if recursive { max_depth } else { 1 }));
+        let walker = builder.build();
 
         for entry in walker.into_iter().filter_map(|e| e.ok()) {
             let entry_path = entry.path();
             if entry_path == path {
                 continue;
             }
-
-            let file_name = entry.file_name().to_string_lossy();
-            if !include_hidden && file_name.starts_with('.') {
-                continue;
+            if entries.len() >= max_results {
+                break;
             }
 
+            let file_name = entry.file_name().to_string_lossy();
+
             if let Some(ref pattern) = glob_pattern {
-                if !pattern.matches(&file_name) && !entry_path.is_dir() {
+                let relative_for_match = entry_path
+                    .strip_prefix(&path)
+                    .unwrap_or(entry_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !pattern.matches(&file_name) && !pattern.matches(&relative_for_match) {
                     continue;
                 }
             }
@@ -999,10 +1019,16 @@ impl Tool for ListDirectoryTool {
         if entries.is_empty() {
             ToolOutput::success(format!("Directory is empty: {}", path.display()))
         } else {
+            let truncated = if entries.len() >= max_results {
+                format!("\n\n(Results truncated at {max_results} entries. Use max_results to increase.)")
+            } else {
+                String::new()
+            };
             ToolOutput::success(format!(
-                "Contents of {}:\n{}",
+                "Contents of {}:\n{}{}",
                 path.display(),
-                entries.join("\n")
+                entries.join("\n"),
+                truncated
             ))
         }
     }

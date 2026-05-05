@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+};
 
 // ─── JSON-RPC envelope ──────────────────────────────────────────────────────
 
@@ -55,8 +57,8 @@ where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let body = serde_json::to_vec(msg)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let body =
+        serde_json::to_vec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(&body).await?;
@@ -101,8 +103,8 @@ pub async fn read_message<R: AsyncBufRead + Unpin>(
 
     let mut body = vec![0u8; len];
     reader.read_exact(&mut body).await?;
-    let env: ResponseEnvelope = serde_json::from_slice(&body)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let env: ResponseEnvelope =
+        serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(Some(env))
 }
 
@@ -132,18 +134,18 @@ pub struct TextDocumentIdentifier {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TextDocumentItem<'a> {
+pub struct TextDocumentItem {
     pub uri: String,
     #[serde(rename = "languageId")]
-    pub language_id: &'a str,
+    pub language_id: String,
     pub version: i32,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DidOpenParams<'a> {
+pub struct DidOpenParams {
     #[serde(rename = "textDocument")]
-    pub text_document: TextDocumentItem<'a>,
+    pub text_document: TextDocumentItem,
 }
 
 #[derive(Debug, Clone, Serialize)]

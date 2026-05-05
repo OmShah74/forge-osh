@@ -22,6 +22,7 @@ use crate::tools::ToolRegistry;
 use crate::types::*;
 
 use super::system_prompt;
+use super::team::{extract_artifacts, TeamArtifact};
 
 // ---------------------------------------------------------------------------
 // Worker identity & status
@@ -51,6 +52,8 @@ pub enum WorkerStatus {
 pub struct WorkerNotification {
     pub worker_id: WorkerId,
     pub description: String,
+    pub task_id: Option<String>,
+    pub artifacts: Vec<TeamArtifact>,
     pub status: WorkerStatus,
 }
 
@@ -69,6 +72,8 @@ pub struct Worker {
     /// The worker's own isolated message history
     history: ConversationHistory,
     working_dir: String,
+    team_task_id: Option<String>,
+    team_context: Option<String>,
 }
 
 impl Worker {
@@ -91,7 +96,33 @@ impl Worker {
             graph,
             history: ConversationHistory::new(id),
             working_dir,
+            team_task_id: None,
+            team_context: None,
         }
+    }
+
+    /// Create a worker that participates in a durable Agent Team board.
+    pub fn new_with_team(
+        description: String,
+        provider_router: Arc<RwLock<ProviderRouter>>,
+        tools: Arc<ToolRegistry>,
+        config: Arc<Config>,
+        graph: SharedGraph,
+        working_dir: String,
+        team_task_id: String,
+        team_context: String,
+    ) -> Self {
+        let mut worker = Self::new(
+            description,
+            provider_router,
+            tools,
+            config,
+            graph,
+            working_dir,
+        );
+        worker.team_task_id = Some(team_task_id);
+        worker.team_context = Some(team_context);
+        worker
     }
 
     /// Execute the worker's task. This runs the full agentic loop in isolation
@@ -106,7 +137,12 @@ impl Worker {
         let worker_id = self.id.clone();
         let description = self.description.clone();
 
-        // Add the task prompt as the first user message
+        // Add the task prompt as the first user message. Team workers receive
+        // the shared bus contract before their local assignment.
+        let prompt = match self.team_context.as_ref() {
+            Some(team_context) => format!("{team_context}\n\n{prompt}"),
+            None => prompt,
+        };
         self.history.add_user(prompt);
 
         let max_iterations = self.config.agent.max_tool_iterations;
@@ -120,6 +156,8 @@ impl Worker {
                 let _ = notify_tx.send(WorkerNotification {
                     worker_id,
                     description,
+                    task_id: self.team_task_id.clone(),
+                    artifacts: Vec::new(),
                     status: WorkerStatus::Failed {
                         error: format!("Worker reached max iterations ({max_iterations})"),
                         duration_ms: start.elapsed().as_millis() as u64,
@@ -131,12 +169,14 @@ impl Worker {
             // Build request
             let request = {
                 let router = self.provider_router.read().await;
-                let provider = match router.active() {
+                let _provider = match router.active() {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = notify_tx.send(WorkerNotification {
                             worker_id,
                             description,
+                            task_id: self.team_task_id.clone(),
+                            artifacts: Vec::new(),
                             status: WorkerStatus::Failed {
                                 error: format!("No active provider: {e}"),
                                 duration_ms: start.elapsed().as_millis() as u64,
@@ -164,7 +204,7 @@ impl Worker {
                     false,
                 );
 
-                let tools = if provider.supports_tools() {
+                let tools = if router.active_supports_tools() {
                     Some(self.tools.all_definitions())
                 } else {
                     None
@@ -195,6 +235,8 @@ impl Worker {
                         let _ = notify_tx.send(WorkerNotification {
                             worker_id,
                             description,
+                            task_id: self.team_task_id.clone(),
+                            artifacts: Vec::new(),
                             status: WorkerStatus::Failed {
                                 error: format!("Provider error: {e}"),
                                 duration_ms: start.elapsed().as_millis() as u64,
@@ -211,6 +253,8 @@ impl Worker {
                     let _ = notify_tx.send(WorkerNotification {
                         worker_id,
                         description,
+                        task_id: self.team_task_id.clone(),
+                        artifacts: Vec::new(),
                         status: WorkerStatus::Failed {
                             error: format!("API error: {e}"),
                             duration_ms: start.elapsed().as_millis() as u64,
@@ -289,9 +333,12 @@ impl Worker {
         }
 
         // Worker completed successfully
+        let artifacts = extract_artifacts(&final_text);
         let _ = notify_tx.send(WorkerNotification {
             worker_id,
             description,
+            task_id: self.team_task_id.clone(),
+            artifacts,
             status: WorkerStatus::Completed {
                 result: final_text,
                 token_usage: total_usage,

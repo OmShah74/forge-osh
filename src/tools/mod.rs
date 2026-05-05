@@ -16,6 +16,7 @@ pub mod worktree;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+use crate::config::Config;
 use crate::types::{PermissionLevel, ToolContext, ToolDefinition, ToolOutput};
 
 /// Trait every tool must implement
@@ -64,77 +65,100 @@ impl ToolRegistry {
 
     /// Register all built-in tools
     pub fn with_builtins() -> Self {
+        Self::with_config(&Config::default())
+    }
+
+    /// Register all built-in tools after applying config enable/disable lists
+    /// and tool-specific settings.
+    pub fn with_config(config: &Config) -> Self {
         let mut registry = Self::new();
 
         // ── File system tools ──────────────────────────────────────────────
-        registry.register(Box::new(fs::ReadFileTool));
-        registry.register(Box::new(fs::WriteFileTool));
-        registry.register(Box::new(fs::EditFileTool));
-        registry.register(Box::new(fs::CreateFileTool));
-        registry.register(Box::new(fs::DeleteFileTool));
-        registry.register(Box::new(fs::ListDirectoryTool));
-        registry.register(Box::new(fs::MoveFileTool));
-        registry.register(Box::new(fs::CopyFileTool));
+        registry.register_enabled(config, Box::new(fs::ReadFileTool));
+        registry.register_enabled(config, Box::new(fs::WriteFileTool));
+        registry.register_enabled(config, Box::new(fs::EditFileTool));
+        registry.register_enabled(config, Box::new(fs::CreateFileTool));
+        registry.register_enabled(config, Box::new(fs::DeleteFileTool));
+        registry.register_enabled(config, Box::new(fs::ListDirectoryTool));
+        registry.register_enabled(config, Box::new(fs::MoveFileTool));
+        registry.register_enabled(config, Box::new(fs::CopyFileTool));
 
         // ── Shell ──────────────────────────────────────────────────────────
-        registry.register(Box::new(shell::BashTool::default()));
-        registry.register(Box::new(powershell::PowerShellTool::default()));
+        registry.register_enabled(
+            config,
+            Box::new(shell::BashTool::from_config(&config.tools.bash)),
+        );
+        registry.register_enabled(config, Box::new(powershell::PowerShellTool::default()));
 
         // ── Git ────────────────────────────────────────────────────────────
-        registry.register(Box::new(git::GitStatusTool));
-        registry.register(Box::new(git::GitDiffTool));
-        registry.register(Box::new(git::GitLogTool));
-        registry.register(Box::new(git::GitAddTool));
-        registry.register(Box::new(git::GitCommitTool));
-        registry.register(Box::new(git::GitBranchTool));
-        registry.register(Box::new(git::GitCheckoutTool));
-        registry.register(Box::new(git::GitStashTool));
-        registry.register(Box::new(git::GitBlameTool));
-        registry.register(Box::new(git::GitShowTool));
-        registry.register(Box::new(git::GitResetTool));
-        registry.register(Box::new(git::GitFetchTool));
-        registry.register(Box::new(git::GitPushTool));
-        registry.register(Box::new(git::GitPullTool));
+        registry.register_enabled(config, Box::new(git::GitStatusTool));
+        registry.register_enabled(config, Box::new(git::GitDiffTool));
+        registry.register_enabled(config, Box::new(git::GitLogTool));
+        registry.register_enabled(config, Box::new(git::GitAddTool));
+        registry.register_enabled(config, Box::new(git::GitCommitTool));
+        registry.register_enabled(config, Box::new(git::GitBranchTool));
+        registry.register_enabled(config, Box::new(git::GitCheckoutTool));
+        registry.register_enabled(config, Box::new(git::GitStashTool));
+        registry.register_enabled(config, Box::new(git::GitBlameTool));
+        registry.register_enabled(config, Box::new(git::GitShowTool));
+        registry.register_enabled(config, Box::new(git::GitResetTool));
+        registry.register_enabled(config, Box::new(git::GitFetchTool));
+        registry.register_enabled(config, Box::new(git::GitPushTool));
+        registry.register_enabled(config, Box::new(git::GitPullTool));
 
         // ── Search ─────────────────────────────────────────────────────────
-        registry.register(Box::new(search::SearchFilesTool));
-        registry.register(Box::new(search::FindFilesTool));
+        registry.register_enabled(config, Box::new(search::SearchFilesTool));
+        registry.register_enabled(config, Box::new(search::FindFilesTool));
 
         // ── Web ────────────────────────────────────────────────────────────
-        registry.register(Box::new(web::WebFetchTool));
-        registry.register(Box::new(web::WebSearchTool));
+        if config.tools.web.enabled {
+            registry.register_enabled(
+                config,
+                Box::new(web::WebFetchTool::from_config(&config.tools.web)),
+            );
+            registry.register_enabled(
+                config,
+                Box::new(web::WebSearchTool::from_config(&config.tools.web)),
+            );
+        }
 
         // ── Code quality ───────────────────────────────────────────────────
-        registry.register(Box::new(code::RunLinterTool));
-        registry.register(Box::new(code::RunTestsTool));
-        registry.register(Box::new(code::RunFormatterTool));
+        registry.register_enabled(config, Box::new(code::RunLinterTool));
+        registry.register_enabled(config, Box::new(code::RunTestsTool));
+        registry.register_enabled(config, Box::new(code::RunFormatterTool));
 
         // ── Task management ────────────────────────────────────────────────
-        registry.register(Box::new(tasks::TodoWriteTool));
-        registry.register(Box::new(tasks::TaskCreateTool));
-        registry.register(Box::new(tasks::TaskUpdateTool));
-        registry.register(Box::new(tasks::TaskGetTool));
-        registry.register(Box::new(tasks::TaskListTool));
+        registry.register_enabled(config, Box::new(tasks::TodoWriteTool));
+        registry.register_enabled(config, Box::new(tasks::TaskCreateTool));
+        registry.register_enabled(config, Box::new(tasks::TaskUpdateTool));
+        registry.register_enabled(config, Box::new(tasks::TaskGetTool));
+        registry.register_enabled(config, Box::new(tasks::TaskListTool));
 
         // ── Agent orchestration ────────────────────────────────────────────
-        registry.register(Box::new(agent_tools::AskUserQuestionTool));
-        registry.register(Box::new(agent_tools::EnterPlanModeTool));
-        registry.register(Box::new(agent_tools::ExitPlanModeTool));
-        registry.register(Box::new(skills::InvokeSkillTool));
+        registry.register_enabled(config, Box::new(agent_tools::AskUserQuestionTool));
+        registry.register_enabled(config, Box::new(agent_tools::EnterPlanModeTool));
+        registry.register_enabled(config, Box::new(agent_tools::ExitPlanModeTool));
+        registry.register_enabled(config, Box::new(skills::InvokeSkillTool));
 
         // ── Notebooks ──────────────────────────────────────────────────────
-        registry.register(Box::new(notebook::NotebookReadTool));
+        registry.register_enabled(config, Box::new(notebook::NotebookReadTool));
 
         // ── Git worktrees ──────────────────────────────────────────────────
-        registry.register(Box::new(worktree::EnterWorktreeTool));
-        registry.register(Box::new(worktree::ExitWorktreeTool));
-        registry.register(Box::new(worktree::ListWorktreesTool));
+        registry.register_enabled(config, Box::new(worktree::EnterWorktreeTool));
+        registry.register_enabled(config, Box::new(worktree::ExitWorktreeTool));
+        registry.register_enabled(config, Box::new(worktree::ListWorktreesTool));
 
         registry
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    pub fn register_enabled(&mut self, config: &Config, tool: Box<dyn Tool>) {
+        if config.is_tool_enabled(tool.name()) {
+            self.register(tool);
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
