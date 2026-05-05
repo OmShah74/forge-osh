@@ -57,9 +57,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Modal::Confirmation {
                 tool_name,
                 description,
+                scroll,
                 ..
             } => {
-                render_confirmation(frame, tool_name, description, &theme);
+                render_confirmation(frame, tool_name, description, *scroll, &theme);
             }
             Modal::Help(h) => {
                 render_help(frame, &theme, h);
@@ -69,6 +70,9 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             }
             Modal::GeneratedSkillPreview(preview) => {
                 render_generated_skill_preview(frame, preview, &theme);
+            }
+            Modal::PasteConfirm(paste) => {
+                render_paste_confirm(frame, paste, &theme);
             }
             Modal::RenameSession { input_buffer } => {
                 render_rename_session(frame, input_buffer, &theme);
@@ -361,9 +365,8 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
 
     // Spinner (thinking indicator)
     if state.spinner.active {
-        let frame_char = state.spinner.current_frame();
         lines.push(Line::from(Span::styled(
-            format!("  {frame_char} {}", state.spinner.message),
+            format!("  {}", state.spinner.display()),
             Style::default().fg(theme.spinner_fg),
         )));
     }
@@ -462,6 +465,8 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
 fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme) {
     let mut in_code_block = false;
     let mut code_lang = String::new();
+    let mut in_math_block = false;
+    let mut math_buffer = String::new();
 
     for text_line in content.lines() {
         let trimmed = text_line.trim_start();
@@ -498,6 +503,50 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
                 format!("  │ {text_line}"),
                 Style::default().fg(theme.added_fg),
             )));
+            continue;
+        }
+
+        // Display math blocks. The terminal cannot typeset full TeX, so we
+        // normalize common LaTeX commands into readable Unicode instead.
+        if in_math_block {
+            if let Some(before_end) = trimmed.strip_suffix("$$") {
+                if !math_buffer.is_empty() && !before_end.trim().is_empty() {
+                    math_buffer.push(' ');
+                }
+                math_buffer.push_str(before_end.trim());
+                render_math_display(lines, &math_buffer, theme);
+                math_buffer.clear();
+                in_math_block = false;
+            } else if trimmed == r"\]" {
+                render_math_display(lines, &math_buffer, theme);
+                math_buffer.clear();
+                in_math_block = false;
+            } else {
+                if !math_buffer.is_empty() {
+                    math_buffer.push(' ');
+                }
+                math_buffer.push_str(trimmed);
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("$$") {
+            if let Some(expr) = rest.strip_suffix("$$") {
+                render_math_display(lines, expr.trim(), theme);
+            } else {
+                math_buffer = rest.trim().to_string();
+                in_math_block = true;
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix(r"\[") {
+            if let Some(expr) = rest.strip_suffix(r"\]") {
+                render_math_display(lines, expr.trim(), theme);
+            } else {
+                math_buffer = rest.trim().to_string();
+                in_math_block = true;
+            }
             continue;
         }
 
@@ -588,6 +637,9 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
             Style::default().fg(theme.border_fg),
         )));
     }
+    if in_math_block && !math_buffer.trim().is_empty() {
+        render_math_display(lines, &math_buffer, theme);
+    }
 }
 
 /// Parse a line with inline markdown: **bold**, `code`, *italic*.
@@ -599,6 +651,30 @@ fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     let mut current = String::new();
 
     while i < chars.len() {
+        // Inline math: \( ... \)
+        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '(' {
+            if let Some(end) = find_latex_inline_end(&chars, i + 2) {
+                push_plain_span(&mut spans, &mut current, theme);
+                let expr: String = chars[i + 2..end].iter().collect();
+                spans.push(math_span(&expr, theme));
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // Inline math: $ ... $. Avoid treating $$ display delimiters as inline.
+        if chars[i] == '$' && (i + 1 >= chars.len() || chars[i + 1] != '$') {
+            if let Some(end) = find_dollar_inline_end(&chars, i + 1) {
+                let expr: String = chars[i + 1..end].iter().collect();
+                if !expr.trim().is_empty() {
+                    push_plain_span(&mut spans, &mut current, theme);
+                    spans.push(math_span(&expr, theme));
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+
         // **bold** or __bold__
         if i + 1 < chars.len()
             && ((chars[i] == '*' && chars[i + 1] == '*')
@@ -699,6 +775,519 @@ fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
+fn push_plain_span(spans: &mut Vec<Span<'static>>, current: &mut String, theme: &Theme) {
+    if !current.is_empty() {
+        spans.push(Span::styled(
+            std::mem::take(current),
+            Style::default().fg(theme.assistant_msg_fg),
+        ));
+    }
+}
+
+fn math_span(expr: &str, theme: &Theme) -> Span<'static> {
+    Span::styled(
+        normalize_math_text(expr),
+        Style::default()
+            .fg(theme.tool_name_fg)
+            .add_modifier(Modifier::ITALIC),
+    )
+}
+
+fn render_math_display(lines: &mut Vec<Line>, expr: &str, theme: &Theme) {
+    for rendered_line in format_display_math_lines(expr) {
+        if rendered_line.trim().is_empty() {
+            continue;
+        }
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                rendered_line,
+                Style::default()
+                    .fg(theme.tool_name_fg)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+}
+
+fn find_latex_inline_end(chars: &[char], mut i: usize) -> Option<usize> {
+    while i + 1 < chars.len() {
+        if chars[i] == '\\' && chars[i + 1] == ')' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_dollar_inline_end(chars: &[char], mut i: usize) -> Option<usize> {
+    while i < chars.len() {
+        if chars[i] == '$' {
+            if i + 1 < chars.len() && chars[i + 1] == '$' {
+                return None;
+            }
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn normalize_math_text(expr: &str) -> String {
+    let mut out = expr.trim().to_string();
+    for _ in 0..4 {
+        let next = replace_first_frac(&out);
+        if next == out {
+            break;
+        }
+        out = next;
+    }
+    for _ in 0..4 {
+        let next = replace_first_sqrt(&out);
+        if next == out {
+            break;
+        }
+        out = next;
+    }
+    for command in [
+        r"\mathrm",
+        r"\mathbf",
+        r"\mathit",
+        r"\mathbb",
+        r"\mathcal",
+        r"\mathsf",
+        r"\text",
+    ] {
+        for _ in 0..8 {
+            let next = unwrap_first_command_group(&out, command);
+            if next == out {
+                break;
+            }
+            out = next;
+        }
+    }
+    for (from, to) in LATEX_REPLACEMENTS {
+        out = out.replace(from, to);
+    }
+    out = normalize_math_scripts(&out);
+    out = out.replace('{', "(").replace('}', ")");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn format_display_math_lines(expr: &str) -> Vec<String> {
+    let cleaned = strip_display_math_environment(expr);
+    let mut rendered = Vec::new();
+
+    for segment in cleaned.split(r"\\") {
+        let segment = segment.trim().trim_matches('&').trim();
+        if segment.is_empty() {
+            continue;
+        }
+        rendered.extend(format_display_math_segment(segment));
+    }
+
+    if rendered.is_empty() {
+        let normalized = normalize_math_text(expr);
+        if !normalized.trim().is_empty() {
+            rendered.push(normalized);
+        }
+    }
+
+    rendered
+}
+
+fn strip_display_math_environment(expr: &str) -> String {
+    let mut out = expr.replace(r"\begin{aligned}", "");
+    out = out.replace(r"\end{aligned}", "");
+    out = out.replace(r"\begin{align}", "");
+    out = out.replace(r"\end{align}", "");
+    out = out.replace(r"\begin{equation}", "");
+    out = out.replace(r"\end{equation}", "");
+    out.replace('&', "")
+}
+
+fn format_display_math_segment(segment: &str) -> Vec<String> {
+    if let Some(parts) = split_first_fraction(segment) {
+        return format_stacked_fraction(parts);
+    }
+
+    let normalized = normalize_math_text(segment);
+    if normalized.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![normalized]
+    }
+}
+
+struct FractionParts {
+    prefix: String,
+    numerator: String,
+    denominator: String,
+    suffix: String,
+}
+
+fn split_first_fraction(input: &str) -> Option<FractionParts> {
+    let (command, start) = first_fraction_command(input)?;
+    let first_open = skip_ascii_spaces(input, start + command.len());
+    let (numerator, numerator_end) = extract_braced(input, first_open)?;
+    let second_open = skip_ascii_spaces(input, numerator_end);
+    let (denominator, denominator_end) = extract_braced(input, second_open)?;
+
+    Some(FractionParts {
+        prefix: input[..start].to_string(),
+        numerator,
+        denominator,
+        suffix: input[denominator_end..].to_string(),
+    })
+}
+
+fn first_fraction_command(input: &str) -> Option<(&'static str, usize)> {
+    [r"\frac", r"\dfrac", r"\tfrac"]
+        .into_iter()
+        .filter_map(|command| input.find(command).map(|start| (command, start)))
+        .min_by_key(|(_, start)| *start)
+}
+
+fn format_stacked_fraction(parts: FractionParts) -> Vec<String> {
+    let prefix = normalize_math_text(&parts.prefix);
+    let suffix = normalize_math_text(&parts.suffix);
+    let numerator = normalize_math_text(&parts.numerator);
+    let denominator = normalize_math_text(&parts.denominator);
+
+    let numerator_width = unicode_width::UnicodeWidthStr::width(numerator.as_str());
+    let denominator_width = unicode_width::UnicodeWidthStr::width(denominator.as_str());
+    let fraction_width = numerator_width.max(denominator_width).max(1);
+    let prefix_with_space = if prefix.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{} ", prefix.trim())
+    };
+    let suffix_with_space = if suffix.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" {}", suffix.trim())
+    };
+    let prefix_indent = " ".repeat(unicode_width::UnicodeWidthStr::width(
+        prefix_with_space.as_str(),
+    ));
+
+    vec![
+        format!(
+            "{prefix_indent}{}",
+            center_to_width(&numerator, fraction_width)
+        ),
+        format!(
+            "{prefix_with_space}{}{suffix_with_space}",
+            "\u{2500}".repeat(fraction_width)
+        ),
+        format!(
+            "{prefix_indent}{}",
+            center_to_width(&denominator, fraction_width)
+        ),
+    ]
+}
+
+fn center_to_width(text: &str, width: usize) -> String {
+    let text_width = unicode_width::UnicodeWidthStr::width(text);
+    if text_width >= width {
+        return text.to_string();
+    }
+    let padding = width - text_width;
+    let left = padding / 2;
+    let right = padding - left;
+    format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
+}
+
+const LATEX_REPLACEMENTS: &[(&str, &str)] = &[
+    (r"\varepsilon", "ε"),
+    (r"\epsilon", "ε"),
+    (r"\vartheta", "ϑ"),
+    (r"\theta", "θ"),
+    (r"\lambda", "λ"),
+    (r"\alpha", "α"),
+    (r"\beta", "β"),
+    (r"\gamma", "γ"),
+    (r"\delta", "δ"),
+    (r"\kappa", "κ"),
+    (r"\sigma", "σ"),
+    (r"\omega", "ω"),
+    (r"\Omega", "Ω"),
+    (r"\Delta", "Δ"),
+    (r"\Gamma", "Γ"),
+    (r"\Lambda", "Λ"),
+    (r"\Sigma", "Σ"),
+    (r"\Theta", "Θ"),
+    (r"\prod", "∏"),
+    (r"\sum", "∑"),
+    (r"\int", "∫"),
+    (r"\partial", "∂"),
+    (r"\nabla", "∇"),
+    (r"\infty", "∞"),
+    (r"\subseteq", "⊆"),
+    (r"\subset", "⊂"),
+    (r"\notin", "∉"),
+    (r"\in", "∈"),
+    (r"\forall", "∀"),
+    (r"\exists", "∃"),
+    (r"\Rightarrow", "⇒"),
+    (r"\rightarrow", "→"),
+    (r"\leftarrow", "←"),
+    (r"\implies", "⇒"),
+    (r"\iff", "⇔"),
+    (r"\leq", "≤"),
+    (r"\geq", "≥"),
+    (r"\neq", "≠"),
+    (r"\approx", "≈"),
+    (r"\times", "×"),
+    (r"\cdot", "·"),
+    (r"\pm", "±"),
+    (r"\cup", "∪"),
+    (r"\cap", "∩"),
+    (r"\lVert", "‖"),
+    (r"\rVert", "‖"),
+    (r"\Vert", "‖"),
+    (r"\|", "‖"),
+    (r"\quad", " "),
+    (r"\qquad", "  "),
+    (r"\ldots", "…"),
+    (r"\dots", "…"),
+    (r"\sin", "sin"),
+    (r"\cos", "cos"),
+    (r"\tan", "tan"),
+    (r"\log", "log"),
+    (r"\ln", "ln"),
+    (r"\max", "max"),
+    (r"\min", "min"),
+    (r"\argmax", "argmax"),
+    (r"\argmin", "argmin"),
+    (r"\Pr", "P"),
+    (r"\to", "→"),
+    (r"\left", ""),
+    (r"\right", ""),
+    (r"\,", " "),
+    (r"\;", " "),
+    (r"\:", " "),
+    (r"\!", ""),
+];
+
+fn replace_first_frac(input: &str) -> String {
+    let Some((command, _)) = first_fraction_command(input) else {
+        return input.to_string();
+    };
+    replace_first_binary_command(input, command, |a, b| format!("({a})/({b})"))
+}
+
+fn replace_first_sqrt(input: &str) -> String {
+    replace_first_unary_command(input, r"\sqrt", |a| format!("√({a})"))
+}
+
+fn unwrap_first_command_group(input: &str, command: &str) -> String {
+    replace_first_unary_command(input, command, |a| a.to_string())
+}
+
+fn replace_first_binary_command<F>(input: &str, command: &str, build: F) -> String
+where
+    F: Fn(&str, &str) -> String,
+{
+    let Some(start) = input.find(command) else {
+        return input.to_string();
+    };
+    let first_open = skip_ascii_spaces(input, start + command.len());
+    let Some((left, left_end)) = extract_braced(input, first_open) else {
+        return input.to_string();
+    };
+    let second_open = skip_ascii_spaces(input, left_end);
+    let Some((right, right_end)) = extract_braced(input, second_open) else {
+        return input.to_string();
+    };
+
+    let mut out = String::new();
+    out.push_str(&input[..start]);
+    out.push_str(&build(&left, &right));
+    out.push_str(&input[right_end..]);
+    out
+}
+
+fn replace_first_unary_command<F>(input: &str, command: &str, build: F) -> String
+where
+    F: Fn(&str) -> String,
+{
+    let Some(start) = input.find(command) else {
+        return input.to_string();
+    };
+    let open = skip_ascii_spaces(input, start + command.len());
+    let Some((inner, end)) = extract_braced(input, open) else {
+        return input.to_string();
+    };
+
+    let mut out = String::new();
+    out.push_str(&input[..start]);
+    out.push_str(&build(&inner));
+    out.push_str(&input[end..]);
+    out
+}
+
+fn skip_ascii_spaces(input: &str, mut idx: usize) -> usize {
+    while idx < input.len() && input.as_bytes()[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn extract_braced(input: &str, open: usize) -> Option<(String, usize)> {
+    if input.as_bytes().get(open).copied() != Some(b'{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut body_start = None;
+    for (offset, ch) in input[open..].char_indices() {
+        let idx = open + offset;
+        match ch {
+            '{' => {
+                depth += 1;
+                if depth == 1 {
+                    body_start = Some(idx + ch.len_utf8());
+                }
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let start = body_start?;
+                    return Some((input[start..idx].to_string(), idx + ch.len_utf8()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn normalize_math_scripts(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '^' || chars[i] == '_' {
+            let superscript = chars[i] == '^';
+            if let Some((script, next)) = take_math_script(&chars, i + 1) {
+                let mapped = if superscript {
+                    map_script_chars(&script, superscript_char)
+                } else {
+                    map_script_chars(&script, subscript_char)
+                };
+                if let Some(mapped) = mapped {
+                    out.push_str(&mapped);
+                } else if superscript {
+                    out.push_str("^(");
+                    out.push_str(&script);
+                    out.push(')');
+                } else {
+                    out.push_str("_(");
+                    out.push_str(&script);
+                    out.push(')');
+                }
+                i = next;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn take_math_script(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if start >= chars.len() {
+        return None;
+    }
+    if chars[start] == '{' {
+        let mut script = String::new();
+        let mut i = start + 1;
+        while i < chars.len() && chars[i] != '}' {
+            script.push(chars[i]);
+            i += 1;
+        }
+        if i < chars.len() {
+            return Some((script, i + 1));
+        }
+        return None;
+    }
+    Some((chars[start].to_string(), start + 1))
+}
+
+fn map_script_chars<F>(script: &str, mapper: F) -> Option<String>
+where
+    F: Fn(char) -> Option<char>,
+{
+    let mut out = String::new();
+    for ch in script.chars() {
+        out.push(mapper(ch)?);
+    }
+    Some(out)
+}
+
+fn superscript_char(ch: char) -> Option<char> {
+    Some(match ch {
+        '0' => '⁰',
+        '1' => '¹',
+        '2' => '²',
+        '3' => '³',
+        '4' => '⁴',
+        '5' => '⁵',
+        '6' => '⁶',
+        '7' => '⁷',
+        '8' => '⁸',
+        '9' => '⁹',
+        '+' => '⁺',
+        '-' => '⁻',
+        '=' => '⁼',
+        '(' => '⁽',
+        ')' => '⁾',
+        'n' => 'ⁿ',
+        'i' => 'ⁱ',
+        _ => return None,
+    })
+}
+
+fn subscript_char(ch: char) -> Option<char> {
+    Some(match ch {
+        '0' => '₀',
+        '1' => '₁',
+        '2' => '₂',
+        '3' => '₃',
+        '4' => '₄',
+        '5' => '₅',
+        '6' => '₆',
+        '7' => '₇',
+        '8' => '₈',
+        '9' => '₉',
+        '+' => '₊',
+        '-' => '₋',
+        '=' => '₌',
+        '(' => '₍',
+        ')' => '₎',
+        'a' => 'ₐ',
+        'e' => 'ₑ',
+        'h' => 'ₕ',
+        'i' => 'ᵢ',
+        'j' => 'ⱼ',
+        'k' => 'ₖ',
+        'l' => 'ₗ',
+        'm' => 'ₘ',
+        'n' => 'ₙ',
+        'o' => 'ₒ',
+        'p' => 'ₚ',
+        'r' => 'ᵣ',
+        's' => 'ₛ',
+        't' => 'ₜ',
+        'u' => 'ᵤ',
+        'v' => 'ᵥ',
+        'x' => 'ₓ',
+        _ => return None,
+    })
+}
+
 /// Pretty-print tool call input JSON with key-value formatting.
 fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
@@ -766,21 +1355,35 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
 
 fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let inner_width = area.width.saturating_sub(4) as usize;
+    let inner_height = area.height.saturating_sub(1) as usize;
 
-    let (display_text, text_style) = if state.input.text.is_empty() {
+    let (display_text, text_style, cursor) = if state.input.text.is_empty() {
         if state.agent_busy {
             (
-                "Agent is working... (Ctrl+C to cancel)",
+                "Agent is working... (Ctrl+C to cancel)".to_string(),
                 Style::default().fg(theme.muted_fg),
+                None,
             )
         } else {
             (
-                "Type a message or /help for commands...",
+                "Type a message or /help for commands...".to_string(),
                 Style::default().fg(theme.muted_fg),
+                None,
             )
         }
     } else {
-        (state.input.text.as_str(), Style::default().fg(theme.fg))
+        let viewport = input_viewport(
+            &state.input.text,
+            state.input.cursor,
+            state.input.scroll_top,
+            inner_height.max(1),
+            inner_width.max(1),
+        );
+        (
+            viewport.text,
+            Style::default().fg(theme.fg),
+            Some((viewport.cursor_x, viewport.cursor_y)),
+        )
     };
 
     let title = if state.agent_busy {
@@ -811,28 +1414,105 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) 
 
     frame.render_widget(input, area);
 
-    // Compute cursor position accounting for newlines and text wrapping.
-    if !state.input.text.is_empty() {
-        let text_before_cursor = &state.input.text[..state.input.cursor];
-        let newlines = text_before_cursor.chars().filter(|&c| c == '\n').count();
-        let last_line_start = text_before_cursor.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let last_line = &text_before_cursor[last_line_start..];
-        let col = unicode_width::UnicodeWidthStr::width(last_line);
-
-        let (wrap_row, wrap_col) = if inner_width > 0 {
-            (col / inner_width, col % inner_width)
-        } else {
-            (0, col)
-        };
-
-        let cursor_x = (area.x + 1 + wrap_col as u16).min(area.x + area.width.saturating_sub(2));
-        let cursor_y = (area.y + 1 + newlines as u16 + wrap_row as u16)
-            .min(area.y + area.height.saturating_sub(1));
-
+    if let Some((x, y)) = cursor {
+        let cursor_x = (area.x + 1 + x as u16).min(area.x + area.width.saturating_sub(2));
+        let cursor_y = (area.y + 1 + y as u16).min(area.y + area.height.saturating_sub(1));
         frame.set_cursor_position((cursor_x, cursor_y));
     } else {
         frame.set_cursor_position((area.x + 1, area.y + 1));
     }
+}
+
+struct InputViewport {
+    text: String,
+    cursor_x: usize,
+    cursor_y: usize,
+}
+
+fn input_viewport(
+    text: &str,
+    cursor: usize,
+    scroll_top: usize,
+    visible_rows: usize,
+    visible_cols: usize,
+) -> InputViewport {
+    let (cursor_line, cursor_col) = cursor_line_col(text, cursor);
+    let total_lines = text.split('\n').count().max(1);
+    let max_scroll = total_lines.saturating_sub(visible_rows);
+    let mut start_line = scroll_top.min(max_scroll);
+    if cursor_line < start_line {
+        start_line = cursor_line;
+    } else if cursor_line >= start_line.saturating_add(visible_rows) {
+        start_line = cursor_line.saturating_add(1).saturating_sub(visible_rows);
+    }
+
+    let horizontal_offset = if visible_cols > 0 && cursor_col >= visible_cols {
+        cursor_col.saturating_sub(visible_cols).saturating_add(1)
+    } else {
+        0
+    };
+
+    let mut rendered = Vec::new();
+    for (line_idx, line) in text
+        .split('\n')
+        .enumerate()
+        .skip(start_line)
+        .take(visible_rows)
+    {
+        if line_idx == cursor_line {
+            rendered.push(slice_by_display_width(
+                line,
+                horizontal_offset,
+                visible_cols,
+            ));
+        } else {
+            rendered.push(slice_by_display_width(line, 0, visible_cols));
+        }
+    }
+
+    InputViewport {
+        text: rendered.join("\n"),
+        cursor_x: cursor_col
+            .saturating_sub(horizontal_offset)
+            .min(visible_cols),
+        cursor_y: cursor_line
+            .saturating_sub(start_line)
+            .min(visible_rows.saturating_sub(1)),
+    }
+}
+
+fn cursor_line_col(text: &str, cursor: usize) -> (usize, usize) {
+    let mut safe_cursor = cursor.min(text.len());
+    while safe_cursor > 0 && !text.is_char_boundary(safe_cursor) {
+        safe_cursor -= 1;
+    }
+    let before = &text[..safe_cursor];
+    let line = before.chars().filter(|&c| c == '\n').count();
+    let last_line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = unicode_width::UnicodeWidthStr::width(&before[last_line_start..]);
+    (line, col)
+}
+
+fn slice_by_display_width(line: &str, start_col: usize, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut col = 0usize;
+    for ch in line.chars() {
+        let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col.saturating_add(width) <= start_col {
+            col = col.saturating_add(width);
+            continue;
+        }
+        if unicode_width::UnicodeWidthStr::width(out.as_str()).saturating_add(width) > max_cols {
+            break;
+        }
+        out.push(ch);
+        col = col.saturating_add(width);
+    }
+    out
 }
 
 /// Count the number of rendered lines the input text will take.
@@ -849,6 +1529,9 @@ fn count_input_lines(text: &str, wrap_width: usize) -> usize {
             (w + wrap_width - 1) / wrap_width
         };
         total += rows;
+        if total >= 6 {
+            return total;
+        }
     }
     total.max(1)
 }
@@ -900,12 +1583,18 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
 // Modals
 // ---------------------------------------------------------------------------
 
-fn render_confirmation(frame: &mut Frame, tool_name: &str, description: &str, theme: &Theme) {
-    let area = centered_rect(62, 45, frame.area());
+fn render_confirmation(
+    frame: &mut Frame,
+    tool_name: &str,
+    description: &str,
+    scroll: u16,
+    theme: &Theme,
+) {
+    let area = centered_rect(78, 72, frame.area());
     frame.render_widget(Clear, area);
 
     let text = format!(
-        "Permission Required\n\nTool: {tool_name}\n\n{description}\n\n[Y/Enter] Allow  [N/Esc] Deny  [A] Always Allow  [T] Trust Mode"
+        "Permission Required\n\nTool: {tool_name}\n\n{description}\n\n[Y/Enter] Allow  [N/Esc] Deny  [A] Always Allow  [T] Trust Mode\n[↑/↓ PgUp/PgDn] Scroll"
     );
 
     let dialog = Paragraph::new(text)
@@ -915,6 +1604,51 @@ fn render_confirmation(frame: &mut Frame, tool_name: &str, description: &str, th
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.warning_fg))
                 .title(" Confirm Action "),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+
+    frame.render_widget(dialog, area);
+}
+
+fn render_paste_confirm(frame: &mut Frame, paste: &super::PasteConfirmState, theme: &Theme) {
+    let area = centered_rect(72, 42, frame.area());
+    frame.render_widget(Clear, area);
+
+    let severity = match paste.analysis.recommendation {
+        super::PasteRecommendation::RejectTooLarge => {
+            "This paste is larger than the estimated usable context budget."
+        }
+        super::PasteRecommendation::AskForStrategy => {
+            "This paste may overflow the active model context."
+        }
+        super::PasteRecommendation::InsertInlineWithWarning => {
+            "This paste is close to the active model context limit."
+        }
+        super::PasteRecommendation::InsertInline => "This paste fits the current estimate.",
+    };
+    let body = format!(
+        "{severity}\n\n\
+         Size: {} chars, {} bytes, {} line(s), ~{} tokens\n\
+         Estimated available for new input: ~{} / {} context tokens\n\n\
+         Press Y, I, or Enter to insert the full paste into the prompt.\n\
+         Press Esc or C to cancel.\n\n\
+         The paste is not sent to the model until you submit the prompt.",
+        paste.analysis.chars,
+        paste.analysis.bytes,
+        paste.analysis.lines,
+        paste.analysis.estimated_tokens,
+        paste.analysis.available_tokens_estimate,
+        paste.analysis.context_limit,
+    );
+
+    let dialog = Paragraph::new(body)
+        .style(Style::default().fg(theme.warning_fg))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.warning_fg))
+                .title(" Large Clipboard Paste "),
         )
         .wrap(Wrap { trim: false });
 
@@ -1462,6 +2196,68 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..max.saturating_sub(1)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_johnson_lindenstrauss_math() {
+        let input =
+            r"(1 - \epsilon) \|u - v\|^2 \leq \|f(u) - f(v)\|^2 \leq (1 + \epsilon) \|u - v\|^2";
+        let normalized = normalize_math_text(input);
+
+        assert!(normalized.contains("ε"));
+        assert!(normalized.contains("≤"));
+        assert!(normalized.contains("‖u - v‖²"));
+        assert!(!normalized.contains(r"\epsilon"));
+        assert!(!normalized.contains(r"\leq"));
+    }
+
+    #[test]
+    fn normalizes_mathbb_arrows_fractions_and_roots() {
+        let input = r"f: \mathbb{R}^d \to \mathbb{R}^k,\quad \frac{a+b}{\sqrt{c}}";
+        let normalized = normalize_math_text(input);
+
+        assert!(normalized.contains("Rᵈ"));
+        assert!(normalized.contains("Rᵏ"));
+        assert!(normalized.contains("→"));
+        assert!(normalized.contains("(a+b)/(√(c))"));
+    }
+
+    #[test]
+    fn display_math_stacks_simple_fraction() {
+        let rendered = format_display_math_lines(r"E = mc^2 + \frac{a+b}{c+d}");
+
+        assert_eq!(rendered.len(), 3);
+        assert!(rendered[0].contains("a+b"));
+        assert!(rendered[1].contains("E = mc² +"));
+        assert!(rendered[1].contains("─"));
+        assert!(rendered[2].contains("c+d"));
+    }
+
+    #[test]
+    fn renders_display_math_without_literal_delimiters() {
+        let theme = Theme::dark();
+        let mut lines = Vec::new();
+        render_assistant_content(
+            &mut lines,
+            "Before\n\\[\n\\alpha_i \\leq \\beta^2\n\\]\nAfter",
+            &theme,
+        );
+
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("αᵢ ≤ β²"));
+        assert!(!rendered.contains(r"\["));
+        assert!(!rendered.contains(r"\]"));
     }
 }
 

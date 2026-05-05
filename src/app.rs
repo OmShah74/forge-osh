@@ -4,6 +4,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::cli::*;
 use crate::config::{self, keyring::KeyStore, Config};
 use crate::graph::{new_shared_graph, SharedGraph};
+use crate::lsp::{LspManager, SharedLspManager};
 use crate::provider::router::ProviderRouter;
 use crate::session::{checkpoint::Checkpoint, Session};
 use crate::skills::{shared_registry, SharedSkillRegistry};
@@ -17,6 +18,8 @@ pub struct App {
     pub key_store: KeyStore,
     /// Shared semantic code graph (None until /forge-graph has been built)
     pub shared_graph: SharedGraph,
+    /// Shared LSP manager — language servers are spawned lazily on first use.
+    pub lsp: SharedLspManager,
     pub skills: SharedSkillRegistry,
 }
 
@@ -71,23 +74,67 @@ impl App {
 
         let provider_router = Arc::new(RwLock::new(router));
 
-        // Initialize tools (always register graph_query — it self-disables when no graph)
-        let tools = Arc::new(if cli.no_tools {
-            ToolRegistry::new()
-        } else {
-            let mut registry = ToolRegistry::with_builtins();
-            registry.register(Box::new(crate::graph::tools::GraphQueryTool::new(
-                shared_graph.clone(),
-            )));
-            registry
-        });
-
-        // Initialize session
+        // Initialize session working directory first (LSP manager needs it).
         let working_dir = cli.dir.clone().unwrap_or_else(|| {
             std::env::current_dir()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string()
+        });
+
+        // Initialize shared LSP manager. Servers still spawn lazily on direct
+        // tool use, but we also warm installed project servers in the
+        // background so LSP is ready without a manual command.
+        let lsp = LspManager::shared(std::path::PathBuf::from(&working_dir));
+        {
+            let lsp = lsp.clone();
+            tokio::spawn(async move {
+                let _ = lsp.warm_up_workspace().await;
+            });
+        }
+
+        // Initialize tools (always register graph_query and lsp_* — they
+        // self-disable when no graph / no language server is available).
+        let tools = Arc::new(if cli.no_tools {
+            ToolRegistry::new()
+        } else {
+            let mut registry = ToolRegistry::with_config(&config);
+            registry.register_enabled(
+                &config,
+                Box::new(crate::graph::tools::GraphQueryTool::new_with_lsp(
+                    shared_graph.clone(),
+                    lsp.clone(),
+                )),
+            );
+            registry.register_enabled(
+                &config,
+                Box::new(crate::lsp::tools::LspDiagnosticsTool::new(lsp.clone())),
+            );
+            registry.register_enabled(
+                &config,
+                Box::new(crate::lsp::tools::LspDefinitionTool::new(lsp.clone())),
+            );
+            registry.register_enabled(
+                &config,
+                Box::new(crate::lsp::tools::LspReferencesTool::new(lsp.clone())),
+            );
+            registry.register_enabled(
+                &config,
+                Box::new(crate::lsp::tools::LspHoverTool::new(lsp.clone())),
+            );
+            registry.register_enabled(
+                &config,
+                Box::new(crate::lsp::tools::LspDocumentSymbolsTool::new(lsp.clone())),
+            );
+            registry.register_enabled(
+                &config,
+                Box::new(crate::lsp::tools::LspWorkspaceSymbolsTool::new(lsp.clone())),
+            );
+            registry.register_enabled(
+                &config,
+                Box::new(crate::lsp::tools::LspRenameTool::new(lsp.clone())),
+            );
+            registry
         });
 
         let mut session = if let Some(resume_arg) = &cli.resume {
@@ -184,6 +231,7 @@ impl App {
             session,
             key_store,
             shared_graph,
+            lsp,
             skills,
         })
     }
@@ -197,6 +245,7 @@ impl App {
             self.session.clone(),
             Arc::new(Mutex::new(self.key_store.clone())),
             self.shared_graph.clone(),
+            self.lsp.clone(),
             self.skills.clone(),
         )
         .await
@@ -226,6 +275,7 @@ impl App {
             permission_tx: perm_tx,
             permission_rx: Arc::new(Mutex::new(perm_resp_rx)),
             graph: self.shared_graph.clone(),
+            lsp: self.lsp.clone(),
             file_cache: Arc::new(FileStateCache::new()),
             permission_store: Arc::new(parking_lot::RwLock::new(PermissionStore::load())),
             cancel: Arc::new(parking_lot::RwLock::new(CancellationToken::new())),
@@ -293,12 +343,21 @@ impl App {
                 }
             }
             Some(ConfigAction::Set { key, value }) => {
-                println!("Set {key} = {value}");
-                // Would update config.toml here
+                let mut config = Config::load().with_provider_defaults();
+                set_config_value(&mut config, &key, &value)?;
+                config.save()?;
+                println!(
+                    "{key} = {}",
+                    get_config_value(&config, &key).unwrap_or(value)
+                );
             }
             Some(ConfigAction::Get { key }) => {
-                println!("Config key: {key}");
-                // Would read from config.toml
+                let config = Config::load().with_provider_defaults();
+                if let Some(value) = get_config_value(&config, &key) {
+                    println!("{key} = {value}");
+                } else {
+                    anyhow::bail!("Unknown config key: {key}");
+                }
             }
             Some(ConfigAction::Keys { action }) => match action {
                 KeyAction::Set { provider, key } => {
@@ -400,7 +459,7 @@ impl App {
         Ok(())
     }
 
-    async fn handle_models(&self, action: ModelAction) -> anyhow::Result<()> {
+    async fn handle_models(&mut self, action: ModelAction) -> anyhow::Result<()> {
         match action {
             ModelAction::List { provider } => {
                 let models = if let Some(pid) = provider {
@@ -436,12 +495,300 @@ impl App {
                 }
             }
             ModelAction::Set { provider, model } => {
-                println!("Set default model for {provider}: {model}");
-                // Would update config here
+                let mut config = Config::load().with_provider_defaults();
+                set_provider_default_model(&mut config, &provider, &model)?;
+                config.general.default_provider = provider.clone();
+                config.save()?;
+
+                {
+                    let mut router = self.provider_router.write().await;
+                    if router.has_provider(&provider) {
+                        let _ = router.set_active(&provider, &model);
+                    }
+                }
+
+                println!("Default model for {provider} set to {model}");
             }
         }
         Ok(())
     }
+}
+
+fn set_config_value(config: &mut Config, key: &str, value: &str) -> anyhow::Result<()> {
+    match key {
+        "theme" | "general.theme" => config.general.theme = value.to_string(),
+        "default_provider" | "general.default_provider" => {
+            config.general.default_provider = value.to_string();
+        }
+        "auto_save_sessions" | "general.auto_save_sessions" => {
+            config.general.auto_save_sessions = parse_bool(value)?;
+        }
+        "max_session_history" | "general.max_session_history" => {
+            config.general.max_session_history = value.parse()?;
+        }
+        "trust" | "trust_mode" | "general.trust_mode" => {
+            config.general.trust_mode = parse_bool(value)?;
+        }
+        "verbose" | "general.verbose" => config.general.verbose = parse_bool(value)?,
+        "system_prompt_extra" | "general.system_prompt_extra" => {
+            config.general.system_prompt_extra = value.to_string();
+        }
+        "agent.max_tokens" => config.agent.max_tokens = value.parse()?,
+        "agent.temperature" => config.agent.temperature = value.parse()?,
+        "agent.max_tool_iterations" => config.agent.max_tool_iterations = value.parse()?,
+        "agent.planning_mode" => config.agent.planning_mode = parse_bool(value)?,
+        "agent.auto_summarize_at" => config.agent.auto_summarize_at = value.parse()?,
+        "agent.max_output_per_tool" => config.agent.max_output_per_tool = value.parse()?,
+        "agent.skills_enabled" => config.agent.skills_enabled = parse_bool(value)?,
+        "agent.include_skills_in_system_prompt" => {
+            config.agent.include_skills_in_system_prompt = parse_bool(value)?;
+        }
+        "agent.max_skill_listed_in_prompt" => {
+            config.agent.max_skill_listed_in_prompt = value.parse()?;
+        }
+        "tools.enabled" => config.tools.enabled = split_list(value),
+        "tools.disabled" => config.tools.disabled = split_list(value),
+        "tools.bash.timeout_seconds" => config.tools.bash.timeout_seconds = value.parse()?,
+        "tools.bash.max_timeout_seconds" => {
+            config.tools.bash.max_timeout_seconds = value.parse()?
+        }
+        "tools.bash.allowed_commands" => config.tools.bash.allowed_commands = split_list(value),
+        "tools.bash.blocked_commands" => config.tools.bash.blocked_commands = split_list(value),
+        "tools.web.enabled" => config.tools.web.enabled = parse_bool(value)?,
+        "tools.web.timeout_seconds" => config.tools.web.timeout_seconds = value.parse()?,
+        "tools.web.max_content_length" => config.tools.web.max_content_length = value.parse()?,
+        "ui.show_token_count" => config.ui.show_token_count = parse_bool(value)?,
+        "ui.show_cost" => config.ui.show_cost = parse_bool(value)?,
+        "ui.show_spinner" => config.ui.show_spinner = parse_bool(value)?,
+        "ui.syntax_highlight" => config.ui.syntax_highlight = parse_bool(value)?,
+        "ui.diff_before_apply" => config.ui.diff_before_apply = parse_bool(value)?,
+        "ui.timestamp_messages" => config.ui.timestamp_messages = parse_bool(value)?,
+        "ui.compact_tool_output" => config.ui.compact_tool_output = parse_bool(value)?,
+        "ui.max_conversation_lines" => config.ui.max_conversation_lines = value.parse()?,
+        _ if key.starts_with("providers.") => set_provider_config_value(config, key, value)?,
+        _ => anyhow::bail!("Unknown config key: {key}"),
+    }
+    Ok(())
+}
+
+fn get_config_value(config: &Config, key: &str) -> Option<String> {
+    Some(match key {
+        "theme" | "general.theme" => config.general.theme.clone(),
+        "default_provider" | "general.default_provider" => config.general.default_provider.clone(),
+        "auto_save_sessions" | "general.auto_save_sessions" => {
+            config.general.auto_save_sessions.to_string()
+        }
+        "max_session_history" | "general.max_session_history" => {
+            config.general.max_session_history.to_string()
+        }
+        "trust" | "trust_mode" | "general.trust_mode" => config.general.trust_mode.to_string(),
+        "verbose" | "general.verbose" => config.general.verbose.to_string(),
+        "system_prompt_extra" | "general.system_prompt_extra" => {
+            config.general.system_prompt_extra.clone()
+        }
+        "agent.max_tokens" => config.agent.max_tokens.to_string(),
+        "agent.temperature" => config.agent.temperature.to_string(),
+        "agent.max_tool_iterations" => config.agent.max_tool_iterations.to_string(),
+        "agent.planning_mode" => config.agent.planning_mode.to_string(),
+        "agent.auto_summarize_at" => config.agent.auto_summarize_at.to_string(),
+        "agent.max_output_per_tool" => config.agent.max_output_per_tool.to_string(),
+        "agent.skills_enabled" => config.agent.skills_enabled.to_string(),
+        "agent.include_skills_in_system_prompt" => {
+            config.agent.include_skills_in_system_prompt.to_string()
+        }
+        "agent.max_skill_listed_in_prompt" => config.agent.max_skill_listed_in_prompt.to_string(),
+        "tools.enabled" => config.tools.enabled.join(","),
+        "tools.disabled" => config.tools.disabled.join(","),
+        "tools.bash.timeout_seconds" => config.tools.bash.timeout_seconds.to_string(),
+        "tools.bash.max_timeout_seconds" => config.tools.bash.max_timeout_seconds.to_string(),
+        "tools.bash.allowed_commands" => config.tools.bash.allowed_commands.join(","),
+        "tools.bash.blocked_commands" => config.tools.bash.blocked_commands.join(","),
+        "tools.web.enabled" => config.tools.web.enabled.to_string(),
+        "tools.web.timeout_seconds" => config.tools.web.timeout_seconds.to_string(),
+        "tools.web.max_content_length" => config.tools.web.max_content_length.to_string(),
+        "ui.show_token_count" => config.ui.show_token_count.to_string(),
+        "ui.show_cost" => config.ui.show_cost.to_string(),
+        "ui.show_spinner" => config.ui.show_spinner.to_string(),
+        "ui.syntax_highlight" => config.ui.syntax_highlight.to_string(),
+        "ui.diff_before_apply" => config.ui.diff_before_apply.to_string(),
+        "ui.timestamp_messages" => config.ui.timestamp_messages.to_string(),
+        "ui.compact_tool_output" => config.ui.compact_tool_output.to_string(),
+        "ui.max_conversation_lines" => config.ui.max_conversation_lines.to_string(),
+        _ if key.starts_with("providers.") => get_provider_config_value(config, key)?,
+        _ => return None,
+    })
+}
+
+fn set_provider_config_value(config: &mut Config, key: &str, value: &str) -> anyhow::Result<()> {
+    let mut parts = key.split('.');
+    let _providers = parts.next();
+    let provider = parts.next().unwrap_or_default();
+    let field = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        anyhow::bail!("Unknown config key: {key}");
+    }
+
+    if let Some(pc) = provider_config_mut(config, provider) {
+        match field {
+            "enabled" => pc.enabled = parse_bool(value)?,
+            "api_key" => pc.api_key = value.to_string(),
+            "default_model" => pc.default_model = value.to_string(),
+            "base_url" => pc.base_url = value.to_string(),
+            "timeout_seconds" => pc.timeout_seconds = value.parse()?,
+            "max_retries" => pc.max_retries = value.parse()?,
+            _ => anyhow::bail!("Unknown provider config field: {field}"),
+        }
+        return Ok(());
+    }
+
+    if let Some(pc) = local_provider_config_mut(config, provider) {
+        match field {
+            "enabled" => pc.enabled = parse_bool(value)?,
+            "base_url" => pc.base_url = value.to_string(),
+            "default_model" => pc.default_model = value.to_string(),
+            "auto_detect" => pc.auto_detect = parse_bool(value)?,
+            _ => anyhow::bail!("Unknown local provider config field: {field}"),
+        }
+        return Ok(());
+    }
+
+    anyhow::bail!("Unknown provider: {provider}");
+}
+
+fn get_provider_config_value(config: &Config, key: &str) -> Option<String> {
+    let mut parts = key.split('.');
+    let _providers = parts.next();
+    let provider = parts.next().unwrap_or_default();
+    let field = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        return None;
+    }
+
+    if let Some(pc) = provider_config(config, provider) {
+        return Some(match field {
+            "enabled" => pc.enabled.to_string(),
+            "api_key" => pc.api_key.clone(),
+            "default_model" => pc.default_model.clone(),
+            "base_url" => pc.base_url.clone(),
+            "timeout_seconds" => pc.timeout_seconds.to_string(),
+            "max_retries" => pc.max_retries.to_string(),
+            _ => return None,
+        });
+    }
+
+    if let Some(pc) = local_provider_config(config, provider) {
+        return Some(match field {
+            "enabled" => pc.enabled.to_string(),
+            "base_url" => pc.base_url.clone(),
+            "default_model" => pc.default_model.clone(),
+            "auto_detect" => pc.auto_detect.to_string(),
+            _ => return None,
+        });
+    }
+
+    None
+}
+
+fn set_provider_default_model(
+    config: &mut Config,
+    provider: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    if let Some(pc) = provider_config_mut(config, provider) {
+        pc.default_model = model.to_string();
+        return Ok(());
+    }
+    if let Some(pc) = local_provider_config_mut(config, provider) {
+        pc.default_model = model.to_string();
+        return Ok(());
+    }
+    anyhow::bail!("Unknown provider: {provider}");
+}
+
+fn provider_config<'a>(config: &'a Config, provider: &str) -> Option<&'a config::ProviderConfig> {
+    match provider {
+        "anthropic" => Some(&config.providers.anthropic),
+        "openai" => Some(&config.providers.openai),
+        "gemini" => Some(&config.providers.gemini),
+        "groq" => Some(&config.providers.groq),
+        "grok" => Some(&config.providers.grok),
+        "openrouter" => Some(&config.providers.openrouter),
+        "mistral" => Some(&config.providers.mistral),
+        "deepseek" => Some(&config.providers.deepseek),
+        "together" => Some(&config.providers.together),
+        "fireworks" => Some(&config.providers.fireworks),
+        "perplexity" => Some(&config.providers.perplexity),
+        "cohere" => Some(&config.providers.cohere),
+        _ => None,
+    }
+}
+
+fn provider_config_mut<'a>(
+    config: &'a mut Config,
+    provider: &str,
+) -> Option<&'a mut config::ProviderConfig> {
+    match provider {
+        "anthropic" => Some(&mut config.providers.anthropic),
+        "openai" => Some(&mut config.providers.openai),
+        "gemini" => Some(&mut config.providers.gemini),
+        "groq" => Some(&mut config.providers.groq),
+        "grok" => Some(&mut config.providers.grok),
+        "openrouter" => Some(&mut config.providers.openrouter),
+        "mistral" => Some(&mut config.providers.mistral),
+        "deepseek" => Some(&mut config.providers.deepseek),
+        "together" => Some(&mut config.providers.together),
+        "fireworks" => Some(&mut config.providers.fireworks),
+        "perplexity" => Some(&mut config.providers.perplexity),
+        "cohere" => Some(&mut config.providers.cohere),
+        _ => None,
+    }
+}
+
+fn local_provider_config<'a>(
+    config: &'a Config,
+    provider: &str,
+) -> Option<&'a config::LocalProviderConfig> {
+    match provider {
+        "ollama" => Some(&config.providers.ollama),
+        "llamacpp" => Some(&config.providers.llamacpp),
+        "lmstudio" => Some(&config.providers.lmstudio),
+        "vllm" => Some(&config.providers.vllm),
+        "jan" => Some(&config.providers.jan),
+        "localai" => Some(&config.providers.localai),
+        _ => None,
+    }
+}
+
+fn local_provider_config_mut<'a>(
+    config: &'a mut Config,
+    provider: &str,
+) -> Option<&'a mut config::LocalProviderConfig> {
+    match provider {
+        "ollama" => Some(&mut config.providers.ollama),
+        "llamacpp" => Some(&mut config.providers.llamacpp),
+        "lmstudio" => Some(&mut config.providers.lmstudio),
+        "vllm" => Some(&mut config.providers.vllm),
+        "jan" => Some(&mut config.providers.jan),
+        "localai" => Some(&mut config.providers.localai),
+        _ => None,
+    }
+}
+
+fn parse_bool(value: &str) -> anyhow::Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("Expected boolean value, got '{value}'"),
+    }
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 async fn create_new_session(

@@ -7,16 +7,48 @@ use serde_json::json;
 
 use crate::graph::query::GraphQuery;
 use crate::graph::SharedGraph;
+use crate::lsp::SharedLspManager;
 use crate::tools::Tool;
 use crate::types::{PermissionLevel, ToolContext, ToolOutput};
 
 pub struct GraphQueryTool {
     graph: SharedGraph,
+    lsp: Option<SharedLspManager>,
 }
 
 impl GraphQueryTool {
     pub fn new(graph: SharedGraph) -> Self {
-        Self { graph }
+        Self { graph, lsp: None }
+    }
+
+    pub fn new_with_lsp(graph: SharedGraph, lsp: SharedLspManager) -> Self {
+        Self {
+            graph,
+            lsp: Some(lsp),
+        }
+    }
+
+    fn with_lsp_overlay(
+        &self,
+        mut output: String,
+        file_path: Option<&str>,
+        ctx: &ToolContext,
+    ) -> String {
+        let (Some(lsp), Some(file_path)) = (&self.lsp, file_path) else {
+            return output;
+        };
+        let path = std::path::Path::new(file_path);
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            ctx.working_dir.join(path)
+        };
+        if let Some(language) = lsp.language_for_path(&abs) {
+            output.push_str(&format!(
+                "\n\nLSP overlay: `{language}` is configured for this file. Use `lsp_document_symbols`, `lsp_definition`, `lsp_references`, or `lsp_diagnostics` when live compiler-grade precision is needed."
+            ));
+        }
+        output
     }
 }
 
@@ -62,7 +94,7 @@ impl Tool for GraphQueryTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         // Check if graph is loaded
         let guard = match self.graph.read() {
             Ok(g) => g,
@@ -111,7 +143,11 @@ impl Tool for GraphQueryTool {
                 };
 
                 match q.context_pack(&fqdn, budget) {
-                    Some(pc) => ToolOutput::success(GraphQuery::format_context(&pc)),
+                    Some(pc) => ToolOutput::success(self.with_lsp_overlay(
+                        GraphQuery::format_context(&pc),
+                        Some(&pc.primary.file_path),
+                        ctx,
+                    )),
                     None     => ToolOutput::success(format!("Symbol '{fqdn}' not found in graph.")),
                 }
             }
@@ -159,7 +195,11 @@ impl Tool for GraphQueryTool {
                 };
 
                 let nodes = q.nodes_in_file(&file_key);
-                ToolOutput::success(q.format_file_graph(&file_key, &nodes))
+                ToolOutput::success(self.with_lsp_overlay(
+                    q.format_file_graph(&file_key, &nodes),
+                    Some(&file_key),
+                    ctx,
+                ))
             }
 
             // ── callers ───────────────────────────────────────────────────

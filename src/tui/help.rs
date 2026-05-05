@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.5)
+    r#"forge-osh Help  (v1.0.17)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen (scroll: ↑↓/jk, PgUp/PgDn, g/G)
@@ -36,11 +36,19 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /skill generate <name> <task>
                             Draft a project skill from the current conversation;
                             review it, then press Y to create it.
+  /skill gen <name> <task>  Alias for /skill generate
+  /skill generate-from-conversation <name> <task>
+                            Explicit alias for conversation-based skill generation
   /skill edit <name>        Edit an existing skill in $EDITOR (reload after save)
   /skill delete <name>      Remove a project skill directory
   /skill reload             Re-scan skill directories
   /skill path               Print where skills are loaded from
   /skill off                Clear the currently-active skill scope
+
+  Generated skills:
+    â€¢ Created from the current conversation using the active provider/model
+    â€¢ Previewed in a modal before writing; press Y to create, E to inspect raw
+    â€¢ Saved as project skills under ./.claude/skills/generated-<name>/SKILL.md
 
   Skill locations:
     • Project:  ./.claude/skills/<name>/SKILL.md
@@ -66,6 +74,9 @@ AGENT BEHAVIOUR
                        /permissions remove <index>
   /effort <1-5>      Set response effort level (1=minimal, 5=maximum)
   /copy              Copy last assistant response to clipboard
+  /team start <goal> Start an Agent Team board with parallel subtasks + review
+  /team status       Open the scrollable Agent Team task board
+  /team stop         Stop team workers and save the board state
 
   /forge-graph       Build semantic code graph for current project (enables graph_query tool)
   /forge-graph status     Show graph info (nodes, edges, age)
@@ -86,6 +97,14 @@ INPUT LINE
   Ctrl+A         Move to line start     Ctrl+E       Move to line end
   Ctrl+U         Delete to line start   Ctrl+W       Delete previous word
   Up / Down      Navigate input history Tab          Auto-complete slash command
+  Alt+Up/Down    Scroll long input      Ctrl+Up/Down Scroll long input
+
+CLIPBOARD PASTE
+  Multiline paste is captured as one input batch when the terminal supports
+  bracketed paste. Large paste is token-estimated before insertion; if it may
+  overflow the active model context, forge-osh asks before inserting.
+  Very large submitted messages are blocked until shortened, compacted, or a
+  larger model is selected, so pasted text is not accidentally sent in pieces.
 
 SCROLLING
   Shift+Up/Down   Scroll by 3 lines     PgUp/PgDn    Scroll by 10 lines
@@ -109,6 +128,76 @@ QUICK ACTIONS
 CONFIRMATION DIALOGS  (when agent requests permission)
   Y / Enter   Allow once                N / Esc   Deny
   A           Always allow this tool    T         Enable trust mode
+  ↑/↓/jk      Scroll long diff preview  PgUp/PgDn Page preview
+
+PATCH / DIFF REVIEW
+  When ui.diff_before_apply = true, file mutations show a patch preview before
+  execution. Review the unified diff, then allow or deny. This review gate
+  overrides accept-edits and stored allow rules for file tools; trust/bypass
+  mode is the explicit no-prompt escape hatch.
+
+LSP CODE INTELLIGENCE
+  What it is:
+    forge-osh uses Language Server Protocol servers for IDE-grade code
+    intelligence: diagnostics, definitions, references, hover docs, file
+    symbols, workspace symbol search, and safe rename previews/apply.
+    The agent can use lsp_* tools automatically; you do not need to call
+    /lsp first unless you want status, setup, or a server restart.
+
+  Status and setup:
+    /lsp                  Open scrollable LSP status and setup view
+    /lsp status           Same as /lsp
+    /lsp install          Install/start servers for detected project languages
+    /lsp setup            Alias for /lsp install
+    /lsp install <lang>   Install/start one language server by key
+    /lsp setup <lang>     Alias for /lsp install <lang>
+    /lsp shutdown         Stop all running servers; next LSP use respawns them
+    /lsp stop             Alias for /lsp shutdown
+    /lsp shutdown <lang>  Stop one running server by language key
+    /lsp stop <lang>      Alias for /lsp shutdown <lang>
+
+  Built-in language keys:
+    rust, typescript, python, go, c_cpp, java, csharp, php, ruby, lua,
+    bash, json, yaml, html, css, vue, svelte, kotlin, swift, dart, dockerfile
+
+  Agent tools:
+    lsp_diagnostics       Compiler/type-check diagnostics for a source file
+    lsp_definition        Jump to true definition at 1-based line/column
+    lsp_references        Find scope-aware references at 1-based line/column
+    lsp_hover             Show resolved type/signature/docs at a position
+    lsp_document_symbols  Outline functions/types/classes/methods in a file
+    lsp_workspace_symbols Search declarations by query; default language rust
+    lsp_rename            Safe rename; dry_run=true previews, false applies
+
+  Coordinates and safety:
+    All lsp_* tools use human-friendly 1-based line and column numbers.
+    Read-only LSP tools do not prompt for permission. lsp_rename defaults to
+    dry_run=true, so it only previews edits; dry_run=false is Mutating and
+    goes through the normal permission/diff review flow.
+
+  Server discovery:
+    forge-osh checks bundled sidecars beside the executable, its managed LSP
+    cache, and PATH. /lsp install may run package-manager installers for
+    languages with known safe installers, so use it only when you want setup.
+    Missing servers produce friendly fallback messages; the agent can continue
+    with search_files/read_file.
+
+  Custom servers:
+    Add or override servers in ~/.forge-osh/lsp.toml:
+      [[servers]]
+      language = "zig"
+      language_id = "zig"
+      extensions = ["zig"]
+      command = "zls"
+      args = []
+      root_markers = ["build.zig", ".git"]
+      install_hint = "Install zls and put it on PATH"
+
+  Common workflows:
+    After edits, ask the agent to run lsp_diagnostics on changed files.
+    Before deleting or renaming a symbol, use lsp_references first.
+    For broad navigation, use forge-graph first, then lsp_definition/hover
+    for compiler-accurate symbol details.
 
 KEY MANAGER  (Ctrl+K)
   Up / Down   Navigate providers        Enter / e   Set or change key
@@ -127,9 +216,15 @@ AGENT TOOLS (used autonomously by the AI)
   ask_user          Agent pauses to ask you a clarifying question
   enter_plan_mode   Agent proposes a plan before executing
   exit_plan_mode    Agent exits plan mode after plan approval
-  search_files      Enhanced grep: context lines, file types, output modes
-  bash              Shell: read-only commands (ls/cat/grep/git log) skip permission prompts
-  powershell        PowerShell shell (Windows): Get-* cmdlets skip permission prompts
+  search_files      Native grep: regex/fixed strings, context, path/exclude globs
+                    type filters, hidden/ignored controls, multiline mode
+  find_files        Project file discovery by name or relative-path glob
+                    with type/exclude/depth/hidden/ignored controls
+  list_directory    Directory view with recursive, path-filtered, ignore-aware output
+  bash              Shell: rg/git/cargo/ls/cat style commands; read-only commands
+                    skip permission prompts. Copied "$ " prompts are ignored.
+  powershell        PowerShell: Get-Content, $vars, for(...) loops, Select-Object.
+                    Copied "$ " / "PS> " prompts are ignored, but real $vars stay.
   notebook_read     Read Jupyter .ipynb notebooks as formatted cell text
 
 PERMISSION RULES SYSTEM

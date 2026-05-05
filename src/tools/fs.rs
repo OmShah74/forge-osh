@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ignore::WalkBuilder;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -13,6 +14,232 @@ fn resolve_path(path_str: &str, ctx: &ToolContext) -> PathBuf {
         path.to_path_buf()
     } else {
         ctx.working_dir.join(path)
+    }
+}
+
+const DIFF_PREVIEW_MAX_CHARS: usize = 24_000;
+
+fn truncate_preview(mut text: String) -> String {
+    let total = text.chars().count();
+    if total <= DIFF_PREVIEW_MAX_CHARS {
+        return text;
+    }
+    text = text.chars().take(DIFF_PREVIEW_MAX_CHARS).collect();
+    text.push_str(&format!(
+        "\n\n... [diff preview truncated, showing first {} of {} chars]",
+        DIFF_PREVIEW_MAX_CHARS, total
+    ));
+    text
+}
+
+async fn read_existing_text_for_preview(path: &Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)
+        .await
+        .map_err(|e| format!("failed to read file: {e}"))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "file is not valid UTF-8; text diff unavailable".to_string())
+}
+
+fn missing_path_warning(action: &str, path: &Path) -> String {
+    format!(
+        "Patch Review\n\n{action}: {}\nWARNING: path does not exist; tool will fail.",
+        path.display()
+    )
+}
+
+/// Build a no-side-effect preview for mutating file tools. The executor shows
+/// this before asking for permission so users approve the actual patch, not a
+/// vague "write file" prompt. Returning `None` means the tool is not a file
+/// mutation with a useful preview.
+pub async fn preview_file_tool_change(
+    tool_name: &str,
+    input: &Value,
+    ctx: &ToolContext,
+) -> Option<String> {
+    match tool_name {
+        "write_file" => {
+            let path = resolve_path(input["path"].as_str()?, ctx);
+            let new_content = input["content"].as_str()?;
+            let action = if path.exists() { "Update" } else { "Create" };
+            let old_content = match read_existing_text_for_preview(&path).await {
+                Ok(Some(content)) => content,
+                Ok(None) => String::new(),
+                Err(reason) => {
+                    return Some(truncate_preview(format!(
+                        "Patch Review\n\n{action}: {}\nExisting content preview unavailable: {reason}\nBytes after apply: {}\n\nNew content preview:\n{}",
+                        path.display(),
+                        new_content.len(),
+                        new_content
+                    )));
+                }
+            };
+            Some(truncate_preview(format!(
+                "Patch Review\n\n{action}: {}\nBytes after apply: {}\n\n{}",
+                path.display(),
+                new_content.len(),
+                generate_diff(&old_content, new_content)
+            )))
+        }
+        "create_file" => {
+            let path = resolve_path(input["path"].as_str()?, ctx);
+            let new_content = input["content"].as_str()?;
+            let header = if path.exists() {
+                format!(
+                    "Create: {}\nWARNING: file already exists; tool will fail.\n",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "Create: {}\nBytes after apply: {}\n",
+                    path.display(),
+                    new_content.len()
+                )
+            };
+            Some(truncate_preview(format!(
+                "Patch Review\n\n{header}\n{}",
+                generate_diff("", new_content)
+            )))
+        }
+        "edit_file" => {
+            let path = resolve_path(input["path"].as_str()?, ctx);
+            let edits = input["edits"].as_array()?;
+            let mut content = match fs::read_to_string(&path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return Some(format!(
+                        "Patch Review\n\nEdit: {}\nPreview unavailable: failed to read file: {e}",
+                        path.display()
+                    ));
+                }
+            };
+            let original = content.clone();
+            let mut notes = Vec::new();
+            for (i, edit) in edits.iter().enumerate() {
+                let old_str = edit["old_str"].as_str().unwrap_or("");
+                let new_str = edit["new_str"].as_str().unwrap_or("");
+                match apply_edit_robust(&content, old_str, new_str, i + 1) {
+                    Ok((next, note)) => {
+                        content = next;
+                        notes.push(note);
+                    }
+                    Err(err) => {
+                        return Some(truncate_preview(format!(
+                            "Patch Review\n\nEdit: {}\nPreview failed before applying:\n\n{}",
+                            path.display(),
+                            err
+                        )));
+                    }
+                }
+            }
+            Some(truncate_preview(format!(
+                "Patch Review\n\nEdit: {}\n{} edit(s)\n{}\n\n{}",
+                path.display(),
+                edits.len(),
+                notes.join("\n"),
+                generate_diff(&original, &content)
+            )))
+        }
+        "delete_file" => {
+            let path = resolve_path(input["path"].as_str()?, ctx);
+            if path.is_file() {
+                let old_content = match read_existing_text_for_preview(&path).await {
+                    Ok(Some(content)) => content,
+                    Ok(None) => return Some(missing_path_warning("Delete", &path)),
+                    Err(reason) => {
+                        return Some(format!(
+                            "Patch Review\n\nDelete file: {}\nText diff unavailable: {reason}\n\nApprove only if deleting this file is intended.",
+                            path.display()
+                        ));
+                    }
+                };
+                Some(truncate_preview(format!(
+                    "Patch Review\n\nDelete file: {}\n\n{}",
+                    path.display(),
+                    generate_diff(&old_content, "")
+                )))
+            } else if path.is_dir() {
+                Some(format!(
+                    "Patch Review\n\nDelete directory recursively: {}\n\nDirectory contents are not shown as a text diff. Only approve if this path is exactly intended.",
+                    path.display()
+                ))
+            } else {
+                Some(missing_path_warning("Delete", &path))
+            }
+        }
+        "copy_file" => {
+            let src = resolve_path(input["source"].as_str()?, ctx);
+            let dst = resolve_path(input["destination"].as_str()?, ctx);
+            let new_content = match read_existing_text_for_preview(&src).await {
+                Ok(Some(content)) => content,
+                Ok(None) => return Some(missing_path_warning("Copy source", &src)),
+                Err(reason) => {
+                    return Some(format!(
+                        "Patch Review\n\nCopy: {} -> {}\nSource text diff unavailable: {reason}\n\nApprove only if copying this file is intended.",
+                        src.display(),
+                        dst.display()
+                    ));
+                }
+            };
+            let old_content = match read_existing_text_for_preview(&dst).await {
+                Ok(Some(content)) => content,
+                Ok(None) => String::new(),
+                Err(reason) => {
+                    return Some(truncate_preview(format!(
+                        "Patch Review\n\nCopy: {} -> {}\nDestination preview unavailable: {reason}\nBytes after apply: {}\n\nSource content preview:\n{}",
+                        src.display(),
+                        dst.display(),
+                        new_content.len(),
+                        new_content
+                    )));
+                }
+            };
+            Some(truncate_preview(format!(
+                "Patch Review\n\nCopy: {} -> {}\nBytes after apply: {}\n\n{}",
+                src.display(),
+                dst.display(),
+                new_content.len(),
+                generate_diff(&old_content, &new_content)
+            )))
+        }
+        "move_file" => {
+            let src = resolve_path(input["source"].as_str()?, ctx);
+            let dst = resolve_path(input["destination"].as_str()?, ctx);
+            let content = match read_existing_text_for_preview(&src).await {
+                Ok(Some(content)) => content,
+                Ok(None) => return Some(missing_path_warning("Move source", &src)),
+                Err(reason) => {
+                    return Some(format!(
+                        "Patch Review\n\nMove: {} -> {}\nSource text diff unavailable: {reason}\n\nApprove only if moving this file is intended.",
+                        src.display(),
+                        dst.display()
+                    ));
+                }
+            };
+            let dst_old = match read_existing_text_for_preview(&dst).await {
+                Ok(Some(content)) => content,
+                Ok(None) => String::new(),
+                Err(reason) => {
+                    return Some(truncate_preview(format!(
+                        "Patch Review\n\nMove: {} -> {}\nDestination preview unavailable: {reason}\n\nSource deletion preview:\n{}",
+                        src.display(),
+                        dst.display(),
+                        generate_diff(&content, "")
+                    )));
+                }
+            };
+            Some(truncate_preview(format!(
+                "Patch Review\n\nMove: {} -> {}\n\nSource deletion preview:\n{}\n\nDestination write preview:\n{}",
+                src.display(),
+                dst.display(),
+                generate_diff(&content, ""),
+                generate_diff(&dst_old, &content)
+            )))
+        }
+        _ => None,
     }
 }
 
@@ -709,7 +936,9 @@ impl Tool for ListDirectoryTool {
                 "recursive": { "type": "boolean", "default": false },
                 "max_depth": { "type": "integer", "default": 3 },
                 "include_hidden": { "type": "boolean", "default": false },
-                "filter": { "type": "string", "description": "Glob pattern filter (e.g., '*.rs')" }
+                "include_ignored": { "type": "boolean", "default": false, "description": "Include files ignored by .gitignore/.ignore" },
+                "filter": { "type": "string", "description": "Glob pattern filter matched against names and relative paths (e.g., '*.rs', 'src/**/*.rs')" },
+                "max_results": { "type": "integer", "default": 500, "description": "Maximum entries to return" }
             },
             "required": ["path"]
         })
@@ -728,7 +957,9 @@ impl Tool for ListDirectoryTool {
         let recursive = input["recursive"].as_bool().unwrap_or(false);
         let max_depth = input["max_depth"].as_u64().unwrap_or(3) as usize;
         let include_hidden = input["include_hidden"].as_bool().unwrap_or(false);
+        let include_ignored = input["include_ignored"].as_bool().unwrap_or(false);
         let filter = input["filter"].as_str();
+        let max_results = input["max_results"].as_u64().unwrap_or(500) as usize;
 
         if !path.exists() {
             return ToolOutput::error(format!("Directory not found: {}", path.display()));
@@ -738,26 +969,41 @@ impl Tool for ListDirectoryTool {
             return ToolOutput::error(format!("Not a directory: {}", path.display()));
         }
 
-        let glob_pattern = filter.and_then(|f| glob::Pattern::new(f).ok());
+        let glob_pattern = match filter.map(glob::Pattern::new).transpose() {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(format!("Invalid filter glob: {e}")),
+        };
 
         let mut entries = Vec::new();
-        let walker = walkdir::WalkDir::new(&path)
-            .max_depth(if recursive { max_depth } else { 1 })
-            .follow_links(false);
+        let mut builder = WalkBuilder::new(&path);
+        builder
+            .hidden(!include_hidden)
+            .ignore(!include_ignored)
+            .git_ignore(!include_ignored)
+            .git_global(!include_ignored)
+            .git_exclude(!include_ignored)
+            .follow_links(false)
+            .max_depth(Some(if recursive { max_depth } else { 1 }));
+        let walker = builder.build();
 
         for entry in walker.into_iter().filter_map(|e| e.ok()) {
             let entry_path = entry.path();
             if entry_path == path {
                 continue;
             }
-
-            let file_name = entry.file_name().to_string_lossy();
-            if !include_hidden && file_name.starts_with('.') {
-                continue;
+            if entries.len() >= max_results {
+                break;
             }
 
+            let file_name = entry.file_name().to_string_lossy();
+
             if let Some(ref pattern) = glob_pattern {
-                if !pattern.matches(&file_name) && !entry_path.is_dir() {
+                let relative_for_match = entry_path
+                    .strip_prefix(&path)
+                    .unwrap_or(entry_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !pattern.matches(&file_name) && !pattern.matches(&relative_for_match) {
                     continue;
                 }
             }
@@ -773,10 +1019,16 @@ impl Tool for ListDirectoryTool {
         if entries.is_empty() {
             ToolOutput::success(format!("Directory is empty: {}", path.display()))
         } else {
+            let truncated = if entries.len() >= max_results {
+                format!("\n\n(Results truncated at {max_results} entries. Use max_results to increase.)")
+            } else {
+                String::new()
+            };
             ToolOutput::success(format!(
-                "Contents of {}:\n{}",
+                "Contents of {}:\n{}{}",
                 path.display(),
-                entries.join("\n")
+                entries.join("\n"),
+                truncated
             ))
         }
     }
@@ -831,8 +1083,19 @@ impl Tool for MoveFileTool {
             }
         }
 
+        file_history::take_snapshot(&src).await;
+        if dst.exists() {
+            file_history::take_snapshot(&dst).await;
+        }
+
         match fs::rename(&src, &dst).await {
-            Ok(_) => ToolOutput::success(format!("Moved {} -> {}", src.display(), dst.display())),
+            Ok(_) => {
+                if let Some(ref cache) = ctx.file_cache {
+                    cache.invalidate(&src);
+                    cache.record_write(&dst);
+                }
+                ToolOutput::success(format!("Moved {} -> {}", src.display(), dst.display()))
+            }
             Err(e) => ToolOutput::error(format!("Failed to move file: {e}")),
         }
     }
@@ -887,13 +1150,20 @@ impl Tool for CopyFileTool {
             }
         }
 
+        file_history::take_snapshot(&dst).await;
+
         match fs::copy(&src, &dst).await {
-            Ok(bytes) => ToolOutput::success(format!(
-                "Copied {} -> {} ({} bytes)",
-                src.display(),
-                dst.display(),
-                bytes
-            )),
+            Ok(bytes) => {
+                if let Some(ref cache) = ctx.file_cache {
+                    cache.record_write(&dst);
+                }
+                ToolOutput::success(format!(
+                    "Copied {} -> {} ({} bytes)",
+                    src.display(),
+                    dst.display(),
+                    bytes
+                ))
+            }
             Err(e) => ToolOutput::error(format!("Failed to copy file: {e}")),
         }
     }
@@ -910,6 +1180,7 @@ mod tests {
             session_id: "test".to_string(),
             trust_mode: true,
             permission_mode: crate::types::PermissionMode::Default,
+            diff_review: true,
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
@@ -987,6 +1258,71 @@ mod tests {
             .await;
         assert!(!output.is_error);
         assert!(std::fs::read_to_string(&file).unwrap().contains("world"));
+    }
+
+    #[tokio::test]
+    async fn test_preview_write_file_does_not_mutate_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("preview.txt");
+        fs::write(&file, "old\n").await.unwrap();
+
+        let ctx = test_ctx(dir.path());
+        let preview = preview_file_tool_change(
+            "write_file",
+            &json!({"path": "preview.txt", "content": "new\n"}),
+            &ctx,
+        )
+        .await
+        .expect("preview");
+
+        assert!(preview.contains("Patch Review"));
+        assert!(preview.contains("-old"));
+        assert!(preview.contains("+new"));
+        assert_eq!(fs::read_to_string(&file).await.unwrap(), "old\n");
+    }
+
+    #[tokio::test]
+    async fn test_preview_edit_file_uses_same_matching_logic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("edit_preview.txt");
+        fs::write(&file, "alpha\nbeta\n").await.unwrap();
+
+        let ctx = test_ctx(dir.path());
+        let preview = preview_file_tool_change(
+            "edit_file",
+            &json!({
+                "path": "edit_preview.txt",
+                "edits": [{"old_str": "beta", "new_str": "gamma"}]
+            }),
+            &ctx,
+        )
+        .await
+        .expect("preview");
+
+        assert!(preview.contains("Patch Review"));
+        assert!(preview.contains("-beta"));
+        assert!(preview.contains("+gamma"));
+        assert_eq!(fs::read_to_string(&file).await.unwrap(), "alpha\nbeta\n");
+    }
+
+    #[tokio::test]
+    async fn test_preview_binary_copy_reports_unavailable_text_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("binary.bin");
+        fs::write(&file, [0xff, 0xfe, 0xfd]).await.unwrap();
+
+        let ctx = test_ctx(dir.path());
+        let preview = preview_file_tool_change(
+            "copy_file",
+            &json!({"source": "binary.bin", "destination": "copy.bin"}),
+            &ctx,
+        )
+        .await
+        .expect("preview");
+
+        assert!(preview.contains("Source text diff unavailable"));
+        assert!(preview.contains("Approve only if copying this file is intended"));
+        assert!(!dir.path().join("copy.bin").exists());
     }
 
     #[tokio::test]

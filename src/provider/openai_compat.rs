@@ -181,6 +181,26 @@ impl OpenAICompatProvider {
         Self::new("custom".into(), name, api_key, base_url, model)
     }
 
+    fn model_info_for(&self, model: &str) -> ModelInfo {
+        models::models_for_provider(&self.provider_id)
+            .into_iter()
+            .find(|m| m.id == model)
+            .unwrap_or_else(|| ModelInfo {
+                id: model.to_string(),
+                name: model.to_string(),
+                context_window: self.model_info.context_window,
+                supports_tools: self.model_info.supports_tools,
+                supports_vision: self.model_info.supports_vision,
+                input_cost_per_million: self.model_info.input_cost_per_million,
+                output_cost_per_million: self.model_info.output_cost_per_million,
+                provider_id: self.provider_id.clone(),
+            })
+    }
+
+    fn supports_tools_for(&self, model: &str) -> bool {
+        self.model_info_for(model).supports_tools
+    }
+
     fn build_messages(&self, messages: &[Message]) -> Vec<Value> {
         messages
             .iter()
@@ -281,7 +301,7 @@ impl Provider for OpenAICompatProvider {
         }
 
         if let Some(tools) = &request.tools {
-            if !tools.is_empty() && self.supports_tools() {
+            if !tools.is_empty() && self.supports_tools_for(&request.model) {
                 body["tools"] = json!(self.build_tools(tools));
             }
         }
@@ -411,8 +431,12 @@ impl Provider for OpenAICompatProvider {
         for idx in indices {
             if let Some((id, name, args)) = tool_calls_map.remove(&idx) {
                 let input: Value = serde_json::from_str(&args).unwrap_or(json!({}));
-                tool_calls.push(ToolCall { id, name, input });
-                let _ = tx.send(StreamEvent::ToolCallEnd { id: id_stub() });
+                tool_calls.push(ToolCall {
+                    id: id.clone(),
+                    name,
+                    input,
+                });
+                let _ = tx.send(StreamEvent::ToolCallEnd { id });
             }
         }
 
@@ -457,8 +481,4 @@ impl Provider for OpenAICompatProvider {
     fn output_cost_per_million(&self) -> f64 {
         self.model_info.output_cost_per_million
     }
-}
-
-fn id_stub() -> String {
-    String::new()
 }

@@ -285,6 +285,10 @@ pub struct ToolContext {
     pub trust_mode: bool,
     /// Fine-grained permission mode. `Bypass` implies `trust_mode == true`.
     pub permission_mode: PermissionMode,
+    /// When true, mutating file tools must pass through an explicit diff
+    /// review prompt before they touch disk. Bypass/trust mode still means
+    /// "I know what I am doing" and skips the review gate.
+    pub diff_review: bool,
     /// Optional shared file-state cache. Tools that mutate files should call
     /// `check_unchanged` through this before writing; ReadOnly file tools
     /// should `record_read` after a successful read. Absent in tests that
@@ -309,6 +313,7 @@ impl std::fmt::Debug for ToolContext {
             .field("session_id", &self.session_id)
             .field("trust_mode", &self.trust_mode)
             .field("permission_mode", &self.permission_mode)
+            .field("diff_review", &self.diff_review)
             .field("file_cache", &self.file_cache.as_ref().map(|c| c.len()))
             .field(
                 "active_skill_scope",
@@ -329,6 +334,7 @@ impl ToolContext {
             session_id,
             trust_mode: mode == PermissionMode::Bypass,
             permission_mode: mode,
+            diff_review: true,
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,

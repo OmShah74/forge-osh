@@ -414,6 +414,66 @@ fn default_tools() -> Vec<String> {
         "run_linter",
         "run_tests",
         "run_formatter",
+        "todo_write",
+        "task_create",
+        "task_update",
+        "task_get",
+        "task_list",
+        "ask_user",
+        "enter_plan_mode",
+        "exit_plan_mode",
+        "invoke_skill",
+        "notebook_read",
+        "enter_worktree",
+        "exit_worktree",
+        "list_worktrees",
+        "git_stash",
+        "git_blame",
+        "git_show",
+        "git_reset",
+        "git_fetch",
+        "git_push",
+        "git_pull",
+        "powershell",
+        "graph_query",
+        "lsp_diagnostics",
+        "lsp_definition",
+        "lsp_references",
+        "lsp_hover",
+        "lsp_document_symbols",
+        "lsp_workspace_symbols",
+        "lsp_rename",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+fn legacy_default_tools() -> Vec<String> {
+    vec![
+        "read_file",
+        "write_file",
+        "edit_file",
+        "create_file",
+        "delete_file",
+        "list_directory",
+        "move_file",
+        "copy_file",
+        "bash",
+        "search_files",
+        "find_files",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_add",
+        "git_commit",
+        "git_branch",
+        "git_checkout",
+        "web_fetch",
+        "web_search",
+        "run_linter",
+        "run_tests",
+        "run_formatter",
     ]
     .into_iter()
     .map(String::from)
@@ -439,7 +499,10 @@ impl Config {
             return Ok(config);
         }
         let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        if config.tools.enabled == legacy_default_tools() {
+            config.tools.enabled = default_tools();
+        }
         Ok(config)
     }
 

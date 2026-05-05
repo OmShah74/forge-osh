@@ -12,6 +12,16 @@ use tokio::process::Command;
 use super::Tool;
 use crate::types::*;
 
+fn strip_copied_prompt_marker(command: &str) -> &str {
+    let trimmed = command.trim_start();
+    for marker in ["PS> ", "PS ", "$ ", "> "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return rest.trim_start();
+        }
+    }
+    trimmed
+}
+
 // ---------------------------------------------------------------------------
 // Dangerous PowerShell command patterns
 // ---------------------------------------------------------------------------
@@ -23,7 +33,8 @@ const BLOCKED_PS_PATTERNS: &[&str] = &[
     "Clear-Disk",
     "Remove-Partition",
     "Set-ExecutionPolicy Unrestricted",
-    "Invoke-Expression", // Too broad; flag but let permission system handle
+    "Invoke-Expression",
+    "IEX",
 ];
 
 fn is_blocked_ps(command: &str) -> Option<&'static str> {
@@ -69,9 +80,24 @@ const PS_READ_ONLY_CMDLETS: &[&str] = &[
 ];
 
 pub fn is_read_only_ps_command(command: &str) -> bool {
-    let lower = command.trim().to_lowercase();
-    // Reject if it contains output redirection
-    if lower.contains(" > ") || lower.contains(" >> ") || lower.contains(" | out-file") {
+    let lower = strip_copied_prompt_marker(command).trim().to_lowercase();
+    if lower.contains('>')
+        || lower.contains('<')
+        || lower.contains('|')
+        || lower.contains(';')
+        || lower.contains(" set-content")
+        || lower.contains(" add-content")
+        || lower.contains(" out-file")
+        || lower.contains("remove-")
+        || lower.contains("new-")
+        || lower.contains("set-")
+        || lower.contains("copy-")
+        || lower.contains("move-")
+        || lower.contains("rename-")
+        || lower.contains("start-process")
+        || lower.contains("invoke-expression")
+        || lower.contains(" iex ")
+    {
         return false;
     }
     PS_READ_ONLY_CMDLETS
@@ -147,6 +173,7 @@ impl Tool for PowerShellTool {
             Some(c) => c,
             None => return ToolOutput::error("Missing 'command' parameter"),
         };
+        let command = strip_copied_prompt_marker(command);
 
         // Safety check
         if let Some(blocked) = is_blocked_ps(command) {
@@ -277,5 +304,26 @@ impl Tool for PowerShellTool {
                 "PowerShell command timed out after {timeout}s: {command}"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copied_prompt_marker_is_stripped_but_variables_remain() {
+        assert_eq!(
+            strip_copied_prompt_marker("$ $lines=Get-Content src\\tools\\search.rs"),
+            "$lines=Get-Content src\\tools\\search.rs"
+        );
+        assert_eq!(
+            strip_copied_prompt_marker("PS> Get-Content README.md"),
+            "Get-Content README.md"
+        );
+        assert_eq!(
+            strip_copied_prompt_marker("$lines=Get-Content README.md"),
+            "$lines=Get-Content README.md"
+        );
     }
 }

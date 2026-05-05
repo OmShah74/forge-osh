@@ -7,7 +7,28 @@ use crate::types::*;
 
 // ─── web_fetch ────────────────────────────────────────────────────────────
 
-pub struct WebFetchTool;
+pub struct WebFetchTool {
+    timeout_seconds: u64,
+    max_content_length: usize,
+}
+
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: 15,
+            max_content_length: 50_000,
+        }
+    }
+}
+
+impl WebFetchTool {
+    pub fn from_config(config: &crate::config::WebToolConfig) -> Self {
+        Self {
+            timeout_seconds: config.timeout_seconds.max(1),
+            max_content_length: config.max_content_length,
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for WebFetchTool {
@@ -45,10 +66,14 @@ impl Tool for WebFetchTool {
             Some(u) => u,
             None => return ToolOutput::error("Missing 'url' parameter"),
         };
-        let max_length = input["max_length"].as_u64().map(|n| n as usize);
+        let max_length = input["max_length"]
+            .as_u64()
+            .map(|n| n as usize)
+            .filter(|n| *n > 0)
+            .unwrap_or(self.max_content_length);
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(self.timeout_seconds))
             .user_agent("forge-osh/0.1")
             .build();
 
@@ -83,7 +108,7 @@ impl Tool for WebFetchTool {
                             body
                         };
 
-                        ToolOutput::success(maybe_truncate_chars(text, max_length))
+                        ToolOutput::success(maybe_truncate_chars(text, Some(max_length)))
                     }
                     Err(e) => ToolOutput::error(format!("Failed to read response: {e}")),
                 }
@@ -95,7 +120,25 @@ impl Tool for WebFetchTool {
 
 // ─── web_search ───────────────────────────────────────────────────────────
 
-pub struct WebSearchTool;
+pub struct WebSearchTool {
+    timeout_seconds: u64,
+}
+
+impl Default for WebSearchTool {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: 10,
+        }
+    }
+}
+
+impl WebSearchTool {
+    pub fn from_config(config: &crate::config::WebToolConfig) -> Self {
+        Self {
+            timeout_seconds: config.timeout_seconds.max(1),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for WebSearchTool {
@@ -130,7 +173,7 @@ impl Tool for WebSearchTool {
         let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(self.timeout_seconds))
             .user_agent("forge-osh/0.1")
             .build();
 

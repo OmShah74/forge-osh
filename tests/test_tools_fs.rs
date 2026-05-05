@@ -11,6 +11,7 @@ fn make_ctx(dir: &std::path::Path) -> ToolContext {
         session_id: "test".into(),
         trust_mode: true,
         permission_mode: forge_agent::types::PermissionMode::Default,
+        diff_review: true,
         file_cache: None,
         active_skill_scope: None,
         skill_registry: None,

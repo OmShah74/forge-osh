@@ -5,7 +5,7 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.16</code> &nbsp;·&nbsp;
+  <code>v1.0.17</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
@@ -45,10 +45,11 @@
 17. [File Undo System](#-file-undo-system)
 18. [Git Worktree Isolation](#-git-worktree-isolation)
 19. [Semantic Code Graph (forge-graph)](#-semantic-code-graph-forge-graph)
-20. [CLI Commands Reference](#-cli-commands-reference)
-21. [Configuration Reference](#-configuration-reference)
-22. [Environment Variables](#-environment-variables)
-23. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
+20. [LSP Code Intelligence](#-lsp-code-intelligence)
+21. [CLI Commands Reference](#-cli-commands-reference)
+22. [Configuration Reference](#-configuration-reference)
+23. [Environment Variables](#-environment-variables)
+24. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
     - [Permission Modes](#permission-modes-plan--accept-edits--bypass--default)
     - [Extended Thinking](#extended-thinking-thinkingconfig)
     - [Tool Executor Rewrite](#tool-executor-rewrite)
@@ -64,9 +65,9 @@
     - [Skills Architecture](#skills-architecture-project--user--bundled)
     - [Skills UX — Commands & Status Bar](#skills-ux--commands--status-bar)
     - [How to Use, Add, Modify & Delete Skills](#how-to-use-add-modify--delete-skills)
-24. [Future Roadmap](#-future-roadmap)
-25. [Contributing](#-contributing)
-26. [License & Contact](#-license--contact)
+25. [Future Roadmap](#-future-roadmap)
+26. [Contributing](#-contributing)
+27. [License & Contact](#-license--contact)
 
 ---
 
@@ -89,9 +90,11 @@
 | **Tools** | 40+ tools: file I/O, shell, Git (14 ops), search, web, code quality, tasks, notebooks, worktrees |
 | **Agent** | Autonomous plan-execute-observe loop with `enter_plan_mode` / `exit_plan_mode` |
 | **TUI** | 5 color themes, Vim normal mode, mouse scroll, conversation history, modal pickers |
+| **Input** | Bracketed paste, multiline prompts, long-paste context preflight, overflow warnings |
 | **Safety** | Per-tool permission rules with glob patterns, blocked-command lists, trust mode |
 | **Sessions** | Auto-save, named sessions, resume, export to Markdown |
 | **Context** | LLM-based context compaction, token counting, cost tracking in real-time |
+| **Skills** | Bundled, user, and project skills, plus conversation-to-skill generation with review before saving |
 | **Undo** | File snapshot stack — undo any agent mutation instantly with `/undo` |
 | **Hooks** | Shell hooks on `PreToolUse`, `PostToolUse`, `Stop`, `Notification` events |
 | **Memory** | Auto-loads `CLAUDE.md` files from project, parent dirs, and `~/.forge-osh/` |
@@ -286,7 +289,7 @@ forge-osh --session feature-auth-refactor
 | `edit_file` | Mutating | Surgical find-and-replace edits (preferred over `write_file`) |
 | `create_file` | Mutating | Create a new file (errors if exists) |
 | `delete_file` | Destructive | Delete a file with confirmation |
-| `list_directory` | ReadOnly | List directory contents |
+| `list_directory` | ReadOnly | List directory contents with recursive traversal, path-aware filters, ignore handling, and result limits |
 | `move_file` | Mutating | Move or rename files |
 | `copy_file` | Mutating | Copy files |
 
@@ -296,8 +299,8 @@ Every mutating file operation automatically **snapshots** the file before modify
 
 | Tool | Permission | Description |
 |---|---|---|
-| `bash` | Varies | Run any shell command. Read-only commands (`ls`, `cat`, `grep`, `git log`) are **auto-allowed**. |
-| `powershell` | Varies | Run PowerShell commands (Windows). `Get-*` cmdlets are auto-allowed. |
+| `bash` | Varies | Run shell commands such as `rg`, `git`, `cargo`, `ls`, `cat`. Read-only commands are **auto-allowed**. Copied prompt markers like `$ rg ...` are ignored. |
+| `powershell` | Varies | Run PowerShell commands/scripts such as `Get-Content`, `$lines=...`, `for(...) { ... }`, `Select-Object`. `Get-*` cmdlets are auto-allowed; copied `$ ` / `PS> ` prompts are ignored. |
 
 Configurable timeouts (default: 30s, max: 300s) and a blocked-commands list prevent accidental damage.
 
@@ -324,8 +327,8 @@ Configurable timeouts (default: 30s, max: 300s) and a blocked-commands list prev
 
 | Tool | Description |
 |---|---|
-| `search_files` | Grep-based content search with context lines, file type filters, and output modes |
-| `find_files` | Glob-pattern file discovery across the entire project tree |
+| `search_files` | Native grep-style content search with regex/fixed-string modes, context lines, path globs, exclude globs, file type filters, hidden/ignored controls, and output modes |
+| `find_files` | Glob-pattern file discovery across the project tree; matches file names and relative paths while respecting ignore files by default |
 
 ### Web (2 tools)
 
@@ -380,6 +383,18 @@ Configurable timeouts (default: 30s, max: 300s) and a blocked-commands list prev
 |---|---|---|
 | `graph_query` | ReadOnly | Query the pre-built semantic code graph. Returns "no graph loaded" gracefully if no artifact exists. Supports `find`, `context_pack`, `blast_radius`, `file_graph`, `mutations`, and `stats` operations. |
 
+### LSP Code Intelligence (7 tools)
+
+| Tool | Permission | Description |
+|---|---|---|
+| `lsp_diagnostics` | ReadOnly | Compiler-grade errors / warnings / type issues for a source file (rust-analyzer, typescript-language-server, pyright, gopls). |
+| `lsp_definition` | ReadOnly | Jump to canonical definition of the symbol at `(line, column)`. |
+| `lsp_references` | ReadOnly | Find every usage of a symbol — scope-aware, catches re-exports / trait impls that grep misses. |
+| `lsp_hover` | ReadOnly | Type signature and doc-comments for a symbol — the same payload IDEs show on hover. |
+| `lsp_document_symbols` | ReadOnly | List all symbols (functions, types, methods) declared in a file with their line ranges. |
+| `lsp_workspace_symbols` | ReadOnly | Search the whole workspace for symbols matching a query string. |
+| `lsp_rename` | ReadOnly (`dry_run=true`) / Mutating (`dry_run=false`) | Compiler-safe rename across the workspace. Defaults to a preview; flip `dry_run=false` to apply. |
+
 ---
 
 ## 🔄 The Agentic Loop & Planning
@@ -426,6 +441,19 @@ Press `Esc` to enter Vim normal mode for keyboard-only navigation:
 - `g` / `G` — Jump to top / bottom
 - `i` / `a` — Return to insert mode
 
+### Long Prompt Paste & Input Handling
+
+The input box is designed for both short prompts and large copied context blocks:
+
+- `Enter` submits the prompt immediately.
+- `Shift+Enter` inserts a newline for multiline prompts.
+- Bracketed terminal paste is captured as one paste event, so multiline clipboard content is inserted into the input box instead of being submitted line-by-line.
+- Long pasted text is preserved with its original newlines and Unicode content.
+- The input box becomes a scrollable viewport for very large prompts; use `Alt+Up/Down` or `Ctrl+Up/Down` to scroll inside the input without scrolling the conversation pane.
+- Very large pasted prompts are intentionally kept out of prompt history to avoid bloating session memory with accidental huge clipboard dumps.
+
+Before inserting or submitting a large non-command prompt, `forge-osh` estimates whether it can fit into the active model's remaining context window. If the paste fits, it is inserted normally. If it is close to the limit, the TUI shows a warning while still allowing the insert. If it is likely to overflow, a confirmation modal lets you cancel or insert anyway. On submit, clearly oversized prompts are blocked before the LLM call so the request does not fail after spending time or tokens.
+
 ---
 
 ## 💬 Slash Commands
@@ -462,6 +490,9 @@ Type these at the prompt and press Enter:
 | `/effort <1-5>` | Set response effort level |
 | `/copy` | Copy last assistant response to clipboard |
 | `/permissions` | View/edit permission rules |
+| `/team start <goal>` | Start a durable Agent Team board with parallel subtasks and review |
+| `/team status` | Open the scrollable Agent Team task board |
+| `/team stop` | Stop team workers and save the board |
 
 ### Git & Export
 | Command | Description |
@@ -478,6 +509,21 @@ Type these at the prompt and press Enter:
 | `/doctor` | Environment diagnostics (git, shell, API keys, config health) |
 | `/resume` | List saved sessions for resuming |
 
+### Skills
+| Command | Description |
+|---|---|
+| `/skills` | Browse available bundled, user, and project skills |
+| `/skill <name> [args]` | Invoke a skill manually with optional arguments |
+| `/skill generate <name> <task>` | Generate a project skill from the current conversation using the active model |
+| `/skill gen <name> <task>` | Short alias for `/skill generate` |
+| `/skill generate-from-conversation <name> <task>` | Explicit alias for conversation-based skill generation |
+| `/skill show <name>` | Preview frontmatter and body before invoking or editing |
+| `/skill edit <name>` | Open an existing project/user skill in `$EDITOR` |
+| `/skill delete <name>` | Delete a project skill directory |
+| `/skill reload` | Reload all skill directories |
+| `/skill path` | Print the scanned skill locations |
+| `/skill off` | Clear the currently active skill scope |
+
 ### Semantic Code Graph
 | Command | Description |
 |---|---|
@@ -486,6 +532,16 @@ Type these at the prompt and press Enter:
 | `/forge-graph status` | Show graph info: node count, edge count, build time, file count |
 | `/forge-graph query <name>` | Search the graph for a symbol by name |
 | `/forge-graph clear` | Remove the artifact file and unload the graph from memory |
+
+### LSP Code Intelligence
+| Command | Description |
+|---|---|
+| `/lsp` | Show LSP status — supported languages, which servers are installed, which are running |
+| `/lsp status` | Same as `/lsp` |
+| `/lsp install` | Install/start detected project language servers into forge-osh's managed cache |
+| `/lsp install <lang>` | Install/start one built-in language server, e.g. `typescript`, `python`, `rust`, `go` |
+| `/lsp shutdown` | Stop every running language server (they will respawn lazily on next use) |
+| `/lsp shutdown <lang>` | Stop a single language server (`rust`, `typescript`, `python`, or `go`) |
 
 ---
 
@@ -508,6 +564,9 @@ Type these at the prompt and press Enter:
 | `Ctrl+U` | Delete to start of line |
 | `Ctrl+W` | Delete previous word |
 | `Up` / `Down` | Navigate prompt history |
+| `Alt+Up/Down` | Scroll inside a long prompt |
+| `Ctrl+Up/Down` | Scroll inside a long prompt |
+| Paste from clipboard | Insert pasted text as one prompt, preserving newlines |
 
 ### Quick Actions
 | Shortcut | Action |
@@ -538,6 +597,14 @@ Type these at the prompt and press Enter:
 | `N` / `Esc` | Deny |
 | `A` | Always allow (saves as rule) |
 | `T` | Enable trust mode |
+| `Up/Down` or `j/k` | Scroll long diff previews |
+| `PgUp` / `PgDn` | Page long diff previews |
+
+### Patch / Diff Review
+
+When `ui.diff_before_apply = true`, mutating file tools (`write_file`, `edit_file`, `create_file`, `delete_file`, `copy_file`, `move_file`) show a patch preview before they touch disk. The confirmation modal includes a unified diff or a destructive-operation summary, so you approve the actual proposed change rather than only the tool name.
+
+This review gate intentionally overrides stored allow rules and `accept-edits` for file mutations. `trust` / `bypass` mode remains the explicit no-prompt escape hatch. After approval, normal protections still apply: file-state cache checks can block stale edits, snapshots are taken for `/undo`, and tool output includes the final diff/result.
 
 ---
 
@@ -565,11 +632,13 @@ tool_name(pattern)
 
 ### Evaluation Order
 
-1. **Deny rules** are checked first (always win)
-2. **Allow rules** are checked second
-3. If no rule matches → user is prompted
-4. **ReadOnly tools** (`read_file`, `list_directory`, `search_files`) never prompt
-5. **Trust mode** bypasses all prompts
+1. **Trust / bypass mode** bypasses prompts intentionally.
+2. **Plan mode** blocks mutating tools.
+3. **ReadOnly tools** (`read_file`, `list_directory`, `search_files`) never prompt.
+4. **Deny rules** block matching mutating or shell tool calls.
+5. **Patch / diff review** prompts for file mutations when `ui.diff_before_apply = true`.
+6. **Allow rules** skip prompts for matching non-file-review calls.
+7. If no rule matches, the user is prompted.
 
 ---
 
@@ -633,6 +702,12 @@ Each session records: provider, model, full message history, timestamps, and tok
 ### Real-Time Tracking
 
 The header bar shows live token count and cost. Press `Ctrl+B` or type `/cost` for a detailed breakdown.
+
+### Paste Context Preflight
+
+Large pasted prompts are checked against the same token-counting path used by the rest of the session accounting. The estimate combines the current conversation context, the system prompt and tool overhead, a response reserve, a safety margin, and the new pasted text. This makes the warning reflect the actual prompt that would be sent to the active model rather than only the pasted text in isolation.
+
+If a large paste is near the available context budget, `forge-osh` warns before insertion. If it is likely to overflow, the TUI asks for confirmation before inserting and blocks submission if the final prompt still cannot fit. If auto-compaction is enabled, the latest user message is protected so a freshly pasted request is not summarized away before the model has a chance to answer it.
 
 ### LLM-Based Context Compaction
 
@@ -768,6 +843,150 @@ This avoids burning thousands of tokens reading whole files — the agent gets e
 
 ---
 
+## 🧠 LSP Code Intelligence
+
+`forge-osh` integrates the **Language Server Protocol** so the agent can ask real compilers / type-checkers — not regexes — for definitions, references, diagnostics, and renames. This is the same plumbing that powers VS Code, Neovim, and Helix, wrapped as agent tools so the LLM can use it the way a senior engineer would.
+
+LSP fills the gap that `forge-graph` (parser-based) cannot: live type information, borrow-check errors, scope-aware references, trait-impl resolution, generics, and safe rename. Together they form a two-layer intelligence stack — `forge-graph` for project-wide structure, `lsp_*` for compiler-grade precision.
+
+### Supported Languages
+
+forge-osh ships a broad built-in LSP registry, prefers bundled sidecar servers from `lsp/bin` beside the executable, auto-provisions many built-in servers into its managed data cache when it knows a safe installer command, and also loads user-defined servers from `~/.forge-osh/lsp.toml`. The table below lists the core language set; `/lsp` shows the full live registry, including extra built-ins such as C/C++, Java, C#, PHP, Ruby, Lua, Bash, JSON/YAML, HTML/CSS, Vue, Svelte, Kotlin, Swift, Dart, and Dockerfile.
+
+| Language | Extensions | Servers tried (first found wins) | Project markers |
+|---|---|---|---|
+| Rust | `.rs` | `rust-analyzer` | `Cargo.toml`, `rust-project.json` |
+| TypeScript / JavaScript | `.ts .tsx .js .jsx .mjs .cjs` | `typescript-language-server --stdio` | `package.json`, `tsconfig.json`, `jsconfig.json` |
+| Python | `.py .pyi` | `pyright-langserver --stdio`, `pylsp`, `jedi-language-server` | `pyproject.toml`, `setup.py`, `requirements.txt`, `Pipfile` |
+| Go | `.go` | `gopls` | `go.mod`, `go.work` |
+
+### Installing the Servers
+
+For built-in languages, forge-osh first looks for release-provided sidecars in `lsp/bin` and `lsp/node/node_modules/.bin` beside the executable. If a sidecar is not present and a known package-manager route exists, forge-osh attempts to install and start the server automatically when it detects matching project files. Node-based servers are installed into forge-osh's own data directory instead of requiring global `npm -g` installs. If a platform/package manager is missing or a language has no safe universal installer, the tool returns a friendly install hint instead of failing your conversation.
+
+```bash
+# Rust
+rustup component add rust-analyzer
+
+# TypeScript / JavaScript
+npm install -g typescript-language-server typescript
+
+# Python (pick one)
+pip install pyright            # recommended — fastest
+pip install python-lsp-server  # alternative
+
+# Go
+go install golang.org/x/tools/gopls@latest
+```
+
+Run `/lsp` inside the TUI to open a scrollable status view showing configured languages, installed/running servers, install hints, and custom-server instructions.
+
+### Custom Language Servers
+
+Create `~/.forge-osh/lsp.toml` to add or override language servers without rebuilding:
+
+```toml
+[[servers]]
+language = "zig"
+language_id = "zig"
+extensions = ["zig"]
+command = "zls"
+args = []
+root_markers = ["build.zig", ".git"]
+install_hint = "Install zls and put it on PATH"
+```
+
+### How It Works
+
+```
+AgentLoop ─► ToolRegistry ─► lsp_* Tool ─► SharedLspManager
+                                              │
+                                              ▼
+                                    ┌──── Per-language cache ────┐
+                                    │  rust → LspClient(stdio)   │
+                                    │  ts   → LspClient(stdio)   │
+                                    │  py   → LspClient(stdio)   │
+                                    └────────────────────────────┘
+```
+
+- **Bundled sidecars, managed provisioning, warm-up, and lazy fallback.** At startup, forge-osh scans the project lightly, prefers release-provided sidecars, installs known built-in language servers into its managed cache when missing, and warms detected servers in the background. If a server was not warmed yet, the first `lsp_*` tool use still spawns it lazily.
+- **Per-language root detection.** When a server is spawned, forge-osh walks up from the working directory looking for that language's project markers (e.g. `Cargo.toml`) so the server indexes the right workspace.
+- **Document sync.** Tools that operate on a file open it via `textDocument/didOpen` (or `didChange` if the on-disk text changed since the last call). You don't manage this — every tool that takes a `path` calls it transparently.
+- **Diagnostics cache.** Servers push `publishDiagnostics` asynchronously; forge-osh stores the latest snapshot per file, so `lsp_diagnostics` returns immediately if it's already arrived and otherwise polls briefly (default 2.5s, configurable via `wait_ms`).
+- **Post-edit diagnostics.** After successful file writes/edits/copies/moves, forge-osh tries a short LSP diagnostic check for the changed source file and appends the result to the tool output when a server is available.
+- **Pure stdio JSON-RPC.** No external `lsp-types` dependency — forge-osh ships its own minimal protocol implementation, which keeps the binary small and forwards-compatible with quirky servers.
+
+### When to Use LSP Tools
+
+Use LSP tools instead of plain text search when you care about **correctness**, not just textual matches:
+
+| You want to… | Use | Why not just `search_files`? |
+|---|---|---|
+| Verify code still compiles after an edit | `lsp_diagnostics` | Catches type errors, unused imports, borrow-check, missing methods — text search can't. |
+| Find every caller of a function | `lsp_references` | Scope-aware. Skips comments, strings, lookalike names in unrelated scopes. Includes re-exports. |
+| Jump to a symbol's true definition | `lsp_definition` | Resolves trait impls / generics / re-exports correctly. |
+| Read a function's signature and docs | `lsp_hover` | Returns the resolved, fully-qualified type — not a fragile regex over the source. |
+| Outline a file | `lsp_document_symbols` | Cheaper than `read_file` when you only need the structure. |
+| Search the workspace by symbol name | `lsp_workspace_symbols` | Returns only real declarations, not random text matches. |
+| Rename a symbol everywhere | `lsp_rename` | Compiler-safe. Ignores accidental name collisions; updates re-exports automatically. |
+
+### Example Calls (as the agent sees them)
+
+```jsonc
+// Did the last edit break the build?
+{ "tool": "lsp_diagnostics", "input": { "path": "src/agent/loop.rs" } }
+
+// Where is `AgentLoop::run` defined? (line/column are 1-based)
+{ "tool": "lsp_definition", "input": { "path": "src/agent/loop.rs", "line": 142, "column": 9 } }
+
+// Who calls this method?
+{ "tool": "lsp_references", "input": { "path": "src/agent/loop.rs", "line": 142, "column": 9 } }
+
+// What's the type of the variable under the cursor?
+{ "tool": "lsp_hover", "input": { "path": "src/tui/mod.rs", "line": 380, "column": 12 } }
+
+// Outline a file before reading it.
+{ "tool": "lsp_document_symbols", "input": { "path": "src/types.rs" } }
+
+// Workspace search across the Rust crate.
+{ "tool": "lsp_workspace_symbols", "input": { "query": "AgentLoop", "language": "rust" } }
+
+// Preview-only rename (default). dry_run=false applies the edits.
+{ "tool": "lsp_rename",
+  "input": { "path": "src/agent/loop.rs", "line": 142, "column": 9, "new_name": "drive" } }
+```
+
+### Why This Improves the System
+
+1. **Fewer "looks fine but doesn't compile" answers.** The agent can now self-check edits with `lsp_diagnostics` before claiming success — the largest source of bad PRs from LLM agents.
+2. **Refactors that don't break the build.** `lsp_rename` (preview-first) replaces fragile sed/regex rewrites with a compiler-validated workspace edit set.
+3. **Token-efficient navigation.** `lsp_definition` / `lsp_hover` / `lsp_document_symbols` answer most "what does X do?" questions without dumping whole files into context.
+4. **Closes the OpenCode / Claude-Code parity gap.** OpenCode shipped LSP integration as a flagship feature; forge-osh now matches that capability and pairs it with the unique forge-graph layer.
+5. **Safe by default.** All read-only operations bypass permission prompts; `lsp_rename` defaults to `dry_run=true` and only escalates to `Mutating` permission when the agent explicitly asks to apply edits.
+
+### Caveats & Things to Know
+
+- **Servers must be available before LSP tools can answer.** forge-osh checks bundled sidecars beside the executable, its managed LSP cache, and `PATH`. `/lsp install` can provision languages with known installers; otherwise the relevant `lsp_*` tool returns a friendly install hint and the agent falls back to text search.
+- **First request per language is slow.** Server spawn + `initialize` + workspace index can take 2–30 seconds (especially `rust-analyzer` on a cold cargo target dir). Subsequent calls are sub-second.
+- **`lsp_diagnostics` may need a longer wait_ms on large projects.** Some servers stream diagnostics over multiple seconds. If you get an empty result, retry with `"wait_ms": 8000`.
+- **Line/column are 1-based.** All forge-osh `lsp_*` tools accept human-friendly 1-based coordinates and convert internally — keep that in mind when scripting.
+- **Rename applies in-place when `dry_run=false`.** No git commit, no backup. Run inside a clean working tree (or a `/enter_worktree`) so you can `git diff` / `git checkout` if anything looks wrong. Any `Mutating` rename also goes through the standard diff-review and permission flow before touching disk.
+- **Multi-file file-rename / create operations from the server are not honoured.** Only `TextEdit`s within existing files are applied — moving / creating files via LSP rename is reserved for a later iteration.
+- **One server per language per session.** Switching projects mid-session: run `/lsp shutdown <lang>` so the next call respawns the server against the new workspace root.
+- **Servers are killed on process exit.** forge-osh spawns them with `kill_on_drop`, so a hard quit won't leave orphan processes.
+- **Conflict-free with `forge-graph`.** Both layers are independent and complementary — you can run with neither, either, or both.
+
+### Diagnostics & Troubleshooting
+
+- `/lsp` — see what's installed and what's running
+- `/lsp install` — install/start servers for detected project languages
+- `/lsp install typescript` — install/start one built-in language server
+- `/lsp shutdown` — kill every server (forces re-init on next use; useful if a server gets wedged)
+- `/lsp shutdown rust` — restart only `rust-analyzer`
+- Set `RUST_LOG=forge_agent::lsp=debug` in your environment to see protocol traffic in the tracing logs
+
+---
+
 ## 🐝 Multithread Swarm Architecture & Recent Enhancements (v1.0.10 - v1.0.13+)
 
 Starting from version 1.0.10 through 1.0.13, `forge-osh` received a major series of professional-grade architectural upgrades. These updates focus on context preservation, default model reliability, graceful execution management, and primarily, a completely new optional **Multithreaded Swarm Architecture** inspired by enterprise-grade agent harnesses.
@@ -811,6 +1030,25 @@ The Coordinator manages these parallel threads via a message-passing Event Bus:
 You have full granular control over the swarm via dedicated commands:
 - `/multithread status`: Lists all currently executing workers, their unique `uuid` hashes, and the truncated description of what task they are currently solving.
 - `/multithread stop`: Broadcasts an abort signal (via tokio `JoinHandle::abort()`) to gracefully instantly kill all background workers running in the swarm.
+
+### 1.1 Agent Teams / Parallel Task Boards
+
+For larger tasks, `forge-osh` now adds a durable Agent Team layer on top of the worker runtime. Use it when a request should be split into independent workstreams, reviewed, and integrated cleanly instead of spawning loose background workers.
+
+```text
+/team start refactor the auth module; update tests; review regression risk
+/team status
+/team stop
+```
+
+What the team board adds:
+- **Coordinator plan:** the goal is converted into explicit subtasks. Semicolon-separated or multiline goals become direct task seeds; otherwise forge creates context-mapping, implementation, and review-oriented subtasks.
+- **Shared bus contract:** every team worker receives the same team id, goal, roster, conflict strategy, and artifact-reporting format.
+- **Durable status:** the board is saved under the forge data directory as JSON, so task status, results, artifact paths, and recent events are inspectable after the run.
+- **Peer review phase:** after worker subtasks finish, a review worker synthesizes outputs, checks conflicts, identifies missing verification, and produces an integration verdict.
+- **Conflict handling:** if multiple workers report the same artifact path, the board enters `conflict` instead of pretending the merge was clean.
+
+Use `/team status` to open the scrollable board modal. Use `/multithread` + `@worker` for quick one-off background tasks; use `/team start` for production-grade multi-agent work that needs lifecycle tracking and review.
 
 ---
 
@@ -1246,6 +1484,10 @@ The Skills subsystem is fully interactive from inside the TUI. Nothing requires 
 /skill <name> [args]           Invoke a skill. Hot-reloads registry first.
 /skill show <name>             Print the skill's frontmatter summary + full body
 /skill new <name>              Scaffold ./.claude/skills/<name>/SKILL.md and open $EDITOR
+/skill generate <name> <task>  Generate a reviewed project skill from conversation
+/skill gen <name> <task>       Alias for /skill generate
+/skill generate-from-conversation <name> <task>
+                               Explicit alias for conversation-based generation
 /skill edit <name>             Open an existing skill in $EDITOR
 /skill delete <name>           Remove a project skill directory (bundled cannot be deleted)
 /skill reload                  Force re-scan of all three skill directories
@@ -1293,8 +1535,30 @@ Available skills (7):
   /skill deploy-helper          Deploys this service to staging...
   /skill review                 Project override of the bundled reviewer
 
-Subcommands: /skill <name> [args] | show | new | edit | delete | reload | path | off
+Subcommands: /skill <name> [args] | show | new | generate | edit | delete | reload | path | off
 ```
+
+### Conversation-to-skill generation
+
+Use skill generation when a conversation has produced a reusable workflow that you want the agent to remember as an invocable project skill. Good examples are repeatable build/release procedures, repo-specific debugging playbooks, review checklists, migration recipes, or domain workflows that will come up again. Avoid generating a skill for one-off facts, secrets, temporary credentials, or vague preferences that would be better stored in project memory.
+
+```
+/skill generate release-build "Build and release the Windows binary using the project instructions"
+/skill gen alphaevolve-sim "Generate and validate AlphaEvolve-style data-center simulations"
+/skill generate-from-conversation dp-helper "Solve dynamic-programming coding tasks with tests"
+```
+
+Generation uses the currently active provider and model. The prompt is built from the current conversation, including compacted summaries when the original detailed messages have already been replaced by `/compact` or auto-compaction. The generated draft is sanitized, validated as `SKILL.md`, and shown in a review modal before anything is written to disk.
+
+During review:
+
+- `Y` or `Enter` creates the skill after a final validation pass.
+- `E` toggles the raw `SKILL.md` view so you can inspect frontmatter, body, `allowed_tools`, and safety notes.
+- `Esc` cancels without creating files.
+
+Generated project skills are saved under `./.claude/skills/generated-<name>/SKILL.md`, then loaded into the normal skill registry. They appear in `/skills`, can be inspected with `/skill show generated-<name>`, edited with `/skill edit generated-<name>`, and invoked with `/skill generated-<name>`.
+
+Treat generated skills as security-sensitive. The generator removes or narrows unsafe instructions and high-risk tool allowlists, but you should still review the final `allowed_tools`, `description`, `when_to_use`, and body before accepting. If a generated skill blocks a tool that the workflow genuinely needs, edit the skill deliberately instead of broadening the allowlist blindly.
 
 ### Configuration knobs
 
@@ -1352,7 +1616,23 @@ Edit the file:
 
 Save and exit. Invoke with `/skill deploy-helper`.
 
-### 4. Modify an existing skill
+### 4. Generate a skill from the current conversation
+
+```
+/skill generate deploy-helper "Deploy this service to staging using the procedure we just validated"
+```
+
+This is the fastest way to convert a successful session into a reusable project workflow:
+
+1. Finish the task or discuss the workflow until the conversation contains the important steps, files, commands, caveats, and validation criteria.
+2. Run `/skill generate <name> <task description>` with a narrow task description.
+3. Review the generated preview carefully. Use `E` to inspect raw markdown, `Y` or `Enter` to create, or `Esc` to cancel.
+4. Confirm the saved skill with `/skill show generated-<name>`.
+5. Make any refinements with `/skill edit generated-<name>`, then run `/skill reload` if needed.
+
+Generated skills are intentionally project-local by default. Check them into Git only after review, especially if the conversation included private paths, deployment details, or security-sensitive procedures.
+
+### 5. Modify an existing skill
 
 ```
 /skill edit deploy-helper
@@ -1362,7 +1642,7 @@ Opens the file in `$EDITOR`. After save, the next `/skill <name>` invocation pic
 
 **Editing bundled skills**: the bundled versions are compiled into the binary and cannot be edited in place. But you can **shadow** them: `/skill new review` creates a project-level `review` that fully overrides the bundled one. Copy the bundled body as a starting point by running `/skill show review` first and pasting the output.
 
-### 5. Inspect a skill before invoking
+### 6. Inspect a skill before invoking
 
 ```
 /skill show debug
@@ -1370,7 +1650,7 @@ Opens the file in `$EDITOR`. After save, the next `/skill <name>` invocation pic
 
 Prints the frontmatter summary (description, source, path, allowed_tools, mode) and the full markdown body. This is exactly what the agent will receive when the skill is invoked — no hidden transformation.
 
-### 6. Delete a project skill
+### 7. Delete a project skill
 
 ```
 /skill delete deploy-helper
@@ -1378,7 +1658,7 @@ Prints the frontmatter summary (description, source, path, allowed_tools, mode) 
 
 Removes `./.claude/skills/deploy-helper/` entirely. Bundled skills cannot be deleted (they live in the binary), but a project override can be deleted and the bundled version takes back over.
 
-### 7. Leave a skill scope early
+### 8. Leave a skill scope early
 
 If the agent has entered an inline skill scope and you want to release the tool-allowlist restriction before the turn finishes:
 
@@ -1388,7 +1668,7 @@ If the agent has entered an inline skill scope and you want to release the tool-
 
 Clears `session.active_skill_scope`, removes the status-bar indicator, and emits a `SkillScopeChanged { name: None }` event.
 
-### 8. Find where skills live
+### 9. Find where skills live
 
 ```
 /skill path
@@ -1396,7 +1676,7 @@ Clears `session.active_skill_scope`, removes the status-bar indicator, and emits
 
 Prints the three paths the loader scans. Useful for checking in project skills via Git (commit `./.claude/skills/`) or syncing user skills across machines (rsync `~/.forge-osh/skills/`).
 
-### 9. Author a skill — best practices
+### 10. Author a skill — best practices
 
 - **Be specific in `description`** — this is what the LLM reads to decide whether to invoke
 - **Write `when_to_use` as triggers, not tutorials** — e.g., "the user mentions a failing test" is better than "use this for debugging"
@@ -1407,7 +1687,7 @@ Prints the three paths the loader scans. Useful for checking in project skills v
 - **Promote stable skills to user-level** at `~/.forge-osh/skills/` so every project gets them
 - **Test with `/skill <name>`** before trusting the agent to find them — if `/skill show` looks right, the system prompt will show the LLM the same text
 
-### 10. Config gates
+### 11. Config gates
 
 ```toml
 [agent]
