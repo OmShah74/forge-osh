@@ -59,6 +59,39 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+}
+
+/// Configuration for MCP (Model Context Protocol) servers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+/// Per-server MCP configuration.
+///
+/// For built-in catalog entries, only `id` + `enabled` are typically set —
+/// the command/args/secret_specs come from the static catalog. For custom
+/// servers (id not in the catalog), all fields must be filled in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub id: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub secret_specs: Vec<crate::mcp::catalog::SecretSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +522,18 @@ impl Config {
     pub fn load() -> Self {
         let path = config_dir().join("config.toml");
         Self::load_from(&path).unwrap_or_default()
+    }
+
+    /// Load without auto-creating; used by callers (e.g. /mcp persistence)
+    /// that want to overwrite a single section while preserving everything else.
+    pub fn load_raw() -> Result<Self> {
+        let path = config_dir().join("config.toml");
+        if !path.exists() {
+            return Ok(Config::default());
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let cfg: Config = toml::from_str(&content)?;
+        Ok(cfg)
     }
 
     /// Load from a specific path

@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.17)
+    r#"forge-osh Help  (v1.0.18)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen (scroll: ↑↓/jk, PgUp/PgDn, g/G)
@@ -198,6 +198,60 @@ LSP CODE INTELLIGENCE
     Before deleting or renaming a symbol, use lsp_references first.
     For broad navigation, use forge-graph first, then lsp_definition/hover
     for compiler-accurate symbol details.
+
+MCP SERVERS  (/mcp)
+  Connect external MCP (Model Context Protocol) servers — GitHub, GitLab,
+  Bitbucket, Linear, Jira, Confluence, Notion, Asana, Trello, Postgres,
+  MySQL, MongoDB, Redis, BigQuery, Snowflake, ClickHouse, DuckDB, Supabase,
+  Neon, PlanetScale, Elasticsearch, Pinecone, Qdrant, Chroma, Tavily, Exa,
+  Perplexity, Kagi, Brave Search, DuckDuckGo, Slack, Discord, Telegram,
+  Twilio, Gmail, Google Calendar, Google Drive, Google Maps, Cloudflare,
+  AWS, Vercel, Netlify, Railway, Docker, Kubernetes, Stripe, Shopify,
+  HubSpot, Salesforce, Spotify, YouTube, Reddit, X/Twitter, Obsidian,
+  Wikipedia, arXiv, Hacker News, Figma, OpenWeather, Alpha Vantage,
+  NewsAPI, Sentry, Filesystem, Puppeteer, Memory, Fetch, Time, Sequential
+  Thinking, EverArt, and Git. Each connected server exposes its tools to
+  the agent under the prefix `mcp__<server>__<tool>`. (50+ services
+  built-in; you can also add your own — see "Custom servers" below.)
+
+  Slash commands:
+    /mcp                  Open the MCP manager modal (interactive)
+    /mcp list             Print one-line status for every known server
+    /mcp reconnect        Re-spawn every enabled server in the background
+
+  In the modal — list view:
+    Up / Down  k/j        Navigate servers          PgUp/PgDn   Page
+    Home / End            Jump to first / last      Enter / →   Open detail
+    Space / t             Toggle enabled            c           Connect now
+    x                     Disconnect                r           Reconnect all
+    n                     Open custom-server form (see below)
+    D (capital)           Delete a CUSTOM server (built-ins are protected)
+    Esc / q               Close
+
+  In the modal — detail view:
+    Up / Down             Navigate secrets          ←/h         Back to list
+    Enter / e             Set/change selected secret
+    d / Del               Clear stored secret value
+    Space / t             Toggle enabled            c           Connect now
+    x                     Disconnect                Esc / q     Back to list
+
+  Custom servers (the "n" key on the list):
+    Opens a multi-field form for any MCP server not in the built-in catalog.
+    Fields: ID, display name, description, category, command, args,
+    required secret env-var keys, enabled-on-save toggle.
+      Tab / ↑ / ↓         Move focus between fields
+      Space (last field)  Toggle "enabled on save"
+      Enter               Next field (or toggle, on the last field)
+      Ctrl+S              Save the server (validates ID and command)
+      Esc                 Cancel
+    Args are split on whitespace. Each comma-separated secret key becomes
+    an env-var the child server inherits when launched. After save, the
+    server appears in the list and connects in the background.
+
+  Secrets you enter (API tokens, connection strings) are encrypted-at-rest
+  in the same `~/.forge-osh/keys.json` store as your provider API keys.
+  Stored under `mcp:<server-id>:<KEY>`. Env-var values take precedence over
+  stored values, matching the provider key precedence.
 
 KEY MANAGER  (Ctrl+K)
   Up / Down   Navigate providers        Enter / e   Set or change key

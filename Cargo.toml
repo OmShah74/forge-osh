@@ -1,6 +1,6 @@
 [package]
 name = "forge_agent"
-version = "1.0.17"
+version = "1.0.18"
 edition = "2021"
 authors = ["osh"]
 description = "A universal Rust-based CLI coding agent"

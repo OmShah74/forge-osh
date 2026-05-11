@@ -112,6 +112,8 @@ pub enum Modal {
     GeneratedSkillPreview(GeneratedSkillPreviewState),
     /// Large paste confirmation before inserting text into the prompt buffer.
     PasteConfirm(PasteConfirmState),
+    /// MCP server manager — list, toggle, set secrets, view status.
+    McpManager(McpManagerState),
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +275,198 @@ impl KeyManagerState {
     }
 }
 
+// ───────────────────────────── MCP manager modal ────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpView {
+    /// Top-level list of services with status + tool count.
+    List,
+    /// Per-service detail screen showing secrets + recent stderr.
+    Detail,
+    /// Capturing a secret value from the user.
+    SecretInput,
+    /// Form for creating a brand-new (non-catalog) MCP server.
+    CustomForm,
+}
+
+/// State for the "create custom MCP server" form. Each field is a free-text
+/// String; Tab/↑↓ moves focus between fields, Ctrl+S submits.
+#[derive(Debug, Clone, Default)]
+pub struct McpCustomForm {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub category: String,
+    pub command: String,
+    pub args: String,
+    pub secret_keys: String,
+    pub enabled: bool,
+    pub focused: usize,
+    pub error: Option<String>,
+}
+
+pub const MCP_CUSTOM_FIELD_COUNT: usize = 8;
+
+impl McpCustomForm {
+    pub fn new() -> Self {
+        Self {
+            category: String::from("Custom"),
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn focus_next(&mut self) {
+        self.focused = (self.focused + 1) % MCP_CUSTOM_FIELD_COUNT;
+    }
+    pub fn focus_prev(&mut self) {
+        if self.focused == 0 {
+            self.focused = MCP_CUSTOM_FIELD_COUNT - 1;
+        } else {
+            self.focused -= 1;
+        }
+    }
+
+    /// Mutable handle to the focused String field, if it's a text field.
+    /// The "enabled" toggle field has no string buffer.
+    pub fn focused_buffer(&mut self) -> Option<&mut String> {
+        match self.focused {
+            0 => Some(&mut self.id),
+            1 => Some(&mut self.display_name),
+            2 => Some(&mut self.description),
+            3 => Some(&mut self.category),
+            4 => Some(&mut self.command),
+            5 => Some(&mut self.args),
+            6 => Some(&mut self.secret_keys),
+            7 => None, // enabled toggle
+            _ => None,
+        }
+    }
+
+    pub fn label_for(field: usize) -> &'static str {
+        match field {
+            0 => "ID (slug)",
+            1 => "Display name",
+            2 => "Description",
+            3 => "Category",
+            4 => "Command",
+            5 => "Args (space-separated)",
+            6 => "Required secret env vars (comma-separated)",
+            7 => "Enabled on save",
+            _ => "",
+        }
+    }
+
+    pub fn split_args(&self) -> Vec<String> {
+        self.args
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    pub fn split_secret_keys(&self) -> Vec<String> {
+        self.secret_keys
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+pub struct McpManagerState {
+    pub servers: Vec<crate::mcp::ServerSnapshot>,
+    pub selected: usize,
+    pub view: McpView,
+    pub list_scroll: u16,
+    pub detail_scroll: u16,
+    /// In Detail view: which secret row is selected.
+    pub secret_selected: usize,
+    /// In SecretInput view: the value being typed.
+    pub input_buffer: String,
+    /// Which secret key is being edited (key in the selected server).
+    pub editing_secret_key: Option<String>,
+    /// Transient toast / error message rendered at the bottom of the modal.
+    pub message: Option<String>,
+    /// State for the custom-server creation form. Always present so the
+    /// user's in-progress entry survives view switches.
+    pub custom_form: McpCustomForm,
+}
+
+impl McpManagerState {
+    pub fn new(servers: Vec<crate::mcp::ServerSnapshot>) -> Self {
+        Self {
+            servers,
+            selected: 0,
+            view: McpView::List,
+            list_scroll: 0,
+            detail_scroll: 0,
+            secret_selected: 0,
+            input_buffer: String::new(),
+            editing_secret_key: None,
+            message: None,
+            custom_form: McpCustomForm::new(),
+        }
+    }
+
+    pub fn selected_server(&self) -> Option<&crate::mcp::ServerSnapshot> {
+        self.servers.get(self.selected)
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.servers.len() {
+            self.selected += 1;
+        }
+    }
+    pub fn detail_secret_up(&mut self) {
+        if self.secret_selected > 0 {
+            self.secret_selected -= 1;
+        }
+    }
+    pub fn detail_secret_down(&mut self) {
+        if let Some(s) = self.selected_server() {
+            if self.secret_selected + 1 < s.required_secrets.len() {
+                self.secret_selected += 1;
+            }
+        }
+    }
+}
+
+/// Action requested by the MCP modal input handler — applied in the main
+/// loop where we have async access to the McpManager.
+#[derive(Debug, Clone)]
+pub enum McpAction {
+    Toggle(String),
+    Connect(String),
+    Disconnect(String),
+    SaveSecret {
+        server_id: String,
+        key: String,
+        value: String,
+    },
+    DeleteSecret {
+        server_id: String,
+        key: String,
+    },
+    Refresh,
+    AddCustomServer {
+        id: String,
+        display_name: String,
+        description: String,
+        category: String,
+        command: String,
+        args: Vec<String>,
+        secret_keys: Vec<String>,
+        enabled: bool,
+    },
+    RemoveCustomServer(String),
+}
+
 /// State for the session browser modal
 #[derive(Debug)]
 pub struct SessionBrowserState {
@@ -403,6 +597,18 @@ pub struct AppState {
     pub skill_generated_accept_pending: Option<GeneratedSkillDraft>,
     pub skill_reload_pending: bool,
     pub skill_off_pending: bool,
+
+    // ── MCP ─────────────────────────────────────────────────────────────
+    /// Shared MCP manager handle (populated post-boot from run_tui).
+    pub mcp: Option<Arc<crate::mcp::McpManager>>,
+    /// Pending MCP actions queued by the modal handler — drained in the main
+    /// loop where we have async access to the manager.
+    pub mcp_actions_pending: VecDeque<McpAction>,
+    /// Set true by the modal handler when the user closes the MCP modal.
+    pub mcp_modal_closed_flag: bool,
+    /// Background tasks (e.g. MCP connect) push status messages here; the
+    /// main loop drains it each tick and surfaces them via `push_system`.
+    pub mcp_status_msgs: Arc<tokio::sync::Mutex<VecDeque<String>>>,
 }
 
 impl AppState {
@@ -461,6 +667,10 @@ impl AppState {
             skill_generated_accept_pending: None,
             skill_reload_pending: false,
             skill_off_pending: false,
+            mcp: None,
+            mcp_actions_pending: VecDeque::new(),
+            mcp_modal_closed_flag: false,
+            mcp_status_msgs: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
         }
     }
 
@@ -1273,6 +1483,10 @@ async fn handle_slash_command(
         // ── /stats — detailed session statistics ──────────────────────────
         "/stats" => {
             cmd_stats(state, session).await;
+        }
+
+        "/mcp" => {
+            cmd_mcp(state, arg).await;
         }
 
         "/skills" => {
@@ -2580,6 +2794,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/stats",
         "/forge-graph",
         "/lsp",
+        "/mcp",
         "/multithread",
         "/team",
     ];
@@ -3125,6 +3340,61 @@ async fn cmd_forge_graph(state: &mut AppState, session: &Arc<Mutex<Session>>, te
 // /lsp — language-server status and shutdown commands
 // ---------------------------------------------------------------------------
 
+/// Persist current MCP server enabled-states to `~/.forge-osh/config.toml`.
+async fn persist_mcp_to_config(mcp: &Arc<crate::mcp::McpManager>) {
+    let entries = mcp.export_to_config().await;
+    let mut cfg = match crate::config::Config::load_raw() {
+        Ok(c) => c,
+        Err(_) => crate::config::Config::default(),
+    };
+    cfg.mcp.servers = entries;
+    let _ = cfg.save();
+}
+
+// ─── /mcp — open the MCP server manager modal ────────────────────────────
+async fn cmd_mcp(state: &mut AppState, arg: &str) {
+    let Some(mcp) = state.mcp.clone() else {
+        state.push_system("MCP not available in this session.");
+        return;
+    };
+    match arg.trim() {
+        "" | "ui" | "manage" | "manager" => {
+            let snap = mcp.snapshot().await;
+            state.modal = Some(Modal::McpManager(McpManagerState::new(snap)));
+        }
+        "list" => {
+            let snap = mcp.snapshot().await;
+            if snap.is_empty() {
+                state.push_system("No MCP servers configured.");
+                return;
+            }
+            let mut lines = vec![format!("MCP servers ({}):", snap.len())];
+            for s in &snap {
+                lines.push(format!(
+                    "  {} {:<24} {:<14} tools={}  — {}",
+                    if s.status.is_active() { "●" } else { "○" },
+                    s.id,
+                    s.status.label(),
+                    s.tool_count,
+                    s.description
+                ));
+            }
+            state.push_system(lines.join("\n"));
+        }
+        "reconnect" | "refresh" => {
+            state.push_system("Reconnecting all enabled MCP servers in background...");
+            tokio::spawn(async move {
+                mcp.connect_all_enabled().await;
+            });
+        }
+        other => {
+            state.push_system(format!(
+                "Unknown /mcp arg '{other}'. Try /mcp, /mcp list, /mcp reconnect."
+            ));
+        }
+    }
+}
+
 async fn cmd_lsp(state: &mut AppState, text: &str) {
     let arg = text.trim_start_matches("/lsp").trim();
     let Some(lsp) = state.lsp.clone() else {
@@ -3579,13 +3849,49 @@ async fn handle_clipboard_paste_text(
     config: &Config,
     tools: &Arc<ToolRegistry>,
 ) {
-    if state.modal.is_some() {
-        state.push_system("Paste ignored while a modal is open. Close the modal and paste again.");
+    let text = normalize_clipboard_text(&text);
+    if text.is_empty() {
         return;
     }
 
-    let text = normalize_clipboard_text(&text);
-    if text.is_empty() {
+    // If a modal is open, route paste into the modal rather than the chat
+    // input. Most modals are read-only navigation; only specific MCP views
+    // accept text. We handle MCP explicitly and otherwise drop the paste so
+    // its characters do not leak through the modal's key handler one-by-one
+    // (which would trigger destructive shortcuts like 'h' = back, 't' =
+    // toggle, 'n' = new server, etc.).
+    if state.modal.is_some() {
+        if let Some(Modal::McpManager(ref mut m)) = state.modal {
+            // Sanitize: strip control chars and newlines — secret values and
+            // form fields are single-line.
+            let cleaned: String = text
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect();
+            match m.view {
+                McpView::SecretInput => {
+                    m.input_buffer.push_str(&cleaned);
+                }
+                McpView::CustomForm => {
+                    if let Some(buf) = m.custom_form.focused_buffer() {
+                        buf.push_str(&cleaned);
+                    } else {
+                        m.custom_form.error =
+                            Some("Focused field does not accept text. Tab to a text field first.".into());
+                    }
+                }
+                McpView::List | McpView::Detail => {
+                    m.message = Some(
+                        "Paste ignored. Press Enter on a secret row (Detail view) to open the input field, then paste."
+                            .into(),
+                    );
+                }
+            }
+        } else {
+            state.push_system(
+                "Paste ignored while a modal is open. Close the modal and paste again.",
+            );
+        }
         return;
     }
 
@@ -3669,6 +3975,7 @@ fn append_fallback_paste_event(
 fn collect_fallback_paste_burst(
     first_key: KeyEvent,
     deferred_events: &mut VecDeque<Event>,
+    modal_open: bool,
 ) -> anyhow::Result<(KeyEvent, Option<String>)> {
     const FALLBACK_PASTE_INITIAL_GRACE: Duration = Duration::from_millis(12);
     const FALLBACK_PASTE_QUIET_GAP: Duration = Duration::from_millis(250);
@@ -3695,7 +4002,19 @@ fn collect_fallback_paste_burst(
         );
     }
 
-    if fragment_count == 1 && event::poll(FALLBACK_PASTE_INITIAL_GRACE)? {
+    // When a modal is open we use a substantially longer initial grace.
+    // Windows ConPTY can deliver bracketed-paste characters as individual
+    // KeyEvents spaced 20–60 ms apart — well beyond 12 ms — so without this
+    // each pasted char would be returned as a single-key event and routed
+    // through the modal's char handler, where letters like `h`/`n`/`t`/`c`
+    // trigger destructive shortcuts (back, new-server, toggle, connect).
+    let initial_grace = if modal_open {
+        Duration::from_millis(120)
+    } else {
+        FALLBACK_PASTE_INITIAL_GRACE
+    };
+
+    if fragment_count == 1 && event::poll(initial_grace)? {
         let next = event::read()?;
         append_fallback_paste_event(
             next,
@@ -3719,11 +4038,52 @@ fn collect_fallback_paste_burst(
         }
     }
 
+    // For modal-open case, even after we've seen 2+ chars, paste characters
+    // can still be slowly trickling in. Keep polling with a quiet-gap window
+    // until the burst truly ends, BEFORE the burst-vs-typing decision below.
+    if modal_open && fragment_count >= 2 {
+        let started = Instant::now();
+        while started.elapsed() < FALLBACK_PASTE_MAX_COLLECT
+            && event::poll(Duration::from_millis(120))?
+        {
+            let next = event::read()?;
+            append_fallback_paste_event(
+                next,
+                &mut collected_events,
+                &mut text,
+                &mut fragment_count,
+                &mut saw_explicit_paste,
+                deferred_events,
+            );
+
+            while event::poll(Duration::ZERO)? {
+                let next = event::read()?;
+                append_fallback_paste_event(
+                    next,
+                    &mut collected_events,
+                    &mut text,
+                    &mut fragment_count,
+                    &mut saw_explicit_paste,
+                    deferred_events,
+                );
+            }
+        }
+    }
+
     if fragment_count == 1 {
         return Ok((first, None));
     }
 
-    if !saw_explicit_paste && !should_treat_key_burst_as_paste(&text, fragment_count) {
+    // When a modal is open, treat ANY 2+ burst as paste. The modal's key
+    // handler binds many letter keys to destructive shortcuts (e.g. in the
+    // MCP manager: `h`=back, `t`=toggle, `n`=new server, `c`=connect), so
+    // letting individual chars through would let a pasted token like a
+    // GitHub PAT trigger them mid-paste. The chat-input heuristic
+    // (`>= 80 chars` / newlines) is too lax for that case.
+    let burst_is_paste = saw_explicit_paste
+        || should_treat_key_burst_as_paste(&text, fragment_count)
+        || (modal_open && fragment_count >= 2);
+    if !burst_is_paste {
         for ev in collected_events.into_iter().skip(1) {
             deferred_events.push_back(ev);
         }
@@ -4211,6 +4571,7 @@ pub async fn run_tui(
     shared_graph: SharedGraph,
     lsp: SharedLspManager,
     skill_registry: crate::skills::SharedSkillRegistry,
+    mcp: Arc<crate::mcp::McpManager>,
 ) -> anyhow::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
@@ -4389,6 +4750,7 @@ pub async fn run_tui(
     state.file_cache = Some(file_cache.clone());
     state.skill_registry = Some(skill_registry.clone());
     state.lsp = Some(lsp.clone());
+    state.mcp = Some(mcp.clone());
     // Seed the status-bar label from the session's persisted scope (in case
     // the user resumed a session that was mid-skill).
     {
@@ -4730,6 +5092,197 @@ pub async fn run_tui(
                 scroll: 0,
                 response_tx: req.response_tx,
             });
+        }
+
+        // ---- Drain async MCP status messages (e.g. background connect results) ----
+        let drained_msgs: Vec<String> = {
+            let mut q = state.mcp_status_msgs.lock().await;
+            q.drain(..).collect()
+        };
+        for msg in drained_msgs {
+            state.push_system(msg);
+        }
+
+        // ---- Process pending MCP actions ----
+        while let Some(action) = state.mcp_actions_pending.pop_front() {
+            if let Some(mcp) = state.mcp.clone() {
+                match action {
+                    McpAction::Toggle(id) => {
+                        // Inverse of current enabled state.
+                        let snap = mcp.snapshot().await;
+                        let enable_now = snap
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| !s.enabled)
+                            .unwrap_or(true);
+                        let _ = mcp.set_enabled(&id, enable_now).await;
+                        if enable_now {
+                            let mcp2 = mcp.clone();
+                            let id2 = id.clone();
+                            let status_msgs = state.mcp_status_msgs.clone();
+                            tokio::spawn(async move {
+                                let msg = match mcp2.connect(&id2).await {
+                                    Ok(n) => format!(
+                                        "MCP: '{id2}' connected — {n} tool(s) registered."
+                                    ),
+                                    Err(e) => format!("MCP: '{id2}' connect failed: {e}"),
+                                };
+                                status_msgs.lock().await.push_back(msg);
+                            });
+                            state.push_system(format!(
+                                "MCP: enabled '{id}' — connecting in background."
+                            ));
+                        } else {
+                            state.push_system(format!("MCP: disabled '{id}'."));
+                        }
+                        persist_mcp_to_config(&mcp).await;
+                    }
+                    McpAction::Connect(id) => {
+                        // Connecting a disabled server is almost always
+                        // accidental: the connection succeeds but the snapshot
+                        // still reports `disabled`, so users never see it
+                        // active. Auto-enable here so 'c' is always sufficient.
+                        let was_enabled = {
+                            let snap = mcp.snapshot().await;
+                            snap.iter().any(|s| s.id == id && s.enabled)
+                        };
+                        if !was_enabled {
+                            let _ = mcp.set_enabled(&id, true).await;
+                            persist_mcp_to_config(&mcp).await;
+                        }
+                        let mcp2 = mcp.clone();
+                        let id2 = id.clone();
+                        let status_msgs = state.mcp_status_msgs.clone();
+                        tokio::spawn(async move {
+                            let msg = match mcp2.connect(&id2).await {
+                                Ok(n) => format!(
+                                    "MCP: '{id2}' connected — {n} tool(s) registered."
+                                ),
+                                Err(e) => format!("MCP: '{id2}' connect failed: {e}"),
+                            };
+                            status_msgs.lock().await.push_back(msg);
+                        });
+                        state.push_system(format!(
+                            "MCP: connecting '{id}' in background…"
+                        ));
+                    }
+                    McpAction::Disconnect(id) => match mcp.disconnect(&id).await {
+                        Ok(_) => state.push_system(format!("MCP: '{id}' disconnected.")),
+                        Err(e) => state.push_system(format!("MCP disconnect failed: {e}")),
+                    },
+                    McpAction::SaveSecret {
+                        server_id,
+                        key,
+                        value,
+                    } => match mcp.save_secret(&server_id, &key, &value).await {
+                        Ok(_) => state.push_system(format!(
+                            "MCP: saved secret '{key}' for '{server_id}'."
+                        )),
+                        Err(e) => state.push_system(format!("MCP secret save failed: {e}")),
+                    },
+                    McpAction::DeleteSecret { server_id, key } => {
+                        match mcp.delete_secret(&server_id, &key).await {
+                            Ok(_) => state.push_system(format!(
+                                "MCP: cleared stored secret '{key}' for '{server_id}'."
+                            )),
+                            Err(e) => state.push_system(format!("MCP secret delete failed: {e}")),
+                        }
+                    }
+                    McpAction::Refresh => {
+                        let mcp2 = mcp.clone();
+                        tokio::spawn(async move {
+                            mcp2.connect_all_enabled().await;
+                        });
+                        state.push_system("MCP: refreshing all enabled connections.");
+                    }
+                    McpAction::AddCustomServer {
+                        id,
+                        display_name,
+                        description,
+                        category,
+                        command,
+                        args,
+                        secret_keys,
+                        enabled,
+                    } => {
+                        match mcp
+                            .add_custom_server(
+                                &id,
+                                &display_name,
+                                &description,
+                                &category,
+                                &command,
+                                args,
+                                secret_keys,
+                                enabled,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                state.push_system(format!(
+                                    "MCP: added custom server '{id}'."
+                                ));
+                                persist_mcp_to_config(&mcp).await;
+                                if enabled {
+                                    let mcp2 = mcp.clone();
+                                    let id2 = id.clone();
+                                    tokio::spawn(async move {
+                                        let _ = mcp2.connect(&id2).await;
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                state.push_system(format!("MCP add failed: {e}"));
+                            }
+                        }
+                    }
+                    McpAction::RemoveCustomServer(id) => {
+                        match mcp.remove_custom_server(&id).await {
+                            Ok(_) => {
+                                state.push_system(format!(
+                                    "MCP: removed custom server '{id}'."
+                                ));
+                                persist_mcp_to_config(&mcp).await;
+                            }
+                            Err(e) => state.push_system(format!("MCP remove failed: {e}")),
+                        }
+                    }
+                }
+                // Refresh modal snapshot if open.
+                if let Some(Modal::McpManager(_)) = &state.modal {
+                    let new_snap = mcp.snapshot().await;
+                    if let Some(Modal::McpManager(ms)) = state.modal.as_mut() {
+                        // Preserve current selection by id if possible.
+                        let prev_id = ms.selected_server().map(|s| s.id.clone());
+                        ms.servers = new_snap;
+                        if let Some(pid) = prev_id {
+                            if let Some(idx) = ms.servers.iter().position(|s| s.id == pid) {
+                                ms.selected = idx;
+                            }
+                        }
+                        if ms.selected >= ms.servers.len() {
+                            ms.selected = ms.servers.len().saturating_sub(1);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Periodically refresh the live MCP modal snapshot so status
+        // transitions (Connecting → Active / Error) appear without a keypress.
+        if let Some(Modal::McpManager(_)) = &state.modal {
+            if let Some(mcp) = state.mcp.clone() {
+                let new_snap = mcp.snapshot().await;
+                if let Some(Modal::McpManager(ms)) = state.modal.as_mut() {
+                    let prev_id = ms.selected_server().map(|s| s.id.clone());
+                    ms.servers = new_snap;
+                    if let Some(pid) = prev_id {
+                        if let Some(idx) = ms.servers.iter().position(|s| s.id == pid) {
+                            ms.selected = idx;
+                        }
+                    }
+                }
+            }
         }
 
         // ---- Process pending key operations ----
@@ -5107,12 +5660,14 @@ pub async fn run_tui(
                 };
 
                 if let Event::Key(first_key) = ev.clone() {
-                    if state.modal.is_none()
-                        && !state.vim_normal_mode
+                    if !state.vim_normal_mode
                         && key_event_to_paste_fragment(&first_key).is_some()
                     {
-                        let (key, fallback_paste) =
-                            collect_fallback_paste_burst(first_key, &mut deferred_events)?;
+                        let (key, fallback_paste) = collect_fallback_paste_burst(
+                            first_key,
+                            &mut deferred_events,
+                            state.modal.is_some(),
+                        )?;
                         if let Some(text) = fallback_paste {
                             handle_clipboard_paste_text(
                                 &mut state,
@@ -6201,6 +6756,262 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             }
         }
 
+        Some(Modal::McpManager(mut m)) => {
+            handle_mcp_modal_key(state, &mut m, key);
+            // Handler decides whether to keep or close the modal.
+            if !state.mcp_modal_closed_flag {
+                state.modal = Some(Modal::McpManager(m));
+            } else {
+                state.mcp_modal_closed_flag = false;
+            }
+        }
+
         None => {}
+    }
+}
+
+fn handle_mcp_modal_key(
+    state: &mut AppState,
+    m: &mut McpManagerState,
+    key: crossterm::event::KeyEvent,
+) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let is_enter = key.code == KeyCode::Enter
+        || (key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL));
+
+    match m.view {
+        McpView::List => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    state.mcp_modal_closed_flag = true;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    m.move_up();
+                    if (m.selected as u16) < m.list_scroll {
+                        m.list_scroll = m.selected as u16;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    m.move_down();
+                    // visible_height is computed by the renderer; allow generous scroll
+                    let bottom = m.list_scroll.saturating_add(15);
+                    if (m.selected as u16) >= bottom {
+                        m.list_scroll = m.list_scroll.saturating_add(1);
+                    }
+                }
+                KeyCode::PageUp => {
+                    m.list_scroll = m.list_scroll.saturating_sub(8);
+                    m.selected = m.selected.saturating_sub(8);
+                }
+                KeyCode::PageDown => {
+                    m.list_scroll = m.list_scroll.saturating_add(8);
+                    m.selected = (m.selected + 8).min(m.servers.len().saturating_sub(1));
+                }
+                KeyCode::Home => {
+                    m.selected = 0;
+                    m.list_scroll = 0;
+                }
+                KeyCode::End => {
+                    m.selected = m.servers.len().saturating_sub(1);
+                }
+                KeyCode::Char(' ') | KeyCode::Char('t') => {
+                    if let Some(s) = m.selected_server() {
+                        let id = s.id.clone();
+                        state.mcp_actions_pending.push_back(McpAction::Toggle(id));
+                    }
+                }
+                KeyCode::Char('c') => {
+                    if let Some(s) = m.selected_server() {
+                        let id = s.id.clone();
+                        state.mcp_actions_pending.push_back(McpAction::Connect(id));
+                    }
+                }
+                KeyCode::Char('x') => {
+                    if let Some(s) = m.selected_server() {
+                        let id = s.id.clone();
+                        state
+                            .mcp_actions_pending
+                            .push_back(McpAction::Disconnect(id));
+                    }
+                }
+                KeyCode::Char('r') => {
+                    state.mcp_actions_pending.push_back(McpAction::Refresh);
+                }
+                KeyCode::Char('n') => {
+                    m.custom_form = McpCustomForm::new();
+                    m.view = McpView::CustomForm;
+                }
+                KeyCode::Char('D') => {
+                    // Capital-D removes a custom server (not catalog).
+                    if let Some(s) = m.selected_server() {
+                        if crate::mcp::catalog::lookup(&s.id).is_none() {
+                            let id = s.id.clone();
+                            state
+                                .mcp_actions_pending
+                                .push_back(McpAction::RemoveCustomServer(id));
+                        } else {
+                            m.message = Some(
+                                "Built-in entries cannot be removed. Toggle to disable instead."
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    if m.selected_server().is_some() {
+                        m.view = McpView::Detail;
+                        m.detail_scroll = 0;
+                        m.secret_selected = 0;
+                    }
+                }
+                KeyCode::Enter => {
+                    if m.selected_server().is_some() {
+                        m.view = McpView::Detail;
+                        m.detail_scroll = 0;
+                        m.secret_selected = 0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        McpView::Detail => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('h') => {
+                m.view = McpView::List;
+            }
+            KeyCode::Up | KeyCode::Char('k') => m.detail_secret_up(),
+            KeyCode::Down | KeyCode::Char('j') => m.detail_secret_down(),
+            KeyCode::Char(' ') | KeyCode::Char('t') => {
+                if let Some(s) = m.selected_server() {
+                    let id = s.id.clone();
+                    state.mcp_actions_pending.push_back(McpAction::Toggle(id));
+                }
+            }
+            KeyCode::Char('c') => {
+                if let Some(s) = m.selected_server() {
+                    let id = s.id.clone();
+                    state.mcp_actions_pending.push_back(McpAction::Connect(id));
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(s) = m.selected_server() {
+                    let id = s.id.clone();
+                    state
+                        .mcp_actions_pending
+                        .push_back(McpAction::Disconnect(id));
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if let Some(s) = m.selected_server() {
+                    if let Some(sec) = s.required_secrets.get(m.secret_selected) {
+                        state.mcp_actions_pending.push_back(McpAction::DeleteSecret {
+                            server_id: s.id.clone(),
+                            key: sec.key.clone(),
+                        });
+                    }
+                }
+            }
+            KeyCode::Char('e') | KeyCode::Enter => {
+                if let Some(s) = m.selected_server() {
+                    if let Some(sec) = s.required_secrets.get(m.secret_selected) {
+                        m.editing_secret_key = Some(sec.key.clone());
+                        m.input_buffer.clear();
+                        m.view = McpView::SecretInput;
+                    } else {
+                        m.message = Some("This server has no secrets to set.".to_string());
+                    }
+                }
+            }
+            _ => {}
+        },
+        McpView::CustomForm => {
+            let is_save = key.code == KeyCode::Char('s')
+                && key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Esc => {
+                    m.view = McpView::List;
+                }
+                _ if is_save => {
+                    let f = &m.custom_form;
+                    if f.id.trim().is_empty() {
+                        m.custom_form.error = Some("ID is required.".into());
+                    } else if f.command.trim().is_empty() {
+                        m.custom_form.error = Some("Command is required.".into());
+                    } else {
+                        let action = McpAction::AddCustomServer {
+                            id: f.id.trim().to_string(),
+                            display_name: f.display_name.clone(),
+                            description: f.description.clone(),
+                            category: f.category.clone(),
+                            command: f.command.trim().to_string(),
+                            args: f.split_args(),
+                            secret_keys: f.split_secret_keys(),
+                            enabled: f.enabled,
+                        };
+                        state.mcp_actions_pending.push_back(action);
+                        m.custom_form = McpCustomForm::new();
+                        m.view = McpView::List;
+                    }
+                }
+                KeyCode::Tab | KeyCode::Down => m.custom_form.focus_next(),
+                KeyCode::BackTab | KeyCode::Up => m.custom_form.focus_prev(),
+                KeyCode::Enter => {
+                    if m.custom_form.focused == MCP_CUSTOM_FIELD_COUNT - 1 {
+                        // Toggle "enabled" on Enter when focused.
+                        m.custom_form.enabled = !m.custom_form.enabled;
+                    } else {
+                        m.custom_form.focus_next();
+                    }
+                }
+                KeyCode::Char(' ') if m.custom_form.focused == MCP_CUSTOM_FIELD_COUNT - 1 => {
+                    m.custom_form.enabled = !m.custom_form.enabled;
+                }
+                KeyCode::Backspace => {
+                    if let Some(buf) = m.custom_form.focused_buffer() {
+                        buf.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        if let Some(buf) = m.custom_form.focused_buffer() {
+                            buf.push(c);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        McpView::SecretInput => match key.code {
+            KeyCode::Esc => {
+                m.view = McpView::Detail;
+                m.input_buffer.clear();
+                m.editing_secret_key = None;
+            }
+            _ if is_enter => {
+                if let (Some(s), Some(key_name)) = (m.selected_server(), m.editing_secret_key.clone())
+                {
+                    if !m.input_buffer.is_empty() {
+                        state.mcp_actions_pending.push_back(McpAction::SaveSecret {
+                            server_id: s.id.clone(),
+                            key: key_name,
+                            value: m.input_buffer.clone(),
+                        });
+                    }
+                }
+                m.input_buffer.clear();
+                m.editing_secret_key = None;
+                m.view = McpView::Detail;
+            }
+            KeyCode::Backspace => {
+                m.input_buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    m.input_buffer.push(c);
+                }
+            }
+            _ => {}
+        },
     }
 }

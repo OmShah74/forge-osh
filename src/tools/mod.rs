@@ -14,7 +14,9 @@ pub mod web;
 pub mod worktree;
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::types::{PermissionLevel, ToolContext, ToolDefinition, ToolOutput};
@@ -45,9 +47,15 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolOutput;
 }
 
-/// Registry of all available tools
+/// Registry of all available tools.
+///
+/// Internally backed by a `parking_lot::RwLock` so tools can be added/removed
+/// dynamically (used by the MCP manager when an MCP server connects/disconnects)
+/// without rebuilding the whole agent. Each entry is an `Arc<dyn Tool>` so
+/// callers receive clones, never borrowed references — which keeps the
+/// existing `Arc<ToolRegistry>` shared-ownership model intact.
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl Default for ToolRegistry {
@@ -59,7 +67,7 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: RwLock::new(HashMap::new()),
         }
     }
 
@@ -71,7 +79,7 @@ impl ToolRegistry {
     /// Register all built-in tools after applying config enable/disable lists
     /// and tool-specific settings.
     pub fn with_config(config: &Config) -> Self {
-        let mut registry = Self::new();
+        let registry = Self::new();
 
         // ── File system tools ──────────────────────────────────────────────
         registry.register_enabled(config, Box::new(fs::ReadFileTool));
@@ -151,23 +159,30 @@ impl ToolRegistry {
         registry
     }
 
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+    pub fn register(&self, tool: Box<dyn Tool>) {
+        let arc: Arc<dyn Tool> = Arc::from(tool);
+        self.tools.write().insert(arc.name().to_string(), arc);
     }
 
-    pub fn register_enabled(&mut self, config: &Config, tool: Box<dyn Tool>) {
+    pub fn register_enabled(&self, config: &Config, tool: Box<dyn Tool>) {
         if config.is_tool_enabled(tool.name()) {
             self.register(tool);
         }
     }
 
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name).map(|t| t.as_ref())
+    /// Remove a tool by name. Used by the MCP manager when a server disconnects.
+    pub fn unregister(&self, name: &str) -> bool {
+        self.tools.write().remove(name).is_some()
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.read().get(name).cloned()
     }
 
     pub fn all_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
+            .read()
             .values()
             .map(|tool| ToolDefinition {
                 name: tool.name().to_string(),
@@ -181,7 +196,7 @@ impl ToolRegistry {
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        let mut names: Vec<String> = self.tools.read().keys().cloned().collect();
         names.sort();
         names
     }

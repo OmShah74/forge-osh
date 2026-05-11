@@ -21,3 +21,4 @@ todo.txt
 /hooks.json
 /permissions.json
 test_errors.log
+target-build/

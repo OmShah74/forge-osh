@@ -12,7 +12,8 @@ use ratatui::{
 use super::themes::Theme;
 use super::{
     AppState, DetailViewerState, GeneratedSkillPreviewState, HelpState, KeyManagerState,
-    MessageRole, Modal, SessionBrowserState, SkillBrowserState, OSH_SPLASH_LINES,
+    McpCustomForm, McpManagerState, McpView, MessageRole, Modal, SessionBrowserState,
+    SkillBrowserState, MCP_CUSTOM_FIELD_COUNT, OSH_SPLASH_LINES,
 };
 
 /// Render the entire TUI
@@ -98,8 +99,423 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Modal::SessionBrowser(browser) => {
                 render_session_browser(frame, browser, &theme);
             }
+            Modal::McpManager(m) => {
+                render_mcp_manager(frame, m, &theme);
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP manager modal
+// ---------------------------------------------------------------------------
+
+fn render_mcp_manager(frame: &mut Frame, m: &McpManagerState, theme: &Theme) {
+    let area = centered_rect(82, 78, frame.area());
+    frame.render_widget(Clear, area);
+
+    match m.view {
+        McpView::List => render_mcp_list(frame, area, m, theme),
+        McpView::Detail => render_mcp_detail(frame, area, m, theme),
+        McpView::SecretInput => render_mcp_secret_input(frame, area, m, theme),
+        McpView::CustomForm => render_mcp_custom_form(frame, area, &m.custom_form, theme),
+    }
+}
+
+fn render_mcp_custom_form(frame: &mut Frame, area: Rect, f: &McpCustomForm, theme: &Theme) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.warning_fg))
+        .title(
+            " Add Custom MCP Server   Tab/↑↓ next field   Ctrl+S save   Esc cancel ",
+        );
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),                 // intro
+            Constraint::Min(MCP_CUSTOM_FIELD_COUNT as u16 * 2 + 2), // fields
+            Constraint::Length(3),                 // footer
+        ])
+        .split(inner);
+
+    let intro = Paragraph::new(
+        "Define a server that's not in the built-in catalog. The command runs as a child process; \
+         each named secret is sourced from the encrypted KeyStore (or env var) and passed as an env \
+         var to the child. After saving, the server appears in the list and connects in the background.",
+    )
+    .style(Style::default().fg(theme.muted_fg))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(intro, chunks[0]);
+
+    // Field list — two lines per field: label, value box
+    let field_area = chunks[1];
+    let mut y = field_area.y;
+    for i in 0..MCP_CUSTOM_FIELD_COUNT {
+        let label = McpCustomForm::label_for(i);
+        let focused = i == f.focused;
+        let label_style = if focused {
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted_fg)
+        };
+        let label_widget = Paragraph::new(label).style(label_style);
+        let label_rect = Rect {
+            x: field_area.x + 1,
+            y,
+            width: field_area.width.saturating_sub(2),
+            height: 1,
+        };
+        frame.render_widget(label_widget, label_rect);
+
+        let value = match i {
+            0 => f.id.clone(),
+            1 => f.display_name.clone(),
+            2 => f.description.clone(),
+            3 => f.category.clone(),
+            4 => f.command.clone(),
+            5 => f.args.clone(),
+            6 => f.secret_keys.clone(),
+            7 => format!("[{}] enabled (Space to toggle)", if f.enabled { "x" } else { " " }),
+            _ => String::new(),
+        };
+        let placeholder = match i {
+            0 => "e.g. mycorp-internal",
+            1 => "e.g. MyCorp Internal Tools",
+            2 => "Short description shown in the list",
+            3 => "e.g. Cloud, Custom",
+            4 => "e.g. npx",
+            5 => "e.g. -y @mycorp/mcp-server",
+            6 => "e.g. MYCORP_TOKEN, MYCORP_REGION",
+            _ => "",
+        };
+        let display = if i != 7 && value.is_empty() {
+            format!("({placeholder})")
+        } else {
+            value
+        };
+        let display_style = if focused {
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        let cursor = if focused && i != 7 { "▌" } else { " " };
+        let value_widget = Paragraph::new(format!(" {} {}", display, cursor))
+            .style(display_style)
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT)
+                    .border_style(if focused {
+                        Style::default().fg(theme.warning_fg)
+                    } else {
+                        Style::default().fg(theme.border_fg)
+                    }),
+            );
+        let value_rect = Rect {
+            x: field_area.x + 2,
+            y: y + 1,
+            width: field_area.width.saturating_sub(3),
+            height: 1,
+        };
+        frame.render_widget(value_widget, value_rect);
+        y = y.saturating_add(2);
+        if y >= field_area.y + field_area.height {
+            break;
+        }
+    }
+
+    let footer_text = if let Some(err) = &f.error {
+        format!("Error: {err}\n\n[Ctrl+S] Save and connect    [Esc] Cancel")
+    } else {
+        "Tip: command + args are split on spaces. Each secret is stored encrypted-at-rest under \
+         mcp:<id>:<KEY> and exposed to the server process as env. \n[Ctrl+S] Save and connect    [Esc] Cancel"
+            .to_string()
+    };
+    let footer = Paragraph::new(footer_text)
+        .style(if f.error.is_some() {
+            Style::default().fg(theme.error_fg)
+        } else {
+            Style::default().fg(theme.muted_fg)
+        })
+        .wrap(Wrap { trim: false });
+    frame.render_widget(footer, chunks[2]);
+}
+
+fn render_mcp_list(frame: &mut Frame, area: Rect, m: &McpManagerState, theme: &Theme) {
+    let title = " MCP Servers   ↑↓ nav   Space toggle   Enter detail   c connect   x disconnect   n new   D delete-custom   r refresh   q close ";
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_fg))
+        .title(title);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    if m.servers.is_empty() {
+        let p = Paragraph::new("No MCP servers in catalog. Add one in config.toml under [mcp].")
+            .style(Style::default().fg(theme.muted_fg));
+        frame.render_widget(p, inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = m
+        .servers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let style = if i == m.selected {
+                Style::default()
+                    .fg(theme.fg)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            let icon = if !s.enabled {
+                "○"
+            } else if s.status.is_active() {
+                "●"
+            } else if matches!(s.status, crate::mcp::ServerStatus::Connecting) {
+                "◐"
+            } else if matches!(s.status, crate::mcp::ServerStatus::Error(_)) {
+                "✗"
+            } else {
+                "·"
+            };
+            let secrets_summary = secret_summary(&s.required_secrets);
+            let line = format!(
+                " {icon} {:<26} [{:<15}] tools={:<3} secrets={:<8}  {}",
+                truncate_to(&s.display_name, 26),
+                truncate_to(&s.status.label(), 15),
+                s.tool_count,
+                secrets_summary,
+                truncate_to(&s.description, 100),
+            );
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let scroll = m.list_scroll as usize;
+    let visible = inner.height.saturating_sub(0) as usize;
+    let end = (scroll + visible).min(items.len());
+    let slice: Vec<ListItem> = items[scroll.min(items.len())..end].to_vec();
+    let list = List::new(slice);
+    frame.render_widget(list, inner);
+}
+
+fn secret_summary(secs: &[crate::mcp::SecretStatus]) -> String {
+    if secs.is_empty() {
+        return "none".into();
+    }
+    let total = secs.len();
+    let present = secs.iter().filter(|s| s.present).count();
+    let req_missing = secs
+        .iter()
+        .filter(|s| s.required && !s.present)
+        .count();
+    if req_missing > 0 {
+        format!("{}/{} need!", present, total)
+    } else {
+        format!("{}/{}", present, total)
+    }
+}
+
+fn truncate_to(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(n.saturating_sub(1)).collect();
+        format!("{}…", truncated)
+    }
+}
+
+fn render_mcp_detail(frame: &mut Frame, area: Rect, m: &McpManagerState, theme: &Theme) {
+    let s = match m.selected_server() {
+        Some(s) => s,
+        None => {
+            let p = Paragraph::new("(no server selected)").style(Style::default().fg(theme.muted_fg));
+            frame.render_widget(p, area);
+            return;
+        }
+    };
+    let title = format!(
+        " {}   {} {}   ←/h back   ↑↓ secret   e/Enter set   d delete   Space toggle   c connect   x disconnect ",
+        s.display_name,
+        if s.enabled { "[enabled]" } else { "[disabled]" },
+        s.status.label()
+    );
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_fg))
+        .title(title);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    // Layout: top description / status, middle secrets list, bottom stderr.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(4),
+            Constraint::Length(7),
+        ])
+        .split(inner);
+
+    let mut header_lines: Vec<Line> = Vec::new();
+    header_lines.push(Line::from(vec![
+        Span::styled("Server ID:  ", Style::default().fg(theme.muted_fg)),
+        Span::styled(&s.id, Style::default().fg(theme.fg)),
+    ]));
+    header_lines.push(Line::from(vec![
+        Span::styled("Category:   ", Style::default().fg(theme.muted_fg)),
+        Span::styled(&s.category, Style::default().fg(theme.fg)),
+    ]));
+    header_lines.push(Line::from(vec![
+        Span::styled("Tools:      ", Style::default().fg(theme.muted_fg)),
+        Span::styled(s.tool_count.to_string(), Style::default().fg(theme.fg)),
+        Span::raw("    "),
+        Span::styled("Version: ", Style::default().fg(theme.muted_fg)),
+        Span::styled(
+            if s.server_version.is_empty() {
+                "—".into()
+            } else {
+                s.server_version.clone()
+            },
+            Style::default().fg(theme.fg),
+        ),
+    ]));
+    header_lines.push(Line::from(Span::styled(
+        truncate_to(&s.description, 200),
+        Style::default().fg(theme.fg),
+    )));
+    if let Some(err) = &s.last_error {
+        header_lines.push(Line::from(vec![
+            Span::styled("Error:      ", Style::default().fg(theme.error_fg)),
+            Span::styled(truncate_to(err, 200), Style::default().fg(theme.error_fg)),
+        ]));
+    }
+    let header = Paragraph::new(header_lines).wrap(Wrap { trim: false });
+    frame.render_widget(header, chunks[0]);
+
+    // Secrets list.
+    if s.required_secrets.is_empty() {
+        let p = Paragraph::new("(no secrets required for this server)")
+            .style(Style::default().fg(theme.muted_fg));
+        frame.render_widget(p, chunks[1]);
+    } else {
+        let items: Vec<ListItem> = s
+            .required_secrets
+            .iter()
+            .enumerate()
+            .map(|(i, sec)| {
+                let style = if i == m.secret_selected {
+                    Style::default()
+                        .fg(theme.fg)
+                        .bg(theme.highlight_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.fg)
+                };
+                let icon = if sec.present { "●" } else if sec.required { "✗" } else { "○" };
+                let src = match sec.source {
+                    crate::mcp::SecretSource::Stored => "saved",
+                    crate::mcp::SecretSource::Env => "env var",
+                    crate::mcp::SecretSource::None => {
+                        if sec.required {
+                            "MISSING (required)"
+                        } else {
+                            "not set"
+                        }
+                    }
+                };
+                let line = format!(
+                    " {icon} {:<32} [{:<20}]  {}",
+                    truncate_to(&sec.label, 32),
+                    src,
+                    truncate_to(&sec.help, 80)
+                );
+                ListItem::new(line).style(style)
+            })
+            .collect();
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .title(" Secrets — Enter/e to set, d to clear stored value "),
+        );
+        frame.render_widget(list, chunks[1]);
+    }
+
+    // Stderr.
+    let stderr_block = Block::default()
+        .borders(Borders::TOP)
+        .title(" Recent stderr (last 5 lines) ");
+    let stderr_text = if s.recent_stderr.is_empty() {
+        "(no stderr captured)".to_string()
+    } else {
+        s.recent_stderr.join("\n")
+    };
+    let p = Paragraph::new(stderr_text)
+        .style(Style::default().fg(theme.muted_fg))
+        .block(stderr_block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(p, chunks[2]);
+}
+
+fn render_mcp_secret_input(frame: &mut Frame, area: Rect, m: &McpManagerState, theme: &Theme) {
+    let s = match m.selected_server() {
+        Some(s) => s,
+        None => return,
+    };
+    let key = m.editing_secret_key.as_deref().unwrap_or("");
+    let label = s
+        .required_secrets
+        .iter()
+        .find(|x| x.key == key)
+        .map(|x| x.label.clone())
+        .unwrap_or_else(|| key.to_string());
+    let help = s
+        .required_secrets
+        .iter()
+        .find(|x| x.key == key)
+        .map(|x| x.help.clone())
+        .unwrap_or_default();
+
+    let masked = if m.input_buffer.is_empty() {
+        "(type the secret here — input is masked)".to_string()
+    } else {
+        let len = m.input_buffer.len();
+        if len <= 8 {
+            "*".repeat(len)
+        } else {
+            format!("{}…{}", "*".repeat(4), "*".repeat(4))
+        }
+    };
+    let body = format!(
+        "Server:  {} ({})\n\
+         Secret:  {}\n\
+         Help:    {}\n\
+         \n\
+         Value:   {}\n\
+         \n\
+         Stored encrypted-at-rest in ~/.forge-osh/keys.json (same as provider API keys).\n\
+         \n\
+         [Enter] Save    [Esc] Cancel",
+        s.display_name, s.id, label, help, masked
+    );
+    let dialog = Paragraph::new(body)
+        .style(Style::default().fg(theme.fg))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.warning_fg))
+                .title(" Set MCP Secret "),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(dialog, area);
 }
 
 // ---------------------------------------------------------------------------

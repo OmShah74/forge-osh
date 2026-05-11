@@ -670,6 +670,132 @@ impl AgentLoop {
                     None
                 };
 
+                // ── MCP context block ────────────────────────────────────
+                // When MCP servers are connected, the model gets tools like
+                // `mcp__github__search_repositories`. Without context the
+                // model treats them as generic API endpoints — it asks the
+                // user for their GitHub username, then calls
+                // search_repositories with `user:USERNAME` (literal
+                // placeholder), and GitHub returns 422.
+                //
+                // Each MCP server is connected with the user's own
+                // credentials (PAT, OAuth token, API key). The model needs
+                // to know:
+                //   1. these tools represent the user's authenticated
+                //      identity — "my repos" should map to a list-mine tool
+                //   2. prefer authenticated-user / "list_*_for_authenticated_user"
+                //      tools over generic search when the user refers to
+                //      their own data
+                //   3. never substitute literal placeholders like USERNAME,
+                //      EMAIL, ME — fail the call instead and ask the user.
+                if let Some(defs) = &tools {
+                    let mcp_servers: std::collections::BTreeMap<
+                        String,
+                        Vec<&crate::types::ToolDefinition>,
+                    > = defs
+                        .iter()
+                        .filter_map(|d| {
+                            d.name.strip_prefix("mcp__").and_then(|rest| {
+                                rest.split_once("__").map(|(server, _)| (server, d))
+                            })
+                        })
+                        .fold(
+                            std::collections::BTreeMap::new(),
+                            |mut acc, (server, d)| {
+                                acc.entry(server.to_string()).or_default().push(d);
+                                acc
+                            },
+                        );
+                    if !mcp_servers.is_empty() {
+                        system.push_str(
+                            "\n\n## MCP Servers (active, authenticated)\n\
+                             The following Model Context Protocol servers are \
+                             currently connected. Each one runs as a child \
+                             process configured with THE USER's own \
+                             credentials (personal access token, OAuth \
+                             token, API key, etc.). Every call to one of its \
+                             tools acts on behalf of the user's account on \
+                             that service — the server already knows who \
+                             the user is from the credential.\n\n\
+                             ### Rule 1: first-person words refer to the \
+                             authenticated identity, never to literal field \
+                             values\n\
+                             When the user writes \"my\", \"me\", \"mine\", \
+                             \"I\", \"myself\", \"my account\", they are \
+                             referring to the credential-holder of the \
+                             relevant MCP server. These words are NEVER \
+                             usernames, owners, account ids, email \
+                             addresses, or any other field value. You must \
+                             not copy them into tool arguments.\n\n\
+                             ### Rule 2: prefer the no-argument \
+                             authenticated-user tool\n\
+                             For every MCP server that exposes user-owned \
+                             data, there is almost always a tool that lists \
+                             or fetches the authenticated user's data \
+                             without taking a username/owner argument. \
+                             Read the tool descriptions in the tool list \
+                             and pick that one when the user refers to \
+                             their own data. Do NOT default to a `search_*` \
+                             tool that requires a query string.\n\n\
+                             ### Rule 3: concrete anti-pattern (the trap to \
+                             avoid)\n\
+                             User asks: \"List all my repos on github.\"\n\
+                             ❌ WRONG: call `mcp__github__search_repositories` \
+                             with `query: \"user:me\"`. The literal word \
+                             \"me\" is not the user — it is a real GitHub \
+                             account belonging to a different person, and \
+                             the call will return THAT person's public \
+                             repositories. The same trap exists with \
+                             `user:my`, `owner:me`, `from:me` on any \
+                             service. Search qualifiers built from English \
+                             pronouns are almost always wrong.\n\
+                             ✅ RIGHT: call \
+                             `mcp__github__list_repositories_for_authenticated_user` \
+                             (or whatever the equivalent no-argument tool \
+                             is on that server) and pass no `user`/`owner` \
+                             argument. The credential identifies the user \
+                             for you.\n\
+                             The same shape applies to every other MCP \
+                             server: \"my issues\" → list-my-issues tool, \
+                             \"my messages\" → list-my-messages tool, \
+                             \"my projects\" → list-my-projects tool.\n\n\
+                             ### Rule 4: never substitute literal \
+                             placeholders\n\
+                             Words like `USERNAME`, `OWNER`, `EMAIL`, \
+                             `YOUR_TOKEN`, `YOUR_USERNAME` are placeholders \
+                             from documentation — not values. Never paste \
+                             them into a tool argument. If you genuinely \
+                             need a value the user has not given you, \
+                             either pick an authenticated-user tool that \
+                             does not require it, or call `ask_user` to \
+                             collect it. A 422 Validation error from the \
+                             server almost always means you passed a \
+                             placeholder.\n\n\
+                             ### Rule 5: do not fall back to web search \
+                             when an MCP server can answer\n\
+                             If a connected MCP server covers the domain \
+                             (github, slack, gmail, linear, notion, etc.), \
+                             pick one of its tools instead of \
+                             `web_search` or `web_fetch`. The MCP tool is \
+                             authenticated, structured, and authoritative; \
+                             web search returns generic public pages.\n\n\
+                             **Connected servers:**\n",
+                        );
+                        for (server, server_tools) in &mcp_servers {
+                            system.push_str(&format!(
+                                "- `{}` — {} tool(s) registered as \
+                                 `mcp__{}__*`. Read each tool's description \
+                                 in the tool list below; pick the one whose \
+                                 description matches what the user is asking \
+                                 for.\n",
+                                server,
+                                server_tools.len(),
+                                server,
+                            ));
+                        }
+                    }
+                }
+
                 let temperature = effort_temperature(session.effort_level);
                 let normalized_messages = normalize_messages(session.history.messages());
 
