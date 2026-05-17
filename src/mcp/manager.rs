@@ -113,10 +113,7 @@ pub struct McpManager {
 }
 
 impl McpManager {
-    pub fn new(
-        keystore: Arc<tokio::sync::Mutex<KeyStore>>,
-        registry: Arc<ToolRegistry>,
-    ) -> Self {
+    pub fn new(keystore: Arc<tokio::sync::Mutex<KeyStore>>, registry: Arc<ToolRegistry>) -> Self {
         Self {
             servers: RwLock::new(HashMap::new()),
             keystore,
@@ -188,7 +185,9 @@ impl McpManager {
         // Mark connecting.
         let (command, args, secret_specs) = {
             let mut map = self.servers.write().await;
-            let s = map.get_mut(id).ok_or_else(|| format!("unknown MCP server: {id}"))?;
+            let s = map
+                .get_mut(id)
+                .ok_or_else(|| format!("unknown MCP server: {id}"))?;
             if s.command.is_empty() {
                 let msg = "no command configured".to_string();
                 s.status = ServerStatus::Error(msg.clone());
@@ -223,20 +222,10 @@ impl McpManager {
             }
         }
 
-        // For the filesystem server, the allowed root is passed as a CLI
-        // arg (not env). Append it after the package args.
-        let mut effective_args = args.clone();
-        if id == "filesystem" {
-            if let Some(root) = env.remove("MCP_FS_ROOT") {
-                effective_args.push(root);
-            }
-        }
+        let effective_args = build_effective_args(id, &args, &mut env);
 
         if !missing_required.is_empty() {
-            let msg = format!(
-                "missing required secrets: {}",
-                missing_required.join(", ")
-            );
+            let msg = format!("missing required secrets: {}", missing_required.join(", "));
             let mut map = self.servers.write().await;
             if let Some(s) = map.get_mut(id) {
                 s.status = ServerStatus::Error(msg.clone());
@@ -246,14 +235,9 @@ impl McpManager {
         }
 
         // Spawn + handshake.
-        let res = McpClient::connect_stdio(
-            &command,
-            &effective_args,
-            &env,
-            None,
-            self.connect_timeout,
-        )
-        .await;
+        let res =
+            McpClient::connect_stdio(&command, &effective_args, &env, None, self.connect_timeout)
+                .await;
         let client = match res {
             Ok(c) => Arc::new(c),
             Err(e) => {
@@ -286,9 +270,10 @@ impl McpManager {
         let mut local_names: Vec<String> = Vec::with_capacity(tools.len());
         for t in &tools {
             let local_name = format!("mcp__{id}__{}", sanitize_name(&t.name));
-            let schema = t.input_schema.clone().unwrap_or_else(|| {
-                serde_json::json!({ "type": "object", "properties": {} })
-            });
+            let schema = t
+                .input_schema
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
             // Prepend a generic authentication-context tag so the model
             // sees, on EVERY MCP tool from EVERY server, that this call
             // runs as the user's authenticated identity. This nudges the
@@ -335,7 +320,9 @@ impl McpManager {
     pub async fn disconnect(&self, id: &str) -> Result<(), String> {
         let (client_opt, names) = {
             let mut map = self.servers.write().await;
-            let s = map.get_mut(id).ok_or_else(|| format!("unknown server: {id}"))?;
+            let s = map
+                .get_mut(id)
+                .ok_or_else(|| format!("unknown server: {id}"))?;
             let c = s.client.take();
             let n = std::mem::take(&mut s.registered_tool_names);
             s.status = ServerStatus::Disconnected;
@@ -350,11 +337,7 @@ impl McpManager {
         Ok(())
     }
 
-    pub async fn set_enabled(
-        &self,
-        id: &str,
-        enabled: bool,
-    ) -> Result<bool, String> {
+    pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, String> {
         let was_enabled = {
             let mut map = self.servers.write().await;
             let s = map
@@ -388,7 +371,10 @@ impl McpManager {
         if id.is_empty() {
             return Err("id cannot be empty".into());
         }
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return Err("id may only contain a–z, 0–9, '-', '_'".into());
         }
         if command.trim().is_empty() {
@@ -460,12 +446,7 @@ impl McpManager {
             .ok_or_else(|| format!("unknown server: {id}"))
     }
 
-    pub async fn save_secret(
-        &self,
-        id: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), String> {
+    pub async fn save_secret(&self, id: &str, key: &str, value: &str) -> Result<(), String> {
         let storage_key = mcp_secret_key(id, key);
         let mut ks = self.keystore.lock().await;
         ks.set(&storage_key, value).map_err(|e| e.to_string())
@@ -535,7 +516,11 @@ impl McpManager {
                 last_error: s.last_error.clone(),
             });
         }
-        out.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+        out.sort_by(|a, b| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+        });
         out
     }
 
@@ -570,8 +555,16 @@ impl McpManager {
                     } else {
                         Some(s.category.clone())
                     },
-                    command: if is_catalog { String::new() } else { s.command.clone() },
-                    args: if is_catalog { Vec::new() } else { s.args.clone() },
+                    command: if is_catalog {
+                        String::new()
+                    } else {
+                        s.command.clone()
+                    },
+                    args: if is_catalog {
+                        Vec::new()
+                    } else {
+                        s.args.clone()
+                    },
                     secret_specs: if is_catalog {
                         Vec::new()
                     } else {
@@ -610,6 +603,62 @@ fn default_permission_for(_id: &str) -> PermissionLevel {
     PermissionLevel::Mutating
 }
 
+fn build_effective_args(
+    server_id: &str,
+    configured_args: &[String],
+    env: &mut HashMap<String, String>,
+) -> Vec<String> {
+    let mut args = configured_args.to_vec();
+    for rule in secret_arg_rules(server_id) {
+        if let Some(value) = env.remove(rule.secret_key) {
+            if !value.is_empty() {
+                match rule.mode {
+                    SecretArgMode::Positional => args.push(value),
+                    SecretArgMode::FlagValue(flag) => {
+                        args.push(flag.to_string());
+                        args.push(value);
+                    }
+                }
+            }
+        }
+    }
+    args
+}
+
+struct SecretArgRule {
+    secret_key: &'static str,
+    mode: SecretArgMode,
+}
+
+enum SecretArgMode {
+    Positional,
+    FlagValue(&'static str),
+}
+
+fn secret_arg_rules(server_id: &str) -> &'static [SecretArgRule] {
+    match server_id {
+        // Reference MCP servers that require these values as launch
+        // arguments, not only inherited environment variables.
+        "filesystem" => &[SecretArgRule {
+            secret_key: "MCP_FS_ROOT",
+            mode: SecretArgMode::Positional,
+        }],
+        "postgres" => &[SecretArgRule {
+            secret_key: "POSTGRES_CONNECTION_STRING",
+            mode: SecretArgMode::Positional,
+        }],
+        "sqlite" => &[SecretArgRule {
+            secret_key: "SQLITE_DB_PATH",
+            mode: SecretArgMode::FlagValue("--db-path"),
+        }],
+        "git-local" => &[SecretArgRule {
+            secret_key: "GIT_REPOSITORY",
+            mode: SecretArgMode::FlagValue("--repository"),
+        }],
+        _ => &[],
+    }
+}
+
 fn sanitize_name(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -624,4 +673,75 @@ fn sanitize_name(name: &str) -> String {
 
 pub fn mcp_secret_key(server_id: &str, key: &str) -> String {
     format!("mcp:{server_id}:{key}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_args() -> Vec<String> {
+        vec!["-y".into(), "pkg".into()]
+    }
+
+    #[test]
+    fn filesystem_root_is_passed_as_positional_arg() {
+        let mut env = HashMap::from([("MCP_FS_ROOT".to_string(), "/repo".to_string())]);
+        let args = build_effective_args("filesystem", &base_args(), &mut env);
+        assert_eq!(args, vec!["-y", "pkg", "/repo"]);
+        assert!(!env.contains_key("MCP_FS_ROOT"));
+    }
+
+    #[test]
+    fn postgres_connection_string_is_passed_as_positional_arg() {
+        let mut env = HashMap::from([(
+            "POSTGRES_CONNECTION_STRING".to_string(),
+            "postgres://u:p@localhost/db".to_string(),
+        )]);
+        let args = build_effective_args("postgres", &base_args(), &mut env);
+        assert_eq!(args, vec!["-y", "pkg", "postgres://u:p@localhost/db"]);
+        assert!(!env.contains_key("POSTGRES_CONNECTION_STRING"));
+    }
+
+    #[test]
+    fn sqlite_db_path_is_passed_with_db_path_flag() {
+        let mut env = HashMap::from([("SQLITE_DB_PATH".to_string(), "C:/data/app.db".to_string())]);
+        let args = build_effective_args("sqlite", &base_args(), &mut env);
+        assert_eq!(args, vec!["-y", "pkg", "--db-path", "C:/data/app.db"]);
+        assert!(!env.contains_key("SQLITE_DB_PATH"));
+    }
+
+    #[test]
+    fn git_repository_is_passed_with_repository_flag() {
+        let mut env = HashMap::from([("GIT_REPOSITORY".to_string(), "C:/repo".to_string())]);
+        let args = build_effective_args("git-local", &base_args(), &mut env);
+        assert_eq!(args, vec!["-y", "pkg", "--repository", "C:/repo"]);
+        assert!(!env.contains_key("GIT_REPOSITORY"));
+    }
+
+    #[test]
+    fn unrelated_server_keeps_secret_in_env() {
+        let mut env = HashMap::from([(
+            "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+            "ghp_x".to_string(),
+        )]);
+        let args = build_effective_args("github", &base_args(), &mut env);
+        assert_eq!(args, vec!["-y", "pkg"]);
+        assert!(env.contains_key("GITHUB_PERSONAL_ACCESS_TOKEN"));
+    }
+
+    #[test]
+    fn secret_arg_rules_reference_declared_catalog_secrets() {
+        for entry in catalog::CATALOG {
+            let declared: std::collections::HashSet<&str> =
+                entry.secrets.iter().map(|(key, _, _, _)| *key).collect();
+            for rule in secret_arg_rules(entry.id) {
+                assert!(
+                    declared.contains(rule.secret_key),
+                    "{} launch arg rule references undeclared secret {}",
+                    entry.id,
+                    rule.secret_key
+                );
+            }
+        }
+    }
 }

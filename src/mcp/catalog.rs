@@ -289,7 +289,12 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-atlassian"],
         secrets: &[
-            ("JIRA_URL", "Jira site URL", "e.g. https://acme.atlassian.net", true),
+            (
+                "JIRA_URL",
+                "Jira site URL",
+                "e.g. https://acme.atlassian.net",
+                true,
+            ),
             ("JIRA_USERNAME", "Email", "Atlassian account email", true),
             (
                 "JIRA_API_TOKEN",
@@ -307,8 +312,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-atlassian"],
         secrets: &[
-            ("CONFLUENCE_URL", "Confluence URL", "https://acme.atlassian.net/wiki", true),
-            ("CONFLUENCE_USERNAME", "Email", "Atlassian account email", true),
+            (
+                "CONFLUENCE_URL",
+                "Confluence URL",
+                "https://acme.atlassian.net/wiki",
+                true,
+            ),
+            (
+                "CONFLUENCE_USERNAME",
+                "Email",
+                "Atlassian account email",
+                true,
+            ),
             (
                 "CONFLUENCE_API_TOKEN",
                 "API Token",
@@ -353,8 +368,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "npx",
         args: &["-y", "@delorenj/mcp-server-trello"],
         secrets: &[
-            ("TRELLO_API_KEY", "API Key", "https://trello.com/power-ups/admin", true),
-            ("TRELLO_TOKEN", "Token", "Generate from the same admin page", true),
+            (
+                "TRELLO_API_KEY",
+                "API Key",
+                "https://trello.com/power-ups/admin",
+                true,
+            ),
+            (
+                "TRELLO_TOKEN",
+                "Token",
+                "Generate from the same admin page",
+                true,
+            ),
         ],
     },
     CatalogEntry {
@@ -365,7 +390,12 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "npx",
         args: &["-y", "@nclud/mcp-bitbucket"],
         secrets: &[
-            ("BITBUCKET_USERNAME", "Username", "Bitbucket account username", true),
+            (
+                "BITBUCKET_USERNAME",
+                "Username",
+                "Bitbucket account username",
+                true,
+            ),
             (
                 "BITBUCKET_APP_PASSWORD",
                 "App Password",
@@ -374,7 +404,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             ),
         ],
     },
-
     // ── Databases ─────────────────────────────────────────────────────────
     CatalogEntry {
         id: "mysql",
@@ -426,7 +455,12 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-server-bigquery"],
         secrets: &[
-            ("BIGQUERY_PROJECT_ID", "GCP Project ID", "Project containing the datasets", true),
+            (
+                "BIGQUERY_PROJECT_ID",
+                "GCP Project ID",
+                "Project containing the datasets",
+                true,
+            ),
             (
                 "GOOGLE_APPLICATION_CREDENTIALS",
                 "Service Account JSON path",
@@ -443,10 +477,20 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp_snowflake_server"],
         secrets: &[
-            ("SNOWFLAKE_ACCOUNT", "Account", "e.g. xy12345.us-east-1", true),
+            (
+                "SNOWFLAKE_ACCOUNT",
+                "Account",
+                "e.g. xy12345.us-east-1",
+                true,
+            ),
             ("SNOWFLAKE_USER", "Username", "Snowflake username", true),
             ("SNOWFLAKE_PASSWORD", "Password", "Snowflake password", true),
-            ("SNOWFLAKE_WAREHOUSE", "Warehouse", "Compute warehouse name", true),
+            (
+                "SNOWFLAKE_WAREHOUSE",
+                "Warehouse",
+                "Compute warehouse name",
+                true,
+            ),
             ("SNOWFLAKE_DATABASE", "Database", "Default database", false),
         ],
     },
@@ -458,10 +502,25 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-clickhouse"],
         secrets: &[
-            ("CLICKHOUSE_HOST", "Host", "e.g. localhost or play.clickhouse.com", true),
-            ("CLICKHOUSE_PORT", "Port", "8443 for HTTPS, 9000 for native", false),
+            (
+                "CLICKHOUSE_HOST",
+                "Host",
+                "e.g. localhost or play.clickhouse.com",
+                true,
+            ),
+            (
+                "CLICKHOUSE_PORT",
+                "Port",
+                "8443 for HTTPS, 9000 for native",
+                false,
+            ),
             ("CLICKHOUSE_USER", "User", "ClickHouse user", true),
-            ("CLICKHOUSE_PASSWORD", "Password", "ClickHouse password", true),
+            (
+                "CLICKHOUSE_PASSWORD",
+                "Password",
+                "ClickHouse password",
+                true,
+            ),
         ],
     },
     CatalogEntry {
@@ -528,7 +587,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             ),
         ],
     },
-
     // ── Vector / search ──────────────────────────────────────────────────
     CatalogEntry {
         id: "elasticsearch",
@@ -539,9 +597,24 @@ pub const CATALOG: &[CatalogEntry] = &[
         args: &["mcp-server-elasticsearch"],
         secrets: &[
             ("ES_URL", "Cluster URL", "https://es.example.com:9200", true),
-            ("ES_API_KEY", "API Key (optional)", "Use API key OR user/pass", false),
-            ("ES_USERNAME", "Username (optional)", "Basic auth username", false),
-            ("ES_PASSWORD", "Password (optional)", "Basic auth password", false),
+            (
+                "ES_API_KEY",
+                "API Key (optional)",
+                "Use API key OR user/pass",
+                false,
+            ),
+            (
+                "ES_USERNAME",
+                "Username (optional)",
+                "Basic auth username",
+                false,
+            ),
+            (
+                "ES_PASSWORD",
+                "Password (optional)",
+                "Basic auth password",
+                false,
+            ),
         ],
     },
     CatalogEntry {
@@ -552,8 +625,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-pinecone"],
         secrets: &[
-            ("PINECONE_API_KEY", "API Key", "https://app.pinecone.io", true),
-            ("PINECONE_INDEX_NAME", "Default Index", "Name of an existing index", true),
+            (
+                "PINECONE_API_KEY",
+                "API Key",
+                "https://app.pinecone.io",
+                true,
+            ),
+            (
+                "PINECONE_INDEX_NAME",
+                "Default Index",
+                "Name of an existing index",
+                true,
+            ),
         ],
     },
     CatalogEntry {
@@ -564,8 +647,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-server-qdrant"],
         secrets: &[
-            ("QDRANT_URL", "Cluster URL", "http://localhost:6333 or hosted URL", true),
-            ("QDRANT_API_KEY", "API Key (optional)", "Required for Qdrant Cloud", false),
+            (
+                "QDRANT_URL",
+                "Cluster URL",
+                "http://localhost:6333 or hosted URL",
+                true,
+            ),
+            (
+                "QDRANT_API_KEY",
+                "API Key (optional)",
+                "Required for Qdrant Cloud",
+                false,
+            ),
             (
                 "COLLECTION_NAME",
                 "Default Collection",
@@ -644,7 +737,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             true,
         )],
     },
-
     // ── Communication ────────────────────────────────────────────────────
     CatalogEntry {
         id: "discord",
@@ -682,8 +774,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "npx",
         args: &["-y", "@twilio-alpha/mcp"],
         secrets: &[
-            ("TWILIO_ACCOUNT_SID", "Account SID", "https://console.twilio.com", true),
-            ("TWILIO_AUTH_TOKEN", "Auth Token", "Same console — Account Info", true),
+            (
+                "TWILIO_ACCOUNT_SID",
+                "Account SID",
+                "https://console.twilio.com",
+                true,
+            ),
+            (
+                "TWILIO_AUTH_TOKEN",
+                "Auth Token",
+                "Same console — Account Info",
+                true,
+            ),
         ],
     },
     CatalogEntry {
@@ -714,7 +816,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             true,
         )],
     },
-
     // ── Cloud / infra ────────────────────────────────────────────────────
     CatalogEntry {
         id: "cloudflare",
@@ -746,8 +847,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "npx",
         args: &["-y", "@modelcontextprotocol/server-aws-kb-retrieval"],
         secrets: &[
-            ("AWS_ACCESS_KEY_ID", "Access Key ID", "IAM credentials", true),
-            ("AWS_SECRET_ACCESS_KEY", "Secret Access Key", "IAM credentials", true),
+            (
+                "AWS_ACCESS_KEY_ID",
+                "Access Key ID",
+                "IAM credentials",
+                true,
+            ),
+            (
+                "AWS_SECRET_ACCESS_KEY",
+                "Secret Access Key",
+                "IAM credentials",
+                true,
+            ),
             ("AWS_REGION", "Region", "e.g. us-east-1", true),
         ],
     },
@@ -816,7 +927,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             false,
         )],
     },
-
     // ── Commerce / fintech ───────────────────────────────────────────────
     CatalogEntry {
         id: "stripe",
@@ -840,7 +950,12 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "npx",
         args: &["-y", "shopify-mcp-server"],
         secrets: &[
-            ("SHOPIFY_SHOP", "Shop domain", "e.g. mystore.myshopify.com", true),
+            (
+                "SHOPIFY_SHOP",
+                "Shop domain",
+                "e.g. mystore.myshopify.com",
+                true,
+            ),
             (
                 "SHOPIFY_ACCESS_TOKEN",
                 "Admin API access token",
@@ -871,8 +986,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-salesforce"],
         secrets: &[
-            ("SALESFORCE_USERNAME", "Username", "Salesforce login email", true),
-            ("SALESFORCE_PASSWORD", "Password", "Salesforce password", true),
+            (
+                "SALESFORCE_USERNAME",
+                "Username",
+                "Salesforce login email",
+                true,
+            ),
+            (
+                "SALESFORCE_PASSWORD",
+                "Password",
+                "Salesforce password",
+                true,
+            ),
             (
                 "SALESFORCE_SECURITY_TOKEN",
                 "Security Token",
@@ -881,7 +1006,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             ),
         ],
     },
-
     // ── Media / social ───────────────────────────────────────────────────
     CatalogEntry {
         id: "spotify",
@@ -897,7 +1021,12 @@ pub const CATALOG: &[CatalogEntry] = &[
                 "https://developer.spotify.com/dashboard",
                 true,
             ),
-            ("SPOTIFY_CLIENT_SECRET", "Client Secret", "Same dashboard", true),
+            (
+                "SPOTIFY_CLIENT_SECRET",
+                "Client Secret",
+                "Same dashboard",
+                true,
+            ),
         ],
     },
     CatalogEntry {
@@ -922,8 +1051,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         command: "uvx",
         args: &["mcp-reddit"],
         secrets: &[
-            ("REDDIT_CLIENT_ID", "Client ID", "https://www.reddit.com/prefs/apps", true),
-            ("REDDIT_CLIENT_SECRET", "Client Secret", "Same apps page", true),
+            (
+                "REDDIT_CLIENT_ID",
+                "Client ID",
+                "https://www.reddit.com/prefs/apps",
+                true,
+            ),
+            (
+                "REDDIT_CLIENT_SECRET",
+                "Client Secret",
+                "Same apps page",
+                true,
+            ),
             ("REDDIT_USERNAME", "Username", "Your Reddit username", true),
             ("REDDIT_PASSWORD", "Password", "Your Reddit password", true),
         ],
@@ -942,7 +1081,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             true,
         )],
     },
-
     // ── Productivity / knowledge ─────────────────────────────────────────
     CatalogEntry {
         id: "obsidian",
@@ -990,7 +1128,6 @@ pub const CATALOG: &[CatalogEntry] = &[
         args: &["mcp-hn"],
         secrets: &[],
     },
-
     // ── Design / creative ────────────────────────────────────────────────
     CatalogEntry {
         id: "figma",
@@ -1006,7 +1143,6 @@ pub const CATALOG: &[CatalogEntry] = &[
             true,
         )],
     },
-
     // ── Data / utilities ─────────────────────────────────────────────────
     CatalogEntry {
         id: "openweather",
@@ -1077,4 +1213,107 @@ pub const CATALOG: &[CatalogEntry] = &[
 
 pub fn lookup(id: &str) -> Option<&'static CatalogEntry> {
     CATALOG.iter().find(|e| e.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn catalog_has_expected_builtin_coverage() {
+        assert!(
+            CATALOG.len() >= 50,
+            "expected 50+ MCP catalog entries, got {}",
+            CATALOG.len()
+        );
+    }
+
+    #[test]
+    fn catalog_ids_are_unique_and_lookup_round_trips() {
+        let mut seen = HashSet::new();
+        for entry in CATALOG {
+            assert!(!entry.id.trim().is_empty());
+            assert!(
+                entry
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'),
+                "catalog id '{}' is not CLI/config friendly",
+                entry.id
+            );
+            assert!(seen.insert(entry.id), "duplicate catalog id '{}'", entry.id);
+            assert_eq!(
+                lookup(entry.id).map(|e| e.display_name),
+                Some(entry.display_name)
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_entries_have_launch_metadata() {
+        for entry in CATALOG {
+            assert!(
+                !entry.display_name.trim().is_empty(),
+                "{} has empty display name",
+                entry.id
+            );
+            assert!(
+                !entry.description.trim().is_empty(),
+                "{} has empty description",
+                entry.id
+            );
+            assert!(
+                !entry.category.trim().is_empty(),
+                "{} has empty category",
+                entry.id
+            );
+            assert!(
+                !entry.command.trim().is_empty(),
+                "{} has empty command",
+                entry.id
+            );
+            assert!(
+                !entry.args.iter().any(|arg| arg.trim().is_empty()),
+                "{} has empty launch arg",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_secret_specs_are_env_var_shaped() {
+        for entry in CATALOG {
+            let mut seen = HashSet::new();
+            for (key, label, help, _) in entry.secrets {
+                assert!(!key.trim().is_empty(), "{} has empty secret key", entry.id);
+                assert!(
+                    key.chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                    "{} secret '{}' is not env-var shaped",
+                    entry.id,
+                    key
+                );
+                assert!(
+                    seen.insert(*key),
+                    "{} has duplicate secret '{}'",
+                    entry.id,
+                    key
+                );
+                assert!(
+                    !label.trim().is_empty(),
+                    "{} secret '{}' has empty label",
+                    entry.id,
+                    key
+                );
+                assert!(
+                    !help.trim().is_empty(),
+                    "{} secret '{}' has empty help",
+                    entry.id,
+                    key
+                );
+            }
+        }
+    }
 }

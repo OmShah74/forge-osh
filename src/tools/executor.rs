@@ -290,15 +290,15 @@ pub(crate) fn format_tool_description(name: &str, input: &serde_json::Value) -> 
         }
         "write_file" | "create_file" => {
             let path = input["path"].as_str().unwrap_or("(unknown)");
-            format!("Write to file: {path}")
+            format!("{name}: write to file: {path}")
         }
         "edit_file" => {
             let path = input["path"].as_str().unwrap_or("(unknown)");
-            format!("Edit file: {path}")
+            format!("edit_file: edit file: {path}")
         }
         "delete_file" => {
             let path = input["path"].as_str().unwrap_or("(unknown)");
-            format!("Delete file: {path}")
+            format!("delete_file: delete file: {path}")
         }
         "move_file" => {
             let src = input["source"].as_str().unwrap_or("?");

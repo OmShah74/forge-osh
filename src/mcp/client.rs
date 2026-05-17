@@ -101,7 +101,7 @@ impl McpClient {
     ) -> Result<(String, bool), TransportError> {
         let res = self
             .transport
-            .request(
+            .request_no_timeout(
                 "tools/call",
                 Some(json!({
                     "name": name,

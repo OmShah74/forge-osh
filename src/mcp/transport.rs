@@ -222,6 +222,29 @@ impl StdioTransport {
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, TransportError> {
+        self.request_inner(method, params, Some(self.request_timeout))
+            .await
+    }
+
+    /// Like `request`, but never times out. Used for `tools/call` so that
+    /// slow upstreams (arXiv, large LLM gateways, long Docker pulls, etc.)
+    /// don't get cut off by an arbitrary client-side ceiling. If the child
+    /// dies the oneshot is dropped and we still return `Closed`; user can
+    /// always cancel with Ctrl+C.
+    pub async fn request_no_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value, TransportError> {
+        self.request_inner(method, params, None).await
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        request_timeout: Option<Duration>,
+    ) -> Result<Value, TransportError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = JsonRpcRequest {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -250,18 +273,29 @@ impl StdioTransport {
                 .map_err(|e| TransportError::Io(e.to_string()))?;
         }
 
-        match timeout(self.request_timeout, rx).await {
-            Ok(Ok(resp)) => {
-                if let Some(err) = resp.error {
-                    return Err(err.into());
+        match request_timeout {
+            Some(dur) => match timeout(dur, rx).await {
+                Ok(Ok(resp)) => {
+                    if let Some(err) = resp.error {
+                        return Err(err.into());
+                    }
+                    Ok(resp.result.unwrap_or(Value::Null))
                 }
-                Ok(resp.result.unwrap_or(Value::Null))
-            }
-            Ok(Err(_)) => Err(TransportError::Closed),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(TransportError::Timeout)
-            }
+                Ok(Err(_)) => Err(TransportError::Closed),
+                Err(_) => {
+                    self.pending.lock().await.remove(&id);
+                    Err(TransportError::Timeout)
+                }
+            },
+            None => match rx.await {
+                Ok(resp) => {
+                    if let Some(err) = resp.error {
+                        return Err(err.into());
+                    }
+                    Ok(resp.result.unwrap_or(Value::Null))
+                }
+                Err(_) => Err(TransportError::Closed),
+            },
         }
     }
 

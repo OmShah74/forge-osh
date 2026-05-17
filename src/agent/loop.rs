@@ -699,13 +699,10 @@ impl AgentLoop {
                                 rest.split_once("__").map(|(server, _)| (server, d))
                             })
                         })
-                        .fold(
-                            std::collections::BTreeMap::new(),
-                            |mut acc, (server, d)| {
-                                acc.entry(server.to_string()).or_default().push(d);
-                                acc
-                            },
-                        );
+                        .fold(std::collections::BTreeMap::new(), |mut acc, (server, d)| {
+                            acc.entry(server.to_string()).or_default().push(d);
+                            acc
+                        });
                     if !mcp_servers.is_empty() {
                         system.push_str(
                             "\n\n## MCP Servers (active, authenticated)\n\
@@ -779,6 +776,34 @@ impl AgentLoop {
                              `web_search` or `web_fetch`. The MCP tool is \
                              authenticated, structured, and authoritative; \
                              web search returns generic public pages.\n\n\
+                             ### Rule 6: fuzzy discovery before asking the user\n\
+                             When the user names an object imprecisely \
+                             (for example \"analyse my github for this repo: \
+                             Neural Machine Translation\"), first use the \
+                             authenticated MCP server to discover likely \
+                             matches. For GitHub-like servers, list the \
+                             authenticated user's repositories first, then \
+                             compare the user's text against repository \
+                             `name`, `full_name`, description, topics, and \
+                             common normalized variants: lowercase, \
+                             punctuation removed, hyphen/underscore/space \
+                             substitutions, acronym words, and partial word \
+                             order. If the list is too large or no clear \
+                             local match appears, then use the server's \
+                             repository/code search tools with multiple \
+                             concrete query variants derived from the user's \
+                             phrase. Only ask the user after the MCP-backed \
+                             fuzzy search leaves several plausible matches \
+                             with no defensible winner.\n\n\
+                             ### Rule 7: once an MCP object is identified, \
+                             stay on that server for follow-up operations\n\
+                             After finding a repository, channel, page, \
+                             ticket, document, or database through MCP, use \
+                             that same MCP server for the requested analysis \
+                             or mutation whenever it has the needed tool. Do \
+                             not switch to generic local or web tools unless \
+                             the MCP server lacks the capability or the user \
+                             explicitly asks for local workspace work.\n\n\
                              **Connected servers:**\n",
                         );
                         for (server, server_tools) in &mcp_servers {

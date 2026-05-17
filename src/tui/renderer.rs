@@ -126,18 +126,16 @@ fn render_mcp_custom_form(frame: &mut Frame, area: Rect, f: &McpCustomForm, them
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.warning_fg))
-        .title(
-            " Add Custom MCP Server   Tab/↑↓ next field   Ctrl+S save   Esc cancel ",
-        );
+        .title(" Add Custom MCP Server   Tab/↑↓ next field   Ctrl+S save   Esc cancel ");
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),                 // intro
+            Constraint::Length(2),                                  // intro
             Constraint::Min(MCP_CUSTOM_FIELD_COUNT as u16 * 2 + 2), // fields
-            Constraint::Length(3),                 // footer
+            Constraint::Length(3),                                  // footer
         ])
         .split(inner);
 
@@ -178,7 +176,10 @@ fn render_mcp_custom_form(frame: &mut Frame, area: Rect, f: &McpCustomForm, them
             4 => f.command.clone(),
             5 => f.args.clone(),
             6 => f.secret_keys.clone(),
-            7 => format!("[{}] enabled (Space to toggle)", if f.enabled { "x" } else { " " }),
+            7 => format!(
+                "[{}] enabled (Space to toggle)",
+                if f.enabled { "x" } else { " " }
+            ),
             _ => String::new(),
         };
         let placeholder = match i {
@@ -313,10 +314,7 @@ fn secret_summary(secs: &[crate::mcp::SecretStatus]) -> String {
     }
     let total = secs.len();
     let present = secs.iter().filter(|s| s.present).count();
-    let req_missing = secs
-        .iter()
-        .filter(|s| s.required && !s.present)
-        .count();
+    let req_missing = secs.iter().filter(|s| s.required && !s.present).count();
     if req_missing > 0 {
         format!("{}/{} need!", present, total)
     } else {
@@ -337,7 +335,8 @@ fn render_mcp_detail(frame: &mut Frame, area: Rect, m: &McpManagerState, theme: 
     let s = match m.selected_server() {
         Some(s) => s,
         None => {
-            let p = Paragraph::new("(no server selected)").style(Style::default().fg(theme.muted_fg));
+            let p =
+                Paragraph::new("(no server selected)").style(Style::default().fg(theme.muted_fg));
             frame.render_widget(p, area);
             return;
         }
@@ -420,7 +419,13 @@ fn render_mcp_detail(frame: &mut Frame, area: Rect, m: &McpManagerState, theme: 
                 } else {
                     Style::default().fg(theme.fg)
                 };
-                let icon = if sec.present { "●" } else if sec.required { "✗" } else { "○" };
+                let icon = if sec.present {
+                    "●"
+                } else if sec.required {
+                    "✗"
+                } else {
+                    "○"
+                };
                 let src = match sec.source {
                     crate::mcp::SecretSource::Stored => "saved",
                     crate::mcp::SecretSource::Env => "env var",
@@ -1660,8 +1665,10 @@ fn superscript_char(ch: char) -> Option<char> {
         '=' => '⁼',
         '(' => '⁽',
         ')' => '⁾',
+        'd' => '\u{1d48}',
         'n' => 'ⁿ',
         'i' => 'ⁱ',
+        'k' => '\u{1d4f}',
         _ => return None,
     })
 }
