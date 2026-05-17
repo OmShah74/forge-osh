@@ -5,6 +5,7 @@ use crate::cli::*;
 use crate::config::{self, keyring::KeyStore, Config};
 use crate::graph::{new_shared_graph, SharedGraph};
 use crate::lsp::{LspManager, SharedLspManager};
+use crate::mcp::McpManager;
 use crate::provider::router::ProviderRouter;
 use crate::session::{checkpoint::Checkpoint, Session};
 use crate::skills::{shared_registry, SharedSkillRegistry};
@@ -16,11 +17,14 @@ pub struct App {
     pub tools: Arc<ToolRegistry>,
     pub session: Arc<Mutex<Session>>,
     pub key_store: KeyStore,
+    pub key_store_shared: Arc<Mutex<KeyStore>>,
     /// Shared semantic code graph (None until /forge-graph has been built)
     pub shared_graph: SharedGraph,
     /// Shared LSP manager — language servers are spawned lazily on first use.
     pub lsp: SharedLspManager,
     pub skills: SharedSkillRegistry,
+    /// MCP manager — owns lifecycle of every configured MCP server.
+    pub mcp: Arc<McpManager>,
 }
 
 impl App {
@@ -98,7 +102,7 @@ impl App {
         let tools = Arc::new(if cli.no_tools {
             ToolRegistry::new()
         } else {
-            let mut registry = ToolRegistry::with_config(&config);
+            let registry = ToolRegistry::with_config(&config);
             registry.register_enabled(
                 &config,
                 Box::new(crate::graph::tools::GraphQueryTool::new_with_lsp(
@@ -224,15 +228,32 @@ impl App {
             }
         }
 
+        // ── MCP manager: load servers from config and connect enabled ones ─
+        let key_store_shared = Arc::new(Mutex::new(key_store.clone()));
+        let mcp = Arc::new(McpManager::new(key_store_shared.clone(), tools.clone()));
+        mcp.load_from_config(&config.mcp.servers).await;
+        // Spawn enabled servers in the background so startup is not blocked
+        // by a slow npx download. Connections that succeed will register
+        // their tools into the shared registry — visible to the agent on
+        // the next request.
+        {
+            let mcp_bg = mcp.clone();
+            tokio::spawn(async move {
+                mcp_bg.connect_all_enabled().await;
+            });
+        }
+
         Ok(Self {
             config,
             provider_router,
             tools,
             session,
             key_store,
+            key_store_shared,
             shared_graph,
             lsp,
             skills,
+            mcp,
         })
     }
 
@@ -243,10 +264,11 @@ impl App {
             self.provider_router.clone(),
             self.tools.clone(),
             self.session.clone(),
-            Arc::new(Mutex::new(self.key_store.clone())),
+            self.key_store_shared.clone(),
             self.shared_graph.clone(),
             self.lsp.clone(),
             self.skills.clone(),
+            self.mcp.clone(),
         )
         .await
     }

@@ -201,6 +201,41 @@ impl OpenAICompatProvider {
         self.model_info_for(model).supports_tools
     }
 
+    /// OpenAI's GPT-5 family and the o-series (o1/o3/o4/o5) deprecated
+    /// `max_tokens` — they only accept `max_completion_tokens`. Sending
+    /// `max_tokens` returns a 400 like the one the user hit:
+    ///   "Unsupported parameter: 'max_tokens' is not supported with this
+    ///    model. Use 'max_completion_tokens' instead."
+    /// We only switch params for the OpenAI provider — third-party OpenAI-
+    /// compatible servers (Groq, Together, etc.) still expect `max_tokens`
+    /// even when they host a model with a similar name.
+    fn uses_max_completion_tokens(&self, model: &str) -> bool {
+        if self.provider_id != "openai" {
+            return false;
+        }
+        let m = model.to_ascii_lowercase();
+        m.starts_with("gpt-5")
+            || m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.starts_with("o5")
+    }
+
+    /// Reasoning models (o-series and gpt-5) reject custom `temperature`
+    /// values — only the server default is allowed. We omit the field
+    /// entirely for these models.
+    fn omits_temperature(&self, model: &str) -> bool {
+        if self.provider_id != "openai" {
+            return false;
+        }
+        let m = model.to_ascii_lowercase();
+        m.starts_with("gpt-5")
+            || m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.starts_with("o5")
+    }
+
     fn build_messages(&self, messages: &[Message]) -> Vec<Value> {
         messages
             .iter()
@@ -285,13 +320,21 @@ impl Provider for OpenAICompatProvider {
         let mut body = json!({
             "model": request.model,
             "messages": self.build_messages(&request.messages),
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
             "stream": true,
             // Ask the server for a final usage chunk so we can track tokens
             // and cost for every OpenAI-compatible provider.
             "stream_options": {"include_usage": true},
         });
+
+        if self.uses_max_completion_tokens(&request.model) {
+            body["max_completion_tokens"] = json!(request.max_tokens);
+        } else {
+            body["max_tokens"] = json!(request.max_tokens);
+        }
+
+        if !self.omits_temperature(&request.model) {
+            body["temperature"] = json!(request.temperature);
+        }
 
         // Inject system message at the start if provided
         if let Some(system) = &request.system {

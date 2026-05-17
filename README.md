@@ -5,7 +5,7 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.17</code> &nbsp;·&nbsp;
+  <code>v1.0.18</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
@@ -49,7 +49,20 @@
 21. [CLI Commands Reference](#-cli-commands-reference)
 22. [Configuration Reference](#-configuration-reference)
 23. [Environment Variables](#-environment-variables)
-24. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
+24. [v1.0.18 — MCP (Model Context Protocol) Integration](#-v1018--mcp-model-context-protocol-integration)
+    - [What MCP is and why it matters](#what-mcp-is-and-why-it-matters)
+    - [Architecture](#mcp-architecture)
+    - [Catalog of built-in servers](#mcp-catalog-of-built-in-servers)
+    - [Custom servers](#mcp-custom-servers)
+    - [Secrets handling](#mcp-secrets-handling)
+    - [The `/mcp` manager UI](#the-mcp-manager-ui)
+    - [Connection lifecycle & errors](#mcp-connection-lifecycle--errors)
+    - [Cross-platform spawn (Windows / macOS / Linux)](#mcp-cross-platform-spawn-windows--macos--linux)
+    - [Paste routing inside the MCP modal](#paste-routing-inside-the-mcp-modal)
+    - [Authenticated-identity rules for the model](#authenticated-identity-rules-for-the-model)
+    - [Examples per service](#mcp-examples-per-service)
+    - [Configuration & file layout](#mcp-configuration--file-layout)
+25. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
     - [Permission Modes](#permission-modes-plan--accept-edits--bypass--default)
     - [Extended Thinking](#extended-thinking-thinkingconfig)
     - [Tool Executor Rewrite](#tool-executor-rewrite)
@@ -65,9 +78,9 @@
     - [Skills Architecture](#skills-architecture-project--user--bundled)
     - [Skills UX — Commands & Status Bar](#skills-ux--commands--status-bar)
     - [How to Use, Add, Modify & Delete Skills](#how-to-use-add-modify--delete-skills)
-25. [Future Roadmap](#-future-roadmap)
-26. [Contributing](#-contributing)
-27. [License & Contact](#-license--contact)
+26. [Future Roadmap](#-future-roadmap)
+27. [Contributing](#-contributing)
+28. [License & Contact](#-license--contact)
 
 ---
 
@@ -542,6 +555,13 @@ Type these at the prompt and press Enter:
 | `/lsp install <lang>` | Install/start one built-in language server, e.g. `typescript`, `python`, `rust`, `go` |
 | `/lsp shutdown` | Stop every running language server (they will respawn lazily on next use) |
 | `/lsp shutdown <lang>` | Stop a single language server (`rust`, `typescript`, `python`, or `go`) |
+
+### MCP (Model Context Protocol)
+| Command | Description |
+|---|---|
+| `/mcp` | Open the MCP server manager modal (catalog + secrets + connect / disconnect) |
+| `/mcp list` | Print a compact text list of all known MCP servers and their status |
+| `/mcp reconnect`, `/mcp refresh` | Re-spawn every currently enabled server in the background |
 
 ---
 
@@ -1182,6 +1202,293 @@ max_conversation_lines = 1000
 | `FIREWORKS_API_KEY` | Fireworks API key |
 | `PERPLEXITY_API_KEY` | Perplexity API key |
 | `COHERE_API_KEY` | Cohere API key |
+
+---
+
+## 🔌 v1.0.18 — MCP (Model Context Protocol) Integration
+
+Version 1.0.18 adds first-class support for **Model Context Protocol** servers — the open standard from Anthropic for connecting an LLM agent to external tools, APIs, and data sources over JSON-RPC. With one toggle the agent can list your GitHub repos, send Slack messages, query your Linear issues, fetch Gmail threads, search Notion pages, run a sandboxed filesystem, hit your internal API — anything anyone has shipped (or you can ship) as an MCP server.
+
+> **Bottom line**: 50+ pre-wired services in the catalog, a custom-server form for anything not in the catalog, encrypted-at-rest secrets reusing the same store as your API keys, a TUI modal with proper scrolling and search, runtime tool registration into the existing tool registry, and a system-prompt block that teaches the model how to use MCP servers as the *authenticated user* (no more `user:me` query disasters).
+
+---
+
+### What MCP is and why it matters
+
+MCP is a thin JSON-RPC 2.0 protocol that lets an LLM call structured tools exposed by a separate program (the "MCP server"). The server runs as a child process; the agent talks to it over stdin/stdout with line-delimited JSON frames. Each server publishes a list of tools at handshake time — forge-osh registers every one of them into its tool registry under the prefix `mcp__<server>__<tool>`, and from that point on the model can call them exactly like its built-in tools (`read_file`, `bash`, `git_diff`, …).
+
+What this unlocks in one sentence: **the agent stops being a code-and-shell tool and becomes a universal action layer over every cloud service you can authenticate to**, while leaving the existing forge-osh permission system in charge of mutating actions.
+
+---
+
+### MCP Architecture
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                       forge-osh process                       │
+│                                                               │
+│  ┌─────────────┐   register   ┌─────────────────────────────┐ │
+│  │  McpManager │─────────────▶│        ToolRegistry         │ │
+│  │  (1 per     │              │  (now interior-mutable —    │ │
+│  │   session)  │              │   tools added/removed live) │ │
+│  └──────┬──────┘              └─────────────┬───────────────┘ │
+│         │ spawn child                       │ all_definitions │
+│         ▼                                   ▼                 │
+│  ┌─────────────┐  ┌──────────┐    ┌──────────────────────┐    │
+│  │ StdioTrans- │  │ McpClient│    │   Provider request   │    │
+│  │ port (PIPE) │◀▶│ (RPC)    │    │   (every model call) │    │
+│  └──────┬──────┘  └──────────┘    └──────────────────────┘    │
+│         │ stdin/stdout JSON-RPC                               │
+└─────────┼─────────────────────────────────────────────────────┘
+          ▼
+┌──────────────────────────────────────────────────────┐
+│  MCP server child process (npx / uvx / docker / …)   │
+│  e.g.  npx -y @modelcontextprotocol/server-github    │
+└──────────────────────────────────────────────────────┘
+```
+
+Source layout under `src/mcp/`:
+
+| File | Role |
+|---|---|
+| `protocol.rs` | JSON-RPC 2.0 envelopes — `JsonRpcRequest`, `JsonRpcResponse`, `JsonRpcNotification`, `InboundFrame`, `InitializeParams`, `CallToolResult`, `ContentBlock::flatten()` |
+| `transport.rs` | `StdioTransport::spawn()` — child process, piped stdin/stdout/stderr, async response correlation (`HashMap<i64, oneshot::Sender>`), stderr ring buffer (200 lines), per-request timeout |
+| `client.rs` | `McpClient::connect_stdio()` — performs initialize handshake → `notifications/initialized` → exposes `tools/list`, `tools/call` |
+| `catalog.rs` | 50+ catalog entries: `CatalogEntry { id, display_name, description, category, command, args, secret_specs }` + `SecretSpec` |
+| `tool_adapter.rs` | `McpTool` — `impl Tool` so MCP tools satisfy the same trait as native ones; local name `mcp__<server>__<tool>`; schema validation; delegates to `McpClient` |
+| `manager.rs` | Lifecycle owner — `load_from_config`, `connect_all_enabled`, `connect`, `disconnect`, `set_enabled`, `save_secret`, `delete_secret`, `snapshot`, `add_custom_server`, `remove_custom_server`, `export_to_config` |
+| `mod.rs` | Public API re-exports |
+
+Everything is async (Tokio). The TUI never blocks on a connect — connections run in background tasks that push success/error back into a shared `mcp_status_msgs: Arc<Mutex<VecDeque<String>>>` queue that the main loop drains each tick and surfaces as system messages.
+
+---
+
+### MCP catalog of built-in servers
+
+50+ entries shipped in `src/mcp/catalog.rs`. Each is one constant — no code change is needed to enable one, just toggle it in the modal. Categories include:
+
+- **Dev platforms** — GitHub, GitLab, Git (local repo), Docker
+- **Communication** — Slack, Discord, Gmail
+- **Productivity** — Linear, Notion, Confluence, Jira, Asana, Trello
+- **Cloud / infra** — AWS, Cloudflare, Google Drive, Google Calendar, Google Maps
+- **Data** — Postgres, MySQL, SQLite, ClickHouse, DuckDB, Elasticsearch, Neo4j, Pinecone, Chroma
+- **Search & retrieval** — Brave Search, DuckDuckGo Search, Exa Search, Tavily, Perplexity
+- **Web** — Fetch (generic HTTP-to-markdown), Browserbase, Puppeteer, Apify
+- **Files** — Filesystem (sandboxed), Memory (k/v scratchpad)
+- **Media / creative** — Figma, EverArt (image gen), Spotify
+- **News / data** — Hacker News, Reddit
+- **Many more** — see `/mcp` in the running app for the live list with descriptions
+
+For every entry the catalog declares:
+- The exact command + args used to spawn the server (almost always `npx -y <pkg>` for Node servers and `uvx <pkg>` for Python ones)
+- The set of secrets the server needs (e.g. `GITHUB_PERSONAL_ACCESS_TOKEN`) along with the human-readable label and a help string pointing at where to create the token
+
+---
+
+### MCP custom servers
+
+Anything not in the catalog can be added through the **Add Custom MCP Server** form (`n` from the list view). The form takes:
+
+| Field | Notes |
+|---|---|
+| ID (slug) | Lowercase ascii + `-`/`_`; must not collide with a catalog id |
+| Display name | What appears in the modal |
+| Description | One-line summary shown in the list |
+| Category | Free-text; defaults to `Custom` |
+| Command | Binary to run (e.g. `npx`, `uvx`, `docker`, or an absolute path) |
+| Args | Space-separated arguments — passed verbatim |
+| Required secret env vars | Comma-separated names (e.g. `MYCORP_TOKEN, MYCORP_REGION`); each one is collected from the user, encrypted under `mcp:<id>:<KEY>`, and exported into the child's environment at spawn |
+| Enabled on save | If checked, the manager connects immediately |
+
+The custom server persists to `~/.forge-osh/config.toml` under `[[mcp.servers]]` and is restored on every launch. Tip line in the form: *"command + args are split on spaces; each named secret is stored encrypted-at-rest under `mcp:<id>:<KEY>` and exposed to the server process as an env var."*
+
+---
+
+### MCP secrets handling
+
+MCP secrets use the **same encryption-at-rest store as your provider API keys** — `~/.forge-osh/keys.json`. They are namespaced with the prefix `mcp:<server_id>:<KEY>` so a single keystore file can hold:
+
+- `anthropic` → your Anthropic API key
+- `openai` → your OpenAI API key
+- `mcp:github:GITHUB_PERSONAL_ACCESS_TOKEN`
+- `mcp:slack:SLACK_BOT_TOKEN`
+- `mcp:gmail:GMAIL_OAUTH_TOKEN`
+- `mcp:<custom>:<KEY>` …
+
+Resolution priority when spawning a server (`manager.rs`):
+
+1. **Environment variable** with the bare name (e.g. `$GITHUB_PERSONAL_ACCESS_TOKEN`) — useful for CI / one-shot use
+2. **Stored value** under `mcp:<id>:<KEY>` in the encrypted keystore
+
+If a required secret is missing on connect attempt, the server is marked `Error: missing required secrets: …`, no child process is spawned, and the status appears in the modal.
+
+Secrets never appear in logs, are masked in the modal UI (`[saved]` / `[MISSING (required)]` / `[from env]`), and the SecretInput view masks the value while you're typing it.
+
+---
+
+### The `/mcp` manager UI
+
+Open with `/mcp`. Four views, each rendered by `src/tui/renderer.rs`:
+
+**List view** — every catalog entry + every custom server, sorted by display name. Each row shows:
+- Status pill: `[enabled]` / `[disabled]` (background color follows your theme)
+- Live status word: `active` / `connecting…` / `disconnected` / `error: <reason>`
+- Tool count: `tools=N` (filled only after handshake succeeds)
+- Secrets state: `secrets=N/M` (filled out of needed; `need!` if any required are missing)
+- One-line description
+
+Keybindings (List view):
+
+| Key | Action |
+|---|---|
+| `↑ / k`, `↓ / j` | Move selection |
+| `PgUp / PgDn` | Page navigation |
+| `Home / End` | First / last |
+| `Space` or `t` | Toggle enabled (auto-connects on enable) |
+| `c` | Connect (auto-enables + connects if needed) |
+| `x` | Disconnect (also unregisters the server's tools from the registry) |
+| `Enter` / `→` / `l` / `Tab` | Open Detail view |
+| `n` | Open the **Add Custom MCP Server** form |
+| `D` (capital) | Delete a custom server (catalog entries can never be deleted) |
+| `r` | Refresh / reconnect all enabled |
+| `Esc` / `q` | Close modal |
+
+**Detail view** — per-server breakdown. Shows server ID, category, tool count, version returned by the handshake, full description, and the secrets table. The last 5 lines of the server's stderr are rendered live so you can see exactly what went wrong with a failing spawn (e.g. `npm warn deprecated`, missing scopes on a token, port conflicts).
+
+Detail keys: `Enter` / `e` on a secret row opens **SecretInput**; `d` / `Delete` clears a stored secret; `Space` / `t` toggle; `c` / `x` connect / disconnect; `←` / `h` / `Esc` back to List.
+
+**SecretInput view** — single-line masked input. Type or paste your token, press `Enter` to save (writes to `~/.forge-osh/keys.json`), `Esc` to cancel.
+
+**CustomForm view** — the eight-field form described above. `Tab` / `↑↓` move between fields; `Ctrl+S` saves; `Esc` cancels.
+
+---
+
+### MCP connection lifecycle & errors
+
+When you press `c` or toggle a server on:
+
+1. Manager calls `set_enabled(id, true)` and persists `enabled=true` to `config.toml`
+2. Manager builds the secret env-var map (env var first, then keystore)
+3. If any required secret is missing → status `Error: missing required secrets: …`, return
+4. `StdioTransport::spawn()` starts the child process. On Windows non-`.exe` commands are routed through `cmd /C` so PATHEXT resolves `npx.cmd` and similar
+5. `McpClient::initialize` handshake (with the 45-second connect timeout)
+6. `tools/list` — every returned tool is wrapped in an `McpTool` adapter and inserted into the shared `ToolRegistry`
+7. Status flips to `Active`, tool count updates, the system-message bar in the main TUI logs `MCP: '<id>' connected — N tool(s) registered.`
+
+Failure modes that get reported back as system messages:
+
+- `MCP: '<id>' connect failed: spawn failed: <program>: program not found` — binary isn't on PATH (install Node / `uvx` / Docker)
+- `MCP: '<id>' connect failed: tools/list failed: …` — handshake succeeded but the server crashed mid-discovery
+- `MCP: '<id>' connect failed: timed out waiting for response` — server hung for >45 s during initialize
+- `MCP: '<id>' connect failed: missing required secrets: GITHUB_PERSONAL_ACCESS_TOKEN`
+
+All non-fatal warnings from the server (e.g. `npm warn deprecated …`) stream into the stderr ring buffer and are visible in the Detail view's "Recent stderr (last 5 lines)" block.
+
+---
+
+### MCP cross-platform spawn (Windows / macOS / Linux)
+
+`StdioTransport::spawn()` is platform-aware:
+
+| OS | Behaviour |
+|---|---|
+| **macOS / Linux** | `Command::new(program).args(args).spawn()` — direct exec |
+| **Windows** | If `program` is a non-absolute path **and** does not end in `.exe`, the call is rewritten as `cmd /C <program> <args…>` so that `PATHEXT` is honoured (resolves `npx.cmd`, `uvx.exe`, `docker.cmd`, custom `.bat` shims). For absolute paths or `.exe`, it spawns directly. `CREATE_NO_WINDOW` is set so no console flashes on Windows. |
+
+This single change makes `npx -y @modelcontextprotocol/server-github` work on Windows, Windows Terminal, WezTerm, cmd.exe, and macOS / Linux terminals, with no per-server configuration.
+
+---
+
+### Paste routing inside the MCP modal
+
+Special handling — because the modal binds single-letter shortcuts (`h` back, `n` new, `t` toggle, `c` connect, `x` disconnect, `D` delete-custom, `q` close) — a token pasted at the wrong time would otherwise trigger destructive shortcuts one keypress at a time.
+
+The TUI does two things:
+
+1. **Burst detection** — `collect_fallback_paste_burst` (in `src/tui/mod.rs`) treats any rapid keystroke burst as a paste and assembles it. On Windows legacy terminals where bracketed-paste support is unreliable, an enlarged 120 ms initial grace + 120 ms quiet-gap window catches even slowly-arriving pasted characters before they leak into the key handler. On macOS / Linux / Windows Terminal / WezTerm, `Event::Paste` fires natively and the burst path is never entered, so there is no added latency.
+2. **Modal-aware routing** — once a paste is collected, `handle_clipboard_paste_text` looks at the active view:
+   - **SecretInput** → text is appended to the secret buffer
+   - **CustomForm** → text is appended to the currently focused text field
+   - **List / Detail** → paste is ignored with a hint ("press Enter on a secret row to open the input field first") so a stray paste never opens the new-server form or toggles a random server
+
+---
+
+### Authenticated-identity rules for the model
+
+A connected MCP server runs with **your** credentials. Without help the model treats every tool as a generic public API — it asks for your username, then pastes English words like "me" into search qualifiers, and a search like `user:me` happens to match a real GitHub account named "me" (owned by someone else). To prevent this class of failure, two things happen at runtime:
+
+**1. Every MCP tool's description is rewritten at registration time** with an authentication-context tag, generic across every server:
+
+> `[mcp:<id>] (authenticated as the user's own account on this service — do NOT pass placeholder values like USERNAME / OWNER / ME / YOUR_TOKEN; the server already knows the user's identity from its credential.) <original description>`
+
+**2. The system prompt gains an "MCP Servers" block** whenever at least one MCP tool is registered. Five numbered rules:
+
+| Rule | Principle |
+|---|---|
+| 1 | First-person words (`my`, `me`, `mine`, `I`, `myself`) refer to the credential-holder, never to a literal field value |
+| 2 | Prefer the no-argument authenticated-user tool over any `search_*` tool when the user refers to their own data |
+| 3 | Concrete worked anti-pattern showing `query: "user:me"` returning the wrong user, with ❌ wrong vs ✅ right side-by-side |
+| 4 | Never substitute literal placeholders (`USERNAME`, `OWNER`, `EMAIL`, `YOUR_TOKEN`); use an authenticated-user tool or `ask_user` instead. A 422 Validation Error almost always means a placeholder was passed |
+| 5 | Don't fall back to `web_search` / `web_fetch` for user data when a connected MCP server covers the domain |
+
+The block is generated from the live registry — every connected server (built-in or custom) is listed with its tool count and prefix, and the rules apply uniformly. None of this is server-specific code.
+
+---
+
+### MCP examples per service
+
+What the rules mean in practice. **None of these are hardcoded** — the model learns to do this from the per-tool tag + system-prompt rules:
+
+| You say | ❌ Wrong (the trap) | ✅ Right |
+|---|---|---|
+| "list **my** repos" | `mcp__github__search_repositories` with `query: "user:me"` | `mcp__github__list_repositories_for_authenticated_user` (no args) |
+| "what's in **my** inbox" | `mcp__gmail__search_messages` with `from:me` | `mcp__gmail__list_messages` (the OAuth token = you) |
+| "**my** Slack DMs" | `mcp__slack__search_messages` with `user:me` | `mcp__slack__conversations_list` with `types: im` |
+| "**my** Linear issues" | `mcp__linear__search_issues` with `assignee:me` | `mcp__linear__list_my_issues` / viewer.assignedIssues |
+| "today on **my** calendar" | `mcp__google_calendar__search_events` with `attendee:me` | `mcp__google_calendar__list_events` with `calendarId: primary` |
+| "**my** GitLab projects" | `mcp__gitlab__search_projects` with `owner:me` | `mcp__gitlab__list_projects` with `membership: true` |
+| "**my** Notion pages" | `mcp__notion__search` with `created_by:me` | `mcp__notion__users_me` then list-by-owner |
+
+Same wording covers Confluence, Jira, Asana, Trello, Reddit, Spotify, Drive, and any custom server you wire up.
+
+---
+
+### MCP configuration & file layout
+
+Per-user files (created on first use):
+
+| Path | Purpose |
+|---|---|
+| `~/.forge-osh/config.toml` | TOML config; the `[mcp]` section persists every server's `enabled` flag plus any custom entries (id, display_name, description, category, command, args, secret_specs) |
+| `~/.forge-osh/keys.json` | Encrypted-at-rest secret store; MCP secrets live under `mcp:<server_id>:<KEY>` keys |
+
+Example `[mcp]` block in `config.toml` after enabling GitHub and adding a custom server:
+
+```toml
+[[mcp.servers]]
+id = "github"
+enabled = true
+command = ""   # empty — falls back to the catalog command so package updates flow in automatically
+args = []
+secret_specs = []
+
+[[mcp.servers]]
+id = "mycorp-tools"
+enabled = true
+display_name = "MyCorp Internal Tools"
+description = "Internal RAG over the design docs"
+category = "Custom"
+command = "uvx"
+args = ["mycorp-mcp-server", "--region", "eu-west-1"]
+
+  [[mcp.servers.secret_specs]]
+  key = "MYCORP_TOKEN"
+  label = "MYCORP_TOKEN"
+  help = "Custom secret — set as env var 'MYCORP_TOKEN' for the server"
+  required = true
+```
+
+The TUI never edits `config.toml` directly; it builds a complete new `[mcp.servers]` list from the live manager state and writes it back via `Config::load_raw` + section replacement, so all your other settings stay untouched on every change.
 
 ---
 
