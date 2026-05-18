@@ -13,28 +13,28 @@
 ---
 
 <p align="center">
-  <img src="media/img1.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img2.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img3.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img8.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img4.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img5.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img6.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img7.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img18.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img17.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img22.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img20.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img19.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img21.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img12.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img13.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img14.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img15.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img16.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img11.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img23.png" width="800" style="margin-bottom: 16px;"><br>
-  <img src="media/img24.png" width="800">
+  <img src="media/img1.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img2.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img3.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img8.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img4.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img5.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img6.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img7.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img18.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img17.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img22.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img20.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img19.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img21.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img12.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img13.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img14.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img15.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img16.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img11.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img23.png" width="800" style="margin-bottom: 16px;"><br><br><br>
+  <img src="media/img24.png" width="800"><br><br>
 
 </p>
 
