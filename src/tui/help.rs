@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.18)
+    r#"forge-osh Help  (v1.0.19)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen (scroll: ↑↓/jk, PgUp/PgDn, g/G)

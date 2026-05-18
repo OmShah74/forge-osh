@@ -1992,8 +1992,17 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         .map(|n| format!("  🪄 {n}"))
         .unwrap_or_default();
 
+    let goal_indicator = {
+        let s = state.goal_status_blurb.lock();
+        if s.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", *s)
+        }
+    };
+
     let status = format!(
-        " ^C Cancel  ^O Model  ^P Provider  ^K Keys  ^B Cost  ^R Theme  ^T Trust[{trust}]  /help Cmds{skill_indicator}{scroll_info}{unread_indicator}"
+        " ^C Cancel  ^O Model  ^P Provider  ^K Keys  ^B Cost  ^R Theme  ^T Trust[{trust}]  /help Cmds{skill_indicator}{goal_indicator}{scroll_info}{unread_indicator}"
     );
 
     let bar =

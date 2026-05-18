@@ -61,6 +61,16 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub features: FeaturesConfig,
+}
+
+/// Experimental / opt-in feature flags. Mirrors Codex's `[features]` table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeaturesConfig {
+    /// Enable the /goal primitive (autonomous, durable, verifiable goals).
+    #[serde(default)]
+    pub goals: bool,
 }
 
 /// Configuration for MCP (Model Context Protocol) servers.

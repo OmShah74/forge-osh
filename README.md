@@ -5,7 +5,7 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.18</code> &nbsp;·&nbsp;
+  <code>v1.0.19</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
@@ -49,7 +49,22 @@
 21. [CLI Commands Reference](#-cli-commands-reference)
 22. [Configuration Reference](#-configuration-reference)
 23. [Environment Variables](#-environment-variables)
-24. [v1.0.18 — MCP (Model Context Protocol) Integration](#-v1018--mcp-model-context-protocol-integration)
+24. [v1.0.19 — `/goal` Primitive (Durable, Autonomous, Verifiable Goals)](#-v1019--goal-primitive-durable-autonomous-verifiable-goals)
+    - [What `/goal` is and why it matters](#what-goal-is-and-why-it-matters)
+    - [Goal Architecture](#goal-architecture)
+    - [The Goal Contract — GoalSpec](#the-goal-contract--goalspec)
+    - [Verifiers — turning self-report into a contract](#verifiers--turning-self-report-into-a-contract)
+    - [Policy — autonomous permission gating](#policy--autonomous-permission-gating)
+    - [Budget — turns, wall, tokens (no cost limit)](#budget--turns-wall-tokens-no-cost-limit)
+    - [Line protocol — PROGRESS / BLOCKED / CLAIM_DONE](#line-protocol--progress--blocked--claim_done)
+    - [The autonomous worker loop](#the-autonomous-worker-loop)
+    - [The `/goal` slash command surface](#the-goal-slash-command-surface)
+    - [Multi-goal & cold-start resume](#multi-goal--cold-start-resume)
+    - [Status-bar indicator](#goal-status-bar-indicator)
+    - [On-disk layout](#goal-on-disk-layout)
+    - [Examples & worked recipes](#goal-examples--worked-recipes)
+    - [Enabling /goal — the feature flag](#enabling-goal--the-feature-flag)
+25. [v1.0.18 — MCP (Model Context Protocol) Integration](#-v1018--mcp-model-context-protocol-integration)
     - [What MCP is and why it matters](#what-mcp-is-and-why-it-matters)
     - [Architecture](#mcp-architecture)
     - [Catalog of built-in servers](#mcp-catalog-of-built-in-servers)
@@ -62,7 +77,7 @@
     - [Authenticated-identity rules for the model](#authenticated-identity-rules-for-the-model)
     - [Examples per service](#mcp-examples-per-service)
     - [Configuration & file layout](#mcp-configuration--file-layout)
-25. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
+26. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
     - [Permission Modes](#permission-modes-plan--accept-edits--bypass--default)
     - [Extended Thinking](#extended-thinking-thinkingconfig)
     - [Tool Executor Rewrite](#tool-executor-rewrite)
@@ -78,9 +93,9 @@
     - [Skills Architecture](#skills-architecture-project--user--bundled)
     - [Skills UX — Commands & Status Bar](#skills-ux--commands--status-bar)
     - [How to Use, Add, Modify & Delete Skills](#how-to-use-add-modify--delete-skills)
-26. [Future Roadmap](#-future-roadmap)
-27. [Contributing](#-contributing)
-28. [License & Contact](#-license--contact)
+27. [Future Roadmap](#-future-roadmap)
+28. [Contributing](#-contributing)
+29. [License & Contact](#-license--contact)
 
 ---
 
@@ -562,6 +577,22 @@ Type these at the prompt and press Enter:
 | `/mcp` | Open the MCP server manager modal (catalog + secrets + connect / disconnect) |
 | `/mcp list` | Print a compact text list of all known MCP servers and their status |
 | `/mcp reconnect`, `/mcp refresh` | Re-spawn every currently enabled server in the background |
+
+### `/goal` (Durable autonomous objectives — v1.0.19, gated by `[features] goals = true`)
+| Command | Description |
+|---|---|
+| `/goal` | List every live goal — id, state, turns, cost, objective |
+| `/goal <objective>` | Spawn a new goal with a one-liner objective |
+| `/goal --from <path.toml>` | Spawn from a TOML `GoalSpec` (regenerates id + created_at) |
+| `/goal-check [<id>]` | Status card (state, tokens, cost, last checkpoint, files touched, recent progress); never blocks the worker |
+| `/goal pause <id>` | Cooperative pause at the next tool boundary |
+| `/goal resume <id>` | Re-enter the loop with a continuation message |
+| `/goal clear <id>` | Cancel mid-stream, archive to `_archive/`, remove from `index.json` |
+| `/goal complete <id>` | Admin override — force `Completed` without running verifiers |
+| `/goal verify <id>` | Run verifiers now without changing state |
+| `/goal metrics <id>` | Pretty-print full `GoalMetrics` |
+| `/goal logs <id> [N]` | Tail the last N lines of `progress.log` (default 50) |
+| `/goal budget <id> [--max-turns N] [--max-wall <secs>] [--max-input-tokens N] [--max-output-tokens N]` | Persist new caps to `spec.toml`; worker picks them up at the next turn boundary |
 
 ---
 
@@ -1202,6 +1233,382 @@ max_conversation_lines = 1000
 | `FIREWORKS_API_KEY` | Fireworks API key |
 | `PERPLEXITY_API_KEY` | Perplexity API key |
 | `COHERE_API_KEY` | Cohere API key |
+
+---
+
+## 🎯 v1.0.19 — `/goal` Primitive (Durable, Autonomous, Verifiable Goals)
+
+Version 1.0.19 lands the **`/goal` primitive** — a way to hand the agent a *durable contract* and walk away. Instead of prompting turn-by-turn, you write down what "done" looks like, submit it once, and a background worker iterates until the goal is verifiably complete, the budget runs out, or you cancel it. Multiple goals run concurrently, each in its own scoped session with its own cost tracker and its own checkpoint trail. Verifiers turn the model's `CLAIM_DONE` self-report into an empirical contract: until shell commands, files, and git state actually satisfy them, the worker keeps going.
+
+> **Bottom line**: durable autonomous loops, atomic checkpointing every 5 tool calls or 60s, multi-goal concurrency from day 1, exact path-glob and shell-allowlist policy enforcement (no user prompts mid-run), shell / file / git verifiers with full stdout-on-failure feedback to the model, cold-start resume after a kill, `/goal --from PLAN.md` spec files, live `/goal budget` adjustments, status-bar indicator, and `/goal-check` that never blocks the worker. Gated behind `[features] goals = true`.
+
+### What `/goal` is and why it matters
+
+A regular prompt asks for the next response. **`/goal` flips that.** You define the stopping condition once, then the agent drives itself toward it. The shift is from *prompting* (you steering every turn) to *assigning* (the agent driving toward a target you defined).
+
+A goal is **not a long prompt**. It is a **durable contract** consisting of:
+
+| Element | Role |
+|---|---|
+| **Objective** | What to do, in free text. |
+| **Stopping condition** | What "done" looks like, in plain English. |
+| **Verifiers** | Empirical checks (shell command, file existence, git tree clean…) that prove "done". |
+| **Budget** | `max_turns`, `max_wall`, `max_input_tokens`, `max_output_tokens`. **No `max_usd` — cost is observed, never enforced.** |
+| **Policy** | Auto-approval rules for tool calls so the worker runs unattended. |
+| **Checkpoint trail** | Atomic snapshots so `/goal-check` is cheap and crash-safe. |
+
+The goal stays active until it's achieved, paused, blocked, cleared, or it runs out of budget.
+
+The model is told about the contract through a `## /goal mode` block appended to its system prompt — same agent loop, same provider, same tools, same MCP servers; just a different driver in charge.
+
+### Goal Architecture
+
+The TUI and the goal workers are completely decoupled — they share only an `mpsc::UnboundedSender<(GoalId, GoalEvent)>` for live notifications and the on-disk layout for everything else. **Checking status never touches the running worker.**
+
+```
+            ┌──────────────── TUI (src/tui/mod.rs) ────────────────┐
+            │  /goal …    /goal-check    /goal pause/resume/clear  │
+            │  status bar:  ● 2 goal(s) — 1 running, 1 verifying   │
+            └──────┬──────────────────────────────────▲────────────┘
+       GoalControl │                                  │ GoalEvent
+                   ▼                                  │
+        ┌──────────────────── GoalSupervisor ─────────┴───────────┐
+        │  registry of active goals (HashMap<GoalId, Handle>)     │
+        │  events fan-in, deps injection, respawn from disk       │
+        └─────┬──────────────────────────┬──────────────────────┬─┘
+              │ spawn                    │ spawn                │
+              ▼                          ▼                      ▼
+       ┌────────────┐             ┌────────────┐         ┌────────────┐
+       │ GoalWorker │  …          │ GoalWorker │   …     │ GoalWorker │
+       │ (own loop) │             │ (own loop) │         │ (own loop) │
+       └──────┬─────┘             └──────┬─────┘         └──────┬─────┘
+              │ uses                     │                       │
+              ▼                          ▼                       ▼
+   provider + tools + session (each goal has its OWN session, not the user's)
+              │                                                  │
+              └──────── disk: spec.toml, transcript.jsonl, ──────┘
+                       checkpoints/*.json, progress.log, metrics.json
+```
+
+**Key invariant: the user's conversation session and each goal's session are different sessions.** This means:
+
+- `/goal-check` doesn't pollute your transcript with progress noise.
+- You can keep chatting with the agent while goals run in the background.
+- Pausing or clearing a goal doesn't disturb your input cursor.
+- Each goal's cost is isolated — you can see exactly what `goal#a3f` cost without grepping through your conversation log.
+
+The source layout, all under `src/agent/goal/`:
+
+| File | Role |
+|---|---|
+| `mod.rs` | Public types: `GoalId`, `GoalSpec`, `GoalState`, `GoalEvent`, `GoalControl`, `GoalMetrics`, `Verifier`, `Policy`, `Budget`, `AutoApprove`, `Checkpoint`, `StatusSnapshot`, `GoalSummary`. |
+| `persistence.rs` | Atomic-write helpers (`tempfile + rename`), `IndexFile`, per-goal directory helpers, checkpoint ring rotation (50 files max), progress.log appender, `archive_goal`. |
+| `prompt.rs` | Builds the `## /goal mode` system-prompt block from a `GoalSpec`. Parses streamed text for `PROGRESS:` / `BLOCKED:` / `CLAIM_DONE:` markers. |
+| `policy.rs` | `Decision { Allow, Deny(reason) }`. `evaluate_with_args` walks raw JSON args; `evaluate` is the summary-heuristic fallback. |
+| `verifier.rs` | Runs Shell / FileExists / FileContains / NoUncommittedFiles / Custom verifiers, captures stdout/stderr/exit, persists report to `verifier_runs/`. |
+| `worker.rs` | The autonomous loop: scoped `AgentLoop`, event drain, marker scan, budget enforcement, checkpointing, verification phase. |
+| `supervisor.rs` | `GoalSupervisor` — multi-goal registry, `spawn`/`respawn`/`pause`/`resume`/`clear`/`status`/`list`/`set_budget`/`verify_now`/`force_complete`. |
+| `resumer.rs` | Cold-start resume: reads `index.json` at TUI boot, respawns every non-terminal goal. |
+
+### The Goal Contract — GoalSpec
+
+The persisted form of a goal lives at `~/.forge-osh/goals/<id>/spec.toml` and round-trips through serde. A `/goal --from path.toml` invocation reads exactly this shape (modulo `id` and `created_at`, which are regenerated):
+
+```toml
+[id]
+0 = "lws7g-3a5e1f02"            # auto-generated <base36ts>-<hex>
+
+objective = "Migrate src/provider/openai to the new v2 SDK and keep tests green."
+stopping_condition = "cargo test --package forge_agent -- openai is green and no uncommitted unrelated files"
+created_at = "2026-05-17T14:00:00Z"
+workdir = "C:/Users/OM SHAH/Desktop/forge-osh"
+seed_files = ["src/provider/openai/mod.rs", "src/provider/openai/stream.rs"]
+
+[[verifiers]]
+type = "shell"
+cmd = "cargo build --release"
+expect_exit = 0
+
+[[verifiers]]
+type = "shell"
+cmd = "cargo test --package forge_agent -- openai"
+expect_exit = 0
+expect_stdout_contains = "test result: ok"
+
+[[verifiers]]
+type = "no_uncommitted_files"
+except = ["target/**", "*.log"]
+
+[budget]
+max_turns = 200
+max_wall = 14400          # seconds (4h)
+max_input_tokens = 800000
+# (No max_usd — cost is observed, never enforced.)
+
+[policy]
+network = true
+auto_approve = "allowed_tools"   # "read_only" | "allowed_tools" | "all"
+write_globs = ["src/provider/openai/**", "tests/**"]
+deny_globs = [".git/**", "**/keys.json", "**/.env"]
+shell_allowlist = [
+  "^cargo\\s+(build|check|test|clippy|fmt)\\b",
+  "^git\\s+(status|diff|log|add|commit)\\b",
+]
+```
+
+Sensible defaults (kick in when fields are omitted): `Budget { max_turns = 200, max_wall = 4h }`, `Policy { network = true, auto_approve = AllowedTools, deny_globs = [".git/**", "**/keys.json", "**/.env"], shell_allowlist = [cargo build|check|test|clippy|fmt, git status|diff|log|add|commit, npm test|run build|run lint, pnpm test|build|lint, pytest, ls] }`.
+
+### Verifiers — turning self-report into a contract
+
+When the model emits `CLAIM_DONE:`, the worker does **not** trust it. It transitions to `Verifying`, runs every configured verifier sequentially (they share workdir state — parallel runs would race), and either:
+
+- All pass → state `Completed`, `GoalEvent::Completed { metrics }` emitted, worker exits.
+- Any fail → the failure output (exit code + stdout/stderr excerpt per check) is captured into a synthetic user turn — `"Verification failed after your CLAIM_DONE. Fix and re-claim: ✗ tests → exit 101 …"` — and the worker loops with that message as the next prompt. The model fixes and re-claims.
+
+Each verifier has a strict **5-minute wall clock** and is run with `Stdio::piped` so its stdout/stderr are captured (truncated to a 4 KiB excerpt). Every run persists atomically to `~/.forge-osh/goals/<id>/verifier_runs/<iso_ts>.json`.
+
+| Verifier kind | Pass condition | Implementation |
+|---|---|---|
+| `Shell { cmd, expect_exit, expect_stdout_contains }` | Exit matches `expect_exit` AND (if set) stdout contains the substring | `cmd /C` on Windows, `sh -c` elsewhere, run inside `spec.workdir` |
+| `FileExists { path }` | `tokio::fs::metadata(workdir.join(path))` succeeds | tokio fs |
+| `FileContains { path, needle }` | File exists and bytes contain `needle` | tokio fs + bytewise scan |
+| `NoUncommittedFiles { except }` | `git status --porcelain` filtered by `except` glob list is empty | `git` child process |
+| `Custom { name, cmd }` | Exit 0 | shell exec |
+
+**When no verifiers are configured**, the worker trusts the model's `CLAIM_DONE` and transitions to `Completed` directly. This is the safe-by-default behaviour for simple "do X" goals — you only get the verifier contract when you actually write one.
+
+`/goal verify <id>` (while the worker is running) sets a `pending_verify_now` flag; the worker runs verifiers between the current and next turn, emits one `GoalEvent::VerifierResult` per check, persists the report, then restores its prior state. It does **not** flip a Running goal to Completed even if all verifiers pass — it's a diagnostic, not an admin override (use `/goal complete <id>` for that).
+
+### Policy — autonomous permission gating
+
+A goal worker runs in `PermissionMode::Default` (not `Bypass`) — but instead of prompting the user, a **policy responder task** drains every `PermissionRequest` and answers automatically based on the goal's `Policy`. The user is **never** prompted mid-run.
+
+The decision tree:
+
+| Auto-approve level | Effect |
+|---|---|
+| `ReadOnly` | Only `PermissionLevel::ReadOnly` tools allowed. Everything else denied. |
+| `AllowedTools` (default) | Read-only always allowed. Mutating requires every path-typed arg to match `write_globs` (empty = "allow everything in workdir"). Shell requires the command to match a `shell_allowlist` regex. Destructive always denied. Network honors `policy.network`. MCP tools allowed. |
+| `All` | Everything allowed (except `deny_globs` paths, which are still hard-denied — `.git/**`, keystore, `.env`). |
+
+Path-glob matching is **exact**: phase-4 plumbed the raw `serde_json::Value` of the tool call into `PermissionRequest::input`, so `policy::evaluate_with_args` walks 12 scalar arg keys (`path`, `file_path`, `filename`, `filepath`, `dir`, `directory`, `target`, `target_file`, `src`, `source`, `dst`, `dest`, `destination`) plus three array keys (`paths`, `files`, `targets`) and matches each through `glob::Pattern`. No heuristic guessing.
+
+Every denial surfaces as a system-message line `policy DENY: <tool> (<summary>) — <reason>`, a `progress.log` entry `POLICY: deny …`, and a `GoalEvent::Progress` event. The model sees the denial in its tool-result stream and is expected to adapt — it never gets to "ask the user" because the user has walked away.
+
+### Budget — turns, wall, tokens (no cost limit)
+
+Tracked at the top of every iteration:
+
+```rust
+if turns      >= max_turns      { Block("turns ({max})"); }
+if elapsed     > max_wall       { Block("wall ({secs}s)"); }
+if in_tokens  >= max_input_tokens  { Block("input tokens ({max})"); }
+if out_tokens >= max_output_tokens { Block("output tokens ({max})"); }
+```
+
+On any breach: `GoalEvent::BudgetWarn { kind, used, limit }`, state transitions to `Blocked("budget exhausted: …")`, metrics flushed, worker exits. The goal persists; `/goal budget <id> --max-turns 400` raises the cap and `/goal resume <id>` continues from the last checkpoint.
+
+**Cost is recorded but never enforced.** `GoalMetrics::cost_usd` accumulates from the goal session's `CostTracker` and shows up in `/goal metrics` and `/goal-check`. The goal will never auto-stop because of spend — that's a deliberate design decision: you should be able to set a goal running and trust that it won't be killed by a stale budget estimate.
+
+### Line protocol — PROGRESS / BLOCKED / CLAIM_DONE
+
+The model is told (via the system prompt) to emit three classes of markers on their own lines:
+
+| Marker | What the worker does |
+|---|---|
+| `PROGRESS: <one-line description>` | Appends `PROGRESS: …` to `progress.log`, increments `metrics.progress_lines`, emits `GoalEvent::Progress { line }`. Each PROGRESS line is what `/goal-check` and `/goal logs` show you. |
+| `BLOCKED: <reason>` | Cancels the in-flight tool stream, transitions state to `Blocked(reason)`, persists, exits the worker. User must `/goal resume` after addressing the block. |
+| `CLAIM_DONE: <one-paragraph summary>` | Triggers the **Verifying** phase. See above. |
+
+Markers must appear at the start of a line (after any leading whitespace). The scanner uses byte offsets in the per-turn text buffer to handle markers that span chunk boundaries — partial lines aren't re-emitted on the next chunk.
+
+### The autonomous worker loop
+
+Per turn:
+
+1. **Drain control signals** (`Pause`/`Resume`/`Clear`/`VerifyNow`/`ForceComplete`/`StatusReq`) non-blockingly.
+2. **Run pending verify-now** if requested between turns.
+3. **Check budget**. Break to `Blocked` on breach.
+4. **Compose user message**: first turn = `initial_user_message(spec)`; verifier-failure follow-up = the failure-feedback message; otherwise = `continuation_message()`.
+5. **Fresh cancel token** so `/goal clear` can interrupt mid-stream.
+6. **Spawn `AgentLoop::run(message)`** as a background task; **drain its event stream concurrently** with a 200 ms timeout poll.
+7. For every chunk: scan accumulated text for protocol markers; on `PROGRESS:` append + emit; on `BLOCKED:` cancel and return `Blocked`; on `CLAIM_DONE:` return `ClaimDone`. For every `ToolStart`, extract path-typed args into the cumulative `files_touched: Vec<PathBuf>`. For every `ToolEnd`, append `TOOL: <name> (ok|error)` to `progress.log` and bump the checkpoint counter.
+8. **Checkpoint** every 5 tool calls OR 60 wall-seconds (whichever first). Atomic write of `Checkpoint { at, turn, phase, last_action, files_touched: snapshot, progress_blurb, metrics }`.
+9. After the run returns, refresh metrics from the goal session's `CostTracker`, write a per-turn checkpoint, persist `index.json`.
+10. Dispatch on outcome:
+    - `ClaimDone` → run verifiers; all pass → `Completed`; any fail → continuation override; no verifiers → trust and `Complete`.
+    - `Blocked` → state `Blocked(reason)`, exit.
+    - `Paused` → park on `Notify`; on wake check for `Cleared`.
+    - `Cancelled` → state `Cleared`, exit.
+    - `Errored(e)` → state `Blocked("agent loop errored: e")`.
+    - `Finished` → no marker yet; loop with continuation.
+
+### The `/goal` slash command surface
+
+All subcommands (gated by `[features] goals = true` for **spawn**; `list/status/control` commands work even with the flag off if goals already exist in `index.json`):
+
+| Command | Effect |
+|---|---|
+| `/goal` | List every live goal — id, state, turns, cost, objective. |
+| `/goal <objective>` | Spawn a new goal with a one-liner objective. Stopping condition defaults to the objective text. |
+| `/goal --from <path.toml>` | Spawn from a TOML spec file. Regenerates `id` + `created_at`. |
+| `/goal-check [<id>]` | Render a status card (state, objective, stopping condition, tokens, cost, last checkpoint, files touched, last 5 progress lines). Reads from disk — never touches the worker. If exactly one goal is live, the id is optional. |
+| `/goal pause <id>` | Cooperative pause at the next tool boundary. |
+| `/goal resume <id>` | Re-enter the loop with a continuation message. |
+| `/goal clear <id>` | Cancel mid-stream, archive to `_archive/`, remove from `index.json`. |
+| `/goal complete <id>` | Admin override — force-mark `Completed` without running verifiers. |
+| `/goal verify <id>` | Run verifiers now without changing state. |
+| `/goal metrics <id>` | Pretty-print full metrics. |
+| `/goal logs <id> [N]` | Tail the last N progress entries from `progress.log` (default 50). |
+| `/goal budget <id> [--max-turns N] [--max-wall <secs>] [--max-input-tokens N] [--max-output-tokens N]` | Persist new caps to `spec.toml`. Worker picks them up at the next outer-loop boundary (after a turn finishes). |
+
+**Note on `/goal budget` live-effect**: budget changes write through to `spec.toml` immediately but the in-memory `Arc<GoalSpec>` on the running handle is immutable — caps apply on the next turn after a checkpoint (≤ 60s). For an instant effect, pause, edit budget, resume — the worker re-reads from disk on respawn (cold-start path).
+
+### Multi-goal & cold-start resume
+
+**Multi-goal from day 1.** The supervisor holds `HashMap<GoalId, Arc<GoalHandle>>` — there is no single-active gate. You can run 5 goals concurrently across different workdirs/branches/repos. The "file collision" risk is left to your discretion (scope each goal with tight `write_globs` or run them in `git worktree` branches).
+
+**Crash-safe resume.** If forge-osh is killed while a goal is in `Running` / `Paused` / `Verifying` / `Blocked`, the next launch:
+
+1. Reads `~/.forge-osh/goals/index.json`.
+2. For every entry whose `state.is_terminal()` is false, loads its `spec.toml`.
+3. Calls `supervisor.respawn(spec, seed_state)` — `Paused` stays paused (user has to `/goal resume`); everything else respawns as `Running`.
+4. Surfaces `Resumed N goal(s): <ids>` as a one-shot system message at boot.
+5. Re-summarises the status-bar blurb so the indicator reflects the resumed goals.
+
+Metrics are seeded from `metrics.json` on disk (not zero), so token / cost / turn counts carry over.
+
+### Goal status-bar indicator
+
+The TUI chrome shows a one-line summary right after the `🪄 skill` indicator:
+
+```
+● 2 goal(s) — 1 running, 1 verifying
+● 1 goal(s) — 1 paused
+● 3 goal(s) — 2 running, 1 blocked
+```
+
+Empty when no live goals → indicator disappears cleanly. The blurb is recomputed on every incoming `GoalEvent` (the event drainer task already runs, so it costs nothing extra) and stored in a `parking_lot::Mutex<String>` so the sync render path doesn't block on tokio.
+
+### Goal on-disk layout
+
+```
+~/.forge-osh/goals/
+  index.json                 # IndexFile { goals: Vec<GoalSummary> }
+  <goal_id>/
+    spec.toml                # GoalSpec, human-readable, round-trips through serde
+    transcript.jsonl         # append-only message history (separate from user session)
+    progress.log             # plain-text, append-only, timestamped
+    metrics.json             # rolling counters, atomic-rewrite
+    checkpoints/
+      latest.json            # pointer
+      2026-05-17T14-11-02.347Z.json
+      …                      # ring-rotated to 50 files max
+    verifier_runs/
+      2026-05-17T14-02-11.001Z.json
+      …                      # one per /goal verify or post-CLAIM_DONE run
+  _archive/
+    <goal_id>/…              # `/goal clear` moves the whole dir here
+```
+
+Every persisted file is written atomically through `write_atomic(path, bytes)` (tempfile + `fsync` + `rename`), so `/goal-check` reads can race with the worker without ever seeing a torn file.
+
+### Goal examples & worked recipes
+
+**Smoke test — confirm wiring without any LLM cost**:
+
+```text
+> /goal hello
+Goal lws7g-3a5e1f02 spawned (phase-1 placeholder worker).
+Check status:  /goal-check lws7g-3a5e1f02
+Pause:         /goal pause lws7g-3a5e1f02
+Clear:         /goal clear lws7g-3a5e1f02
+```
+(With `[features] goals = true`. The full worker calls the LLM — this is just to confirm wiring.)
+
+**A concrete migration goal**:
+
+```text
+> /goal --from ./migrations/openai-v2-spec.toml
+Goal mws8h-7b2f1c44 spawned from ./migrations/openai-v2-spec.toml — /goal-check mws8h-7b2f1c44
+```
+
+**Check status without disturbing the worker**:
+
+```text
+> /goal-check mws8h-7b2f1c44
+goal#mws8h-7b2f1c44 · running · turns=12
+  Objective:  Migrate src/provider/openai to v2 SDK
+  Stopping:   `cargo test --package forge_agent -- openai` green
+  Tokens:     in 184392 / out 41028   Cost: $0.4127
+  Last ckpt:  14:11:02 · running · tool: edit_file
+  Files (3): src/provider/openai/mod.rs, src/provider/openai/stream.rs, tests/openai_v2.rs
+  Recent progress:
+    14:11:02  TOOL: edit_file (ok)
+    14:10:54  PROGRESS: extracted SseFrame helper
+    14:10:33  TOOL: read_file (ok)
+    14:09:12  PROGRESS: starting migration of stream.rs
+```
+
+**Raise the budget mid-flight**:
+
+```text
+> /goal budget mws8h-7b2f1c44 --max-wall 28800 --max-turns 500
+Budget for mws8h-7b2f1c44 updated and persisted to spec.toml — new turn caps: turns=Some(500) wall=Some(28800)s in=… out=…
+(Note: the running worker will pick this up on its next outer-loop iteration after a turn boundary.)
+```
+
+**Tail the progress log**:
+
+```text
+> /goal logs mws8h-7b2f1c44 20
+Last 20 progress entries for mws8h-7b2f1c44:
+2026-05-17T14:11:02.347Z  PROGRESS: extracted SseFrame helper
+2026-05-17T14:11:02.401Z  TOOL: edit_file (ok)
+…
+```
+
+**Verification failure → model adapts**:
+
+After `CLAIM_DONE:`, suppose `cargo test` fails. The worker emits each verifier result, persists the report, and feeds the model:
+
+```
+Verification failed after your CLAIM_DONE. Fix and re-claim:
+
+  ✗ shell `cargo test --package forge_agent -- openai`
+    exit 101 (expected 0)
+    exit: 101
+    stdout:
+    ---- openai::stream_parser_handles_partial_chunk stdout ----
+    thread '…' panicked at 'assertion failed'
+    stderr:
+    (empty)
+
+Continue working until every verifier passes, then emit CLAIM_DONE: again.
+```
+
+The next turn, the model reads the failure and fixes the test — without you typing a thing.
+
+**Cold-start resume after `Ctrl+C`**:
+
+```text
+$ forge-osh
+Resumed 2 goal(s): mws8h-7b2f1c44, lws7g-3a5e1f02
+● 2 goal(s) — 2 running                                              ↑ status bar
+```
+
+### Enabling /goal — the feature flag
+
+`/goal` is gated by an opt-in flag in `~/.forge-osh/config.toml`:
+
+```toml
+[features]
+goals = true
+```
+
+When the flag is `false` (the default), `/goal <objective>` and `/goal --from` print an error explaining how to enable it. The other subcommands (`/goal` list, `/goal-check`, `/goal pause/resume/clear/complete/verify/metrics/logs`, `/goal budget`) work regardless — so if you had goals running with the flag on and later toggled it off, you can still manage them.
+
+The flag mirrors Codex CLI's `[features] goals = true` convention so documentation and screenshots transfer between tools.
 
 ---
 

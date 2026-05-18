@@ -22,7 +22,11 @@
       "Bash(export PATH=\"/c/Users/OM SHAH/.cargo/bin:/c/msys64/ucrt64/bin:/c/msys64/mingw64/bin:$PATH\")",
       "Bash(perl -i -pe 's/TASK_REGISTRY\\\\.lock\\\\\\(\\\\\\)\\\\.unwrap\\\\\\(\\\\\\)/TASK_REGISTRY.lock\\(\\)/g' \"C:/Users/OM SHAH/Desktop/forge-osh/src/tools/tasks.rs\")",
       "Bash(perl -i -0777 -pe 's/active_skill_scope: None,\\(\\\\s*\\\\}\\)/active_skill_scope: None,\\\\n                skill_registry: None,$1/g' src/agent/worker.rs src/tools/shell.rs src/tools/search.rs src/tools/fs.rs src/tools/executor.rs)",
-      "Bash(perl -i -0777 -pe 's/active_skill_scope: None,\\(\\\\s*\\\\}\\)/active_skill_scope: None,\\\\n        skill_registry: None,$1/g' tests/test_tools_tasks.rs tests/test_tools_search.rs tests/test_tools_shell.rs tests/test_tools_notebook.rs tests/test_tools_fs.rs tests/test_edit_robust.rs tests/test_types.rs)"
+      "Bash(perl -i -0777 -pe 's/active_skill_scope: None,\\(\\\\s*\\\\}\\)/active_skill_scope: None,\\\\n        skill_registry: None,$1/g' tests/test_tools_tasks.rs tests/test_tools_search.rs tests/test_tools_shell.rs tests/test_tools_notebook.rs tests/test_tools_fs.rs tests/test_edit_robust.rs tests/test_types.rs)",
+      "Read(//c/c/Users/OM SHAH/Desktop/forge-osh/**)",
+      "Read(//c/c/Users/OM SHAH/Desktop/forge-osh/src/**)",
+      "Bash(export CARGO_TARGET_DIR=\"/c/forge-build/target-build\")",
+      "Bash(cargo check *)"
     ]
   }
 }
