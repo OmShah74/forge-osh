@@ -133,6 +133,11 @@ pub struct PermissionRequest {
     pub input_summary: String,
     pub description: String,
     pub level: PermissionLevel,
+    /// Raw JSON args of the tool call. Used by the goal policy gate so
+    /// `write_globs` can be enforced exactly against the actual `path`
+    /// arguments instead of having to parse them out of `input_summary`.
+    /// Existing consumers (the TUI confirmation modal) ignore this field.
+    pub input: serde_json::Value,
     pub response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
 }
 
@@ -1372,6 +1377,7 @@ impl AgentLoop {
         let trust_mode = ctx.trust_mode;
         let store_snapshot = store.read().clone();
         let input_summary = crate::agent::permissions::tool_input_summary(&tc.name, &tc.input);
+        let input_value = tc.input.clone();
         let output = executor
             .execute(
                 tc,
@@ -1389,6 +1395,7 @@ impl AgentLoop {
                         input_summary,
                         description: desc,
                         level,
+                        input: input_value,
                         response_tx: resp_tx,
                     };
                     let _ = perm_tx.send(req);

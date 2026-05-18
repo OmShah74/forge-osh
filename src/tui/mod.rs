@@ -609,6 +609,16 @@ pub struct AppState {
     /// Background tasks (e.g. MCP connect) push status messages here; the
     /// main loop drains it each tick and surfaces them via `push_system`.
     pub mcp_status_msgs: Arc<tokio::sync::Mutex<VecDeque<String>>>,
+
+    // ── /goal (experimental, gated by config.features.goals) ─────────────
+    /// Multi-goal supervisor; always constructed so /goal commands have a
+    /// destination, but spawn requests reject unless `config.features.goals`.
+    pub goal_supervisor: Arc<crate::agent::goal::supervisor::GoalSupervisor>,
+    /// Tiny one-line summary of live goals, rendered into the status bar.
+    /// Updated every time a GoalEvent lands. Empty string means no live goals.
+    /// parking_lot mutex so the synchronous renderer can read it without
+    /// blocking on an async runtime.
+    pub goal_status_blurb: Arc<parking_lot::Mutex<String>>,
 }
 
 impl AppState {
@@ -671,6 +681,10 @@ impl AppState {
             mcp_actions_pending: VecDeque::new(),
             mcp_modal_closed_flag: false,
             mcp_status_msgs: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
+            goal_supervisor: Arc::new(
+                crate::agent::goal::supervisor::GoalSupervisor::new(),
+            ),
+            goal_status_blurb: Arc::new(parking_lot::Mutex::new(String::new())),
         }
     }
 
@@ -1487,6 +1501,14 @@ async fn handle_slash_command(
 
         "/mcp" => {
             cmd_mcp(state, arg).await;
+        }
+
+        // ── /goal family (experimental, see future_plan/05_goal_integration.md) ──
+        "/goal" => {
+            cmd_goal(state, arg, config).await;
+        }
+        "/goal-check" => {
+            cmd_goal_check(state, arg).await;
         }
 
         "/skills" => {
@@ -3395,6 +3417,425 @@ async fn cmd_mcp(state: &mut AppState, arg: &str) {
     }
 }
 
+// ─── /goal — durable autonomous objectives (experimental) ────────────────
+//
+// Subcommands:
+//   /goal                              list all goals
+//   /goal <objective>                  start a new goal
+//   /goal pause <id>                   pause a running goal
+//   /goal resume <id>                  resume a paused goal
+//   /goal clear <id>                   kill + archive a goal
+//   /goal complete <id>                force-mark completed
+//   /goal verify <id>                  run verifiers now (phase 3+)
+//   /goal metrics <id>                 dump metrics
+//   /goal logs <id> [N]                tail progress.log
+//
+// Phase 1: workers are placeholders. They emit Started + an initial
+// checkpoint, then idle on control messages. Full LLM loop arrives in
+// phase 2.
+async fn cmd_goal(state: &mut AppState, arg: &str, config: &Arc<Config>) {
+    use crate::agent::goal::supervisor::GoalSupervisor;
+    use crate::agent::goal::{GoalId, GoalSpec};
+
+    let sup: Arc<GoalSupervisor> = state.goal_supervisor.clone();
+    let arg = arg.trim();
+
+    // Parse leading subcommand if it's a known control verb.
+    let (sub, rest) = match arg.split_once(' ') {
+        Some((a, b)) => (a, b.trim()),
+        None => (arg, ""),
+    };
+
+    match sub {
+        "" => {
+            // List goals
+            let summaries = sup.list().await;
+            if summaries.is_empty() {
+                state.push_system(
+                    "No active goals.\nStart one with: /goal <objective>\n\
+                     (Requires [features] goals = true in ~/.forge-osh/config.toml.)",
+                );
+                return;
+            }
+            let mut lines = vec![format!("Active goals ({}):", summaries.len())];
+            for s in &summaries {
+                lines.push(format!(
+                    "  {:<14} {:<10} turns={:<3}  ${:.4}  — {}",
+                    s.id.to_string(),
+                    s.state.label(),
+                    s.turns,
+                    s.cost_usd,
+                    truncate_objective(&s.objective, 70),
+                ));
+            }
+            state.push_system(lines.join("\n"));
+        }
+
+        "--from" => {
+            if !config.features.goals {
+                state.push_system(
+                    "/goal is experimental — enable it by setting [features] goals = true in ~/.forge-osh/config.toml, then restart.",
+                );
+                return;
+            }
+            if rest.is_empty() {
+                state.push_system("Usage: /goal --from <path-to-spec.toml>");
+                return;
+            }
+            let path = std::path::PathBuf::from(rest);
+            let text = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    state.push_system(format!("/goal --from: read failed: {e}"));
+                    return;
+                }
+            };
+            let mut spec: crate::agent::goal::GoalSpec = match toml::from_str(&text) {
+                Ok(s) => s,
+                Err(e) => {
+                    state.push_system(format!("/goal --from: TOML parse failed: {e}"));
+                    return;
+                }
+            };
+            // Always regenerate id + created_at so users can reuse the same
+            // spec.toml across multiple runs.
+            spec.id = crate::agent::goal::GoalId::new();
+            spec.created_at = chrono::Utc::now();
+            if spec.workdir.as_os_str().is_empty() {
+                spec.workdir = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            }
+            match sup.spawn(spec).await {
+                Ok(id) => state.push_system(format!(
+                    "Goal {id} spawned from {} — /goal-check {id}",
+                    path.display()
+                )),
+                Err(e) => state.push_system(format!("/goal --from spawn failed: {e}")),
+            }
+        }
+
+        "budget" => {
+            // /goal budget <id> [--max-turns N] [--max-wall <secs>] [--max-input-tokens N] [--max-output-tokens N]
+            if rest.is_empty() {
+                state.push_system(
+                    "Usage: /goal budget <id> [--max-turns N] [--max-wall <secs>] [--max-input-tokens N] [--max-output-tokens N]",
+                );
+                return;
+            }
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            if toks.is_empty() {
+                state.push_system("Usage: /goal budget <id> [--max-turns N] …");
+                return;
+            }
+            let id = crate::agent::goal::GoalId(toks[0].to_string());
+            let mut budget = match crate::agent::goal::persistence::load_spec(&id) {
+                Ok(s) => s.budget,
+                Err(e) => {
+                    state.push_system(format!("/goal budget: load spec failed: {e}"));
+                    return;
+                }
+            };
+            let mut i = 1;
+            while i < toks.len() {
+                let key = toks[i];
+                let val = toks.get(i + 1).copied().unwrap_or("");
+                match key {
+                    "--max-turns" => budget.max_turns = val.parse::<u32>().ok(),
+                    "--max-wall" => {
+                        budget.max_wall =
+                            val.parse::<u64>().ok().map(std::time::Duration::from_secs)
+                    }
+                    "--max-input-tokens" => {
+                        budget.max_input_tokens = val.parse::<u64>().ok()
+                    }
+                    "--max-output-tokens" => {
+                        budget.max_output_tokens = val.parse::<u64>().ok()
+                    }
+                    other => {
+                        state.push_system(format!("/goal budget: unknown flag {other}"));
+                        return;
+                    }
+                }
+                i += 2;
+            }
+            match sup.set_budget(&id, budget.clone()).await {
+                Ok(()) => state.push_system(format!(
+                    "Budget for {id} updated and persisted to spec.toml — new turn caps: turns={:?} wall={:?}s in={:?} out={:?}\n(Note: the running worker will pick this up on its next outer-loop iteration after a turn boundary.)",
+                    budget.max_turns,
+                    budget.max_wall.map(|d| d.as_secs()),
+                    budget.max_input_tokens,
+                    budget.max_output_tokens,
+                )),
+                Err(e) => state.push_system(format!("/goal budget update failed: {e}")),
+            }
+        }
+
+        "pause" | "resume" | "clear" | "complete" | "verify" | "metrics" | "logs" => {
+            if rest.is_empty() {
+                state.push_system(format!(
+                    "Usage: /goal {sub} <goal-id> (see /goal for the list)"
+                ));
+                return;
+            }
+            let (id_part, tail) = match rest.split_once(' ') {
+                Some((a, b)) => (a.to_string(), b.trim().to_string()),
+                None => (rest.to_string(), String::new()),
+            };
+            let id = GoalId(id_part);
+            match sub {
+                "pause" => match sup.pause(&id).await {
+                    Ok(()) => state.push_system(format!("Goal {id} paused.")),
+                    Err(e) => state.push_system(format!("pause failed: {e}")),
+                },
+                "resume" => match sup.resume(&id).await {
+                    Ok(()) => state.push_system(format!("Goal {id} resumed.")),
+                    Err(e) => state.push_system(format!("resume failed: {e}")),
+                },
+                "clear" => match sup.clear(&id).await {
+                    Ok(()) => state.push_system(format!("Goal {id} cleared and archived.")),
+                    Err(e) => state.push_system(format!("clear failed: {e}")),
+                },
+                "complete" => match sup.force_complete(&id).await {
+                    Ok(()) => state.push_system(format!("Goal {id} force-completed.")),
+                    Err(e) => state.push_system(format!("complete failed: {e}")),
+                },
+                "verify" => match sup.verify_now(&id).await {
+                    Ok(()) => state.push_system(format!("Verification requested for {id}.")),
+                    Err(e) => state.push_system(format!("verify failed: {e}")),
+                },
+                "metrics" => match sup.status(&id).await {
+                    Ok(snap) => {
+                        let m = &snap.metrics;
+                        state.push_system(format!(
+                            "Goal {id} metrics:\n  turns        {}\n  in tokens    {}\n  out tokens   {}\n  cost USD     {:.4}\n  wall secs    {}\n  verifiers    {}✓ / {}✗\n  progress     {} line(s)",
+                            m.turns,
+                            m.input_tokens,
+                            m.output_tokens,
+                            m.cost_usd,
+                            m.wall_secs,
+                            m.verifiers_passed,
+                            m.verifiers_failed,
+                            m.progress_lines,
+                        ));
+                    }
+                    Err(e) => state.push_system(format!("metrics failed: {e}")),
+                },
+                "logs" => {
+                    let n: usize = tail.parse().unwrap_or(50);
+                    match crate::agent::goal::persistence::tail_progress(&id, n) {
+                        Ok(lines) if lines.is_empty() => {
+                            state.push_system(format!("Goal {id} has no progress log yet."))
+                        }
+                        Ok(lines) => state.push_system(format!(
+                            "Last {} progress entries for {id}:\n{}",
+                            lines.len(),
+                            lines.join("\n")
+                        )),
+                        Err(e) => state.push_system(format!("logs failed: {e}")),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        _ => {
+            // Treat the entire arg as a new objective.
+            if !config.features.goals {
+                state.push_system(
+                    "/goal is experimental — enable it by setting [features] goals = true \
+                     in ~/.forge-osh/config.toml, then restart.",
+                );
+                return;
+            }
+            let objective = arg.to_string();
+            if objective.is_empty() {
+                state.push_system("Usage: /goal <objective>");
+                return;
+            }
+            let workdir =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let spec = GoalSpec::from_objective(objective, workdir);
+            match sup.spawn(spec).await {
+                Ok(id) => state.push_system(format!(
+                    "Goal {id} spawned (phase-1 placeholder worker).\n\
+                     Check status:  /goal-check {id}\n\
+                     Pause:         /goal pause {id}\n\
+                     Clear:         /goal clear {id}"
+                )),
+                Err(e) => state.push_system(format!("/goal spawn failed: {e}")),
+            }
+        }
+    }
+}
+
+async fn cmd_goal_check(state: &mut AppState, arg: &str) {
+    use crate::agent::goal::GoalId;
+    let sup = state.goal_supervisor.clone();
+    let arg = arg.trim();
+    let id = if arg.is_empty() {
+        // If exactly one goal is active, target it. Otherwise prompt.
+        let list = sup.list().await;
+        match list.len() {
+            0 => {
+                state.push_system("No active goals to check.");
+                return;
+            }
+            1 => list[0].id.clone(),
+            _ => {
+                state.push_system(
+                    "Multiple goals active — pass an id: /goal-check <goal-id>\n\
+                     (use /goal to see the list)",
+                );
+                return;
+            }
+        }
+    } else {
+        GoalId(arg.to_string())
+    };
+
+    match sup.status(&id).await {
+        Err(e) => state.push_system(format!("/goal-check failed: {e}")),
+        Ok(snap) => {
+            let mut lines = vec![format!(
+                "goal#{id} · {} · turns={}",
+                snap.state.label(),
+                snap.metrics.turns
+            )];
+            lines.push(format!(
+                "  Objective:  {}",
+                truncate_objective(&snap.spec_objective, 80)
+            ));
+            if !snap.spec_stopping.is_empty() && snap.spec_stopping != snap.spec_objective {
+                lines.push(format!(
+                    "  Stopping:   {}",
+                    truncate_objective(&snap.spec_stopping, 80)
+                ));
+            }
+            lines.push(format!(
+                "  Tokens:     in {} / out {}   Cost: ${:.4}",
+                snap.metrics.input_tokens, snap.metrics.output_tokens, snap.metrics.cost_usd,
+            ));
+            if let Some(c) = &snap.last_checkpoint {
+                lines.push(format!(
+                    "  Last ckpt:  {} · {} · {}",
+                    c.at.format("%H:%M:%S"),
+                    c.phase,
+                    truncate_objective(&c.last_action, 60),
+                ));
+                if !c.files_touched.is_empty() {
+                    let show: Vec<String> = c
+                        .files_touched
+                        .iter()
+                        .take(8)
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    let extra = if c.files_touched.len() > 8 {
+                        format!(" (+{} more)", c.files_touched.len() - 8)
+                    } else {
+                        String::new()
+                    };
+                    lines.push(format!(
+                        "  Files ({}): {}{}",
+                        c.files_touched.len(),
+                        show.join(", "),
+                        extra
+                    ));
+                }
+            }
+            if !snap.tail_progress.is_empty() {
+                lines.push("  Recent progress:".into());
+                for l in snap.tail_progress.iter().rev().take(5).collect::<Vec<_>>() {
+                    lines.push(format!("    {l}"));
+                }
+            }
+            state.push_system(lines.join("\n"));
+        }
+    }
+}
+
+fn truncate_objective(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(n.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+/// Build the one-line status-bar blurb summarising live goals.
+async fn compute_goal_status_blurb(
+    sup: &Arc<crate::agent::goal::supervisor::GoalSupervisor>,
+) -> String {
+    use crate::agent::goal::GoalState;
+    let summaries = sup.list().await;
+    let live: Vec<_> = summaries
+        .into_iter()
+        .filter(|s| !s.state.is_terminal())
+        .collect();
+    if live.is_empty() {
+        return String::new();
+    }
+    let total = live.len();
+    let mut running = 0usize;
+    let mut paused = 0usize;
+    let mut verifying = 0usize;
+    let mut blocked = 0usize;
+    for s in &live {
+        match &s.state {
+            GoalState::Running => running += 1,
+            GoalState::Paused => paused += 1,
+            GoalState::Verifying => verifying += 1,
+            GoalState::Blocked(_) => blocked += 1,
+            _ => {}
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    if verifying > 0 {
+        parts.push(format!("{verifying} verifying"));
+    }
+    if paused > 0 {
+        parts.push(format!("{paused} paused"));
+    }
+    if blocked > 0 {
+        parts.push(format!("{blocked} blocked"));
+    }
+    format!(
+        "● {total} goal(s) — {}",
+        if parts.is_empty() {
+            "idle".into()
+        } else {
+            parts.join(", ")
+        }
+    )
+}
+
+/// Format a `GoalEvent` as a single line for the TUI system-message stream.
+/// Phase 4 will swap this out for a proper status-bar + live card.
+fn format_goal_event_line(id: &crate::agent::goal::GoalId, ev: &crate::agent::goal::GoalEvent) -> String {
+    use crate::agent::goal::GoalEvent;
+    match ev {
+        GoalEvent::Started { .. } => format!("[goal#{id}] started"),
+        GoalEvent::Progress { line } => format!("[goal#{id}] {line}"),
+        GoalEvent::Blocked { reason } => format!("[goal#{id}] BLOCKED — {reason}"),
+        GoalEvent::Completed { metrics } => format!(
+            "[goal#{id}] COMPLETED — turns={} cost=${:.4} tokens={}↑{}↓",
+            metrics.turns, metrics.cost_usd, metrics.input_tokens, metrics.output_tokens
+        ),
+        GoalEvent::StateChanged(s) => format!("[goal#{id}] state → {}", s.label()),
+        GoalEvent::BudgetWarn { kind, .. } => format!("[goal#{id}] budget warn: {kind}"),
+        GoalEvent::VerifierResult { name, pass, summary } => format!(
+            "[goal#{id}] verify {} {} — {}",
+            if *pass { "✓" } else { "✗" },
+            name,
+            summary
+        ),
+        GoalEvent::Checkpoint(_) => String::new(),
+    }
+}
+
 async fn cmd_lsp(state: &mut AppState, text: &str) {
     let arg = text.trim_start_matches("/lsp").trim();
     let Some(lsp) = state.lsp.clone() else {
@@ -4751,6 +5192,62 @@ pub async fn run_tui(
     state.skill_registry = Some(skill_registry.clone());
     state.lsp = Some(lsp.clone());
     state.mcp = Some(mcp.clone());
+
+    // ── /goal subsystem: inject worker deps and start the event drainer ───
+    {
+        let deps = crate::agent::goal::worker::WorkerDeps {
+            provider_router: provider_router.clone(),
+            tools: tools.clone(),
+            config: config.clone(),
+            graph: shared_graph.clone(),
+            lsp: lsp.clone(),
+            file_cache: file_cache.clone(),
+            permission_store: permission_store.clone(),
+            skill_registry: skill_registry.clone(),
+        };
+        state.goal_supervisor.set_deps(deps).await;
+
+        // Drain GoalEvents into the shared mcp_status_msgs queue + update
+        // the goal-status-blurb. The blurb is rendered into the status
+        // bar by `renderer::render`.
+        if let Some(mut rx) = state.goal_supervisor.take_event_rx().await {
+            let status_q = state.mcp_status_msgs.clone();
+            let blurb = state.goal_status_blurb.clone();
+            let supervisor = state.goal_supervisor.clone();
+            tokio::spawn(async move {
+                while let Some((id, ev)) = rx.recv().await {
+                    let line = format_goal_event_line(&id, &ev);
+                    if !line.is_empty() {
+                        let mut q = status_q.lock().await;
+                        q.push_back(line);
+                    }
+                    // Re-summarise live goals into the status blurb.
+                    let s = compute_goal_status_blurb(&supervisor).await;
+                    *blurb.lock() = s;
+                }
+            });
+        }
+
+        // Cold-start resumer: bring back any goals that were running when
+        // forge-osh was last killed.
+        let report = crate::agent::goal::resumer::resume_all(&state.goal_supervisor).await;
+        if !report.is_empty() {
+            let mut lines = Vec::<String>::new();
+            if !report.resumed.is_empty() {
+                lines.push(format!(
+                    "Resumed {} goal(s): {}",
+                    report.resumed.len(),
+                    report.resumed.join(", ")
+                ));
+            }
+            for (id, err) in &report.failed {
+                lines.push(format!("Goal {id} could not be resumed: {err}"));
+            }
+            state.push_system(lines.join("\n"));
+            let s = compute_goal_status_blurb(&state.goal_supervisor).await;
+            *state.goal_status_blurb.lock() = s;
+        }
+    }
     // Seed the status-bar label from the session's persisted scope (in case
     // the user resumed a session that was mid-skill).
     {
