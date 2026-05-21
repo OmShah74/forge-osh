@@ -53,10 +53,20 @@ impl Session {
         }
     }
 
-    /// Record API usage
+    /// Record API usage. The session's `provider_id` AND `model_id` are
+    /// both used so that OpenRouter routes (where the underlying provider
+    /// is encoded in the model id, e.g. `anthropic/claude-...`) get the
+    /// correct cache-pricing multipliers.
     pub fn record_usage(&mut self, usage: &Usage, input_cost_per_m: f64, output_cost_per_m: f64) {
-        self.cost_tracker
-            .add(usage, input_cost_per_m, output_cost_per_m);
+        let provider_id = self.provider_id.clone();
+        let model_id = self.model_id.clone();
+        self.cost_tracker.add_with_route(
+            usage,
+            &provider_id,
+            &model_id,
+            input_cost_per_m,
+            output_cost_per_m,
+        );
     }
 
     /// Save session to disk
@@ -72,6 +82,11 @@ impl Session {
     /// Get formatted tokens
     pub fn format_tokens(&self) -> String {
         self.cost_tracker.format_tokens()
+    }
+
+    /// One-line cache summary for the /cost modal.
+    pub fn format_cache_summary(&self) -> String {
+        self.cost_tracker.format_cache_summary()
     }
 
     pub fn push_invoked_skill(&mut self, record: SkillInvocationRecord) {

@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::config::models::anthropic_models;
 use crate::error::{ForgeError, Result};
+use crate::session::tokens::TokenCounter;
 use crate::types::*;
 
 use super::Provider;
@@ -50,66 +51,117 @@ impl AnthropicProvider {
         })
     }
 
-    fn build_messages(&self, messages: &[Message]) -> Vec<Value> {
+    /// Build the messages array. When `cache_last` is true, attach an
+    /// `ephemeral` cache_control marker to the LAST content block of the
+    /// final message so the entire conversation prefix up to that point
+    /// gets cached. Anthropic allows up to 4 cache breakpoints per request.
+    fn build_messages(&self, messages: &[Message], cache_last: bool) -> Vec<Value> {
+        let last_idx = messages.len().saturating_sub(1);
         messages
             .iter()
-            .map(|msg| match msg {
-                Message::User(UserContent::Text(text)) => {
-                    json!({
-                        "role": "user",
-                        "content": text
-                    })
-                }
-                Message::Assistant(content) => {
-                    let mut blocks = Vec::new();
-                    if let Some(text) = content.text() {
-                        if !text.is_empty() {
-                            blocks.push(json!({
-                                "type": "text",
-                                "text": text
-                            }));
+            .enumerate()
+            .map(|(i, msg)| {
+                let mark_this = cache_last && i == last_idx;
+                match msg {
+                    Message::User(UserContent::Text(text)) => {
+                        if mark_this {
+                            // Wrap as a content-block array so we can attach cache_control.
+                            json!({
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": text,
+                                    "cache_control": {"type": "ephemeral"}
+                                }]
+                            })
+                        } else {
+                            json!({"role": "user", "content": text})
                         }
                     }
-                    for tc in content.tool_calls() {
-                        blocks.push(json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.input
-                        }));
+                    Message::Assistant(content) => {
+                        let mut blocks = Vec::new();
+                        if let Some(text) = content.text() {
+                            if !text.is_empty() {
+                                blocks.push(json!({
+                                    "type": "text",
+                                    "text": text
+                                }));
+                            }
+                        }
+                        for tc in content.tool_calls() {
+                            blocks.push(json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": tc.input
+                            }));
+                        }
+                        if blocks.is_empty() {
+                            blocks.push(json!({"type": "text", "text": ""}));
+                        }
+                        if mark_this {
+                            if let Some(last) = blocks.last_mut() {
+                                if let Some(obj) = last.as_object_mut() {
+                                    obj.insert(
+                                        "cache_control".to_string(),
+                                        json!({"type": "ephemeral"}),
+                                    );
+                                }
+                            }
+                        }
+                        json!({
+                            "role": "assistant",
+                            "content": blocks
+                        })
                     }
-                    if blocks.is_empty() {
-                        blocks.push(json!({"type": "text", "text": ""}));
-                    }
-                    json!({
-                        "role": "assistant",
-                        "content": blocks
-                    })
-                }
-                Message::Tool(result) => {
-                    json!({
-                        "role": "user",
-                        "content": [{
+                    Message::Tool(result) => {
+                        let mut block = json!({
                             "type": "tool_result",
                             "tool_use_id": result.tool_use_id,
                             "content": result.content,
                             "is_error": result.is_error
-                        }]
-                    })
+                        });
+                        if mark_this {
+                            if let Some(obj) = block.as_object_mut() {
+                                obj.insert(
+                                    "cache_control".to_string(),
+                                    json!({"type": "ephemeral"}),
+                                );
+                            }
+                        }
+                        json!({
+                            "role": "user",
+                            "content": [block]
+                        })
+                    }
                 }
             })
             .collect()
     }
 
-    fn build_tools(&self, tools: &[ToolDefinition]) -> Vec<Value> {
+    /// Build tool definitions. When `cache_last` is true, attach an ephemeral
+    /// cache_control marker to the LAST tool — this caches the entire tools
+    /// array (plus everything before it: tools are sent after system).
+    fn build_tools(&self, tools: &[ToolDefinition], cache_last: bool) -> Vec<Value> {
+        let last_idx = tools.len().saturating_sub(1);
         tools
             .iter()
-            .map(|tool| {
-                json!({
+            .enumerate()
+            .map(|(i, tool)| {
+                let mut v = json!({
                     "name": tool.name,
                     "description": tool.description,
                     "input_schema": tool.parameters
-                })
+                });
+                if cache_last && i == last_idx {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "cache_control".to_string(),
+                            json!({"type": "ephemeral"}),
+                        );
+                    }
+                }
+                v
             })
             .collect()
     }
@@ -140,21 +192,52 @@ impl Provider for AnthropicProvider {
     ) -> Result<ChatResponse> {
         let url = format!("{}/messages", self.base_url);
 
+        // Prompt caching strategy (Anthropic allows up to 4 ephemeral breakpoints):
+        //   1) system prompt — single ephemeral block (very stable across turns)
+        //   2) tools array — marker on last tool (stable across turns)
+        //   3) conversation prefix — marker on last message (lets the
+        //      growing conversation prefix get cached after each turn)
+        // The 5-minute TTL (default) is renewed every request that re-reads
+        // the same prefix, so an active conversation keeps its prefix warm.
+        let cache_system = request
+            .system
+            .as_ref()
+            .map(|s| TokenCounter::count_text(s) >= 1024)
+            .unwrap_or(false);
+        let cache_tools = request
+            .tools
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false);
+        // Cache the conversation prefix only when there's enough context to
+        // make it worthwhile. <1024 tokens of history is below Anthropic's
+        // minimum cacheable size for Sonnet/Haiku — adding a breakpoint there
+        // is a wasted ephemeral marker.
+        let cache_messages = TokenCounter::count_messages(&request.messages) >= 2048;
+
         let mut body = json!({
             "model": request.model,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
             "stream": true,
-            "messages": self.build_messages(&request.messages),
+            "messages": self.build_messages(&request.messages, cache_messages),
         });
 
         if let Some(system) = &request.system {
-            body["system"] = json!(system);
+            if cache_system {
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"}
+                }]);
+            } else {
+                body["system"] = json!(system);
+            }
         }
 
         if let Some(tools) = &request.tools {
             if !tools.is_empty() {
-                body["tools"] = json!(self.build_tools(tools));
+                body["tools"] = json!(self.build_tools(tools, cache_tools));
             }
         }
 
@@ -251,7 +334,18 @@ impl Provider for AnthropicProvider {
                 match event_type.as_str() {
                     "message_start" => {
                         if let Some(u) = parsed.get("message").and_then(|m| m.get("usage")) {
+                            // Anthropic separates uncached/created/read input tokens.
+                            // input_tokens here is the count of NEW (uncached) input
+                            // tokens — it excludes cache reads and cache creation.
                             usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as u32;
+                            let cw = u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
+                            let cr = u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+                            if cw > 0 {
+                                usage.cache_write_tokens = Some(cw);
+                            }
+                            if cr > 0 {
+                                usage.cache_read_tokens = Some(cr);
+                            }
                         }
                     }
                     "content_block_start" => {
