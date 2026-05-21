@@ -245,8 +245,20 @@ impl Provider for GeminiProvider {
                 }
 
                 if let Some(um) = parsed.get("usageMetadata") {
-                    usage.input_tokens = um["promptTokenCount"].as_u64().unwrap_or(0) as u32;
+                    // Gemini reports promptTokenCount as the TOTAL prompt size
+                    // and cachedContentTokenCount as the cached subset (already
+                    // included in promptTokenCount). Implicit caching is
+                    // automatic on Gemini 2.0 Flash / 2.5 — no request-side
+                    // changes are needed; we just have to read the metric back.
+                    let total_prompt = um["promptTokenCount"].as_u64().unwrap_or(0) as u32;
                     usage.output_tokens = um["candidatesTokenCount"].as_u64().unwrap_or(0) as u32;
+                    let cached = um["cachedContentTokenCount"].as_u64().unwrap_or(0) as u32;
+                    if cached > 0 && cached <= total_prompt {
+                        usage.input_tokens = total_prompt - cached;
+                        usage.cache_read_tokens = Some(cached);
+                    } else {
+                        usage.input_tokens = total_prompt;
+                    }
                 }
             }
         }

@@ -5,7 +5,7 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.19</code> &nbsp;·&nbsp;
+  <code>v1.0.20</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
@@ -63,7 +63,14 @@
 21. [CLI Commands Reference](#-cli-commands-reference)
 22. [Configuration Reference](#-configuration-reference)
 23. [Environment Variables](#-environment-variables)
-24. [v1.0.19 — `/goal` Primitive (Durable, Autonomous, Verifiable Goals)](#-v1019--goal-primitive-durable-autonomous-verifiable-goals)
+24. [v1.0.20 — Prompt Caching Across Providers](#-v1020--prompt-caching-across-providers)
+    - [Why prompt caching matters](#why-prompt-caching-matters)
+    - [Per-provider cache strategy](#per-provider-cache-strategy)
+    - [OpenRouter — caching across underlying backends](#openrouter--caching-across-underlying-backends)
+    - [Cache pricing multipliers](#cache-pricing-multipliers)
+    - [Surfacing cache stats in the TUI](#surfacing-cache-stats-in-the-tui)
+    - [What forge-osh sends per request](#what-forge-osh-sends-per-request)
+25. [v1.0.19 — `/goal` Primitive (Durable, Autonomous, Verifiable Goals)](#-v1019--goal-primitive-durable-autonomous-verifiable-goals)
     - [What `/goal` is and why it matters](#what-goal-is-and-why-it-matters)
     - [Goal Architecture](#goal-architecture)
     - [The Goal Contract — GoalSpec](#the-goal-contract--goalspec)
@@ -78,7 +85,7 @@
     - [On-disk layout](#goal-on-disk-layout)
     - [Examples & worked recipes](#goal-examples--worked-recipes)
     - [Enabling /goal — the feature flag](#enabling-goal--the-feature-flag)
-25. [v1.0.18 — MCP (Model Context Protocol) Integration](#-v1018--mcp-model-context-protocol-integration)
+26. [v1.0.18 — MCP (Model Context Protocol) Integration](#-v1018--mcp-model-context-protocol-integration)
     - [What MCP is and why it matters](#what-mcp-is-and-why-it-matters)
     - [Architecture](#mcp-architecture)
     - [Catalog of built-in servers](#mcp-catalog-of-built-in-servers)
@@ -91,7 +98,7 @@
     - [Authenticated-identity rules for the model](#authenticated-identity-rules-for-the-model)
     - [Examples per service](#mcp-examples-per-service)
     - [Configuration & file layout](#mcp-configuration--file-layout)
-26. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
+27. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
     - [Permission Modes](#permission-modes-plan--accept-edits--bypass--default)
     - [Extended Thinking](#extended-thinking-thinkingconfig)
     - [Tool Executor Rewrite](#tool-executor-rewrite)
@@ -107,9 +114,9 @@
     - [Skills Architecture](#skills-architecture-project--user--bundled)
     - [Skills UX — Commands & Status Bar](#skills-ux--commands--status-bar)
     - [How to Use, Add, Modify & Delete Skills](#how-to-use-add-modify--delete-skills)
-27. [Future Roadmap](#-future-roadmap)
-28. [Contributing](#-contributing)
-29. [License & Contact](#-license--contact)
+28. [Future Roadmap](#-future-roadmap)
+29. [Contributing](#-contributing)
+30. [License & Contact](#-license--contact)
 
 ---
 
@@ -1247,6 +1254,138 @@ max_conversation_lines = 1000
 | `FIREWORKS_API_KEY` | Fireworks API key |
 | `PERPLEXITY_API_KEY` | Perplexity API key |
 | `COHERE_API_KEY` | Cohere API key |
+
+---
+
+## 💰 v1.0.20 — Prompt Caching Across Providers
+
+Version 1.0.20 wires **first-class prompt caching** into every provider that supports it — Anthropic (native API), OpenAI, Google Gemini, DeepSeek, and **every supported backend reachable through OpenRouter** (Anthropic, OpenAI, Google Gemini, DeepSeek, GLM/ZhipuAI, and more). On a long conversation this turns into ~50-90% input-token cost reduction with zero behavioral change, plus a live cache hit-rate readout in the `/cost` modal so you can watch caching pay for itself in real time.
+
+> **Bottom line**: every API call from forge-osh now declares the right cache hints for whichever model and route is serving it. Anthropic ephemeral `cache_control` markers on (system / last tool / last message) for direct Anthropic *and* OpenRouter→anthropic routes; stable `prompt_cache_key` (plus `prompt_cache_retention: "24h"` for gpt-5.x/4.1) for OpenAI and DeepSeek (direct or via OpenRouter); implicit caching for Gemini and GLM; provider-aware discount math in the cost tracker; and a one-line cache summary in `/cost` showing read/write tokens, hit %, and dollars saved.
+
+### Why prompt caching matters
+
+Most coding agents send the same enormous prefix every turn — system prompt + tool definitions + the entire conversation up to "now." On a 30-turn Claude Sonnet session that's roughly **15-25× the input cost of a fresh prompt**, because each turn re-bills every previous token. Anthropic, OpenAI, Google, DeepSeek, and several others now offer prompt caching: keep that prefix's key/value tensors warm on the GPU between requests, and charge ~10% (Anthropic) / ~25% (Gemini) / ~50% (OpenAI/DeepSeek/GLM) of the normal input rate when it gets reused. forge-osh v1.0.20 makes that happen automatically — you don't change a setting, you just observe a much smaller cost tracker.
+
+### Per-provider cache strategy
+
+| Provider | Wire mechanism | Cache breakpoints we set | Pricing |
+|---|---|---|---|
+| **Anthropic** (direct) | `cache_control: { type: "ephemeral" }` blocks | system prompt, last tool def, last message — up to 3 of the 4 ephemeral markers Anthropic allows per request | 0.10× read · 1.25× write |
+| **OpenAI** (direct) | Auto-cache ≥ 1024 tokens + `prompt_cache_key` for stable shard routing; `prompt_cache_retention: "24h"` on gpt-5.x and gpt-4.1 | n/a (server-side prefix match) | 0.50× read |
+| **DeepSeek** (direct) | Auto-cache + `prompt_cache_key` | n/a (server-side prefix match) | 0.50× read |
+| **Google Gemini** (direct) | Implicit caching (automatic on 2.0 Flash / 2.5) | n/a (server-side) | 0.25× read |
+| **Ollama / local providers** | No caching | — | n/a |
+
+The Anthropic markers go on the *last* content block in each cached section so the entire prefix up to that point gets cached. We only mark when the section is genuinely large enough to be worth a breakpoint: ≥ 1024 tokens for the system prompt, and ≥ 2048 tokens of conversation history before we start marking the message tail. Below those thresholds Anthropic refuses to cache anyway, and a wasted breakpoint is worse than no marker (you only get 4 per request).
+
+### OpenRouter — caching across underlying backends
+
+OpenRouter proxies a long list of providers behind a single OpenAI-compatible API. forge-osh parses the OpenRouter model id prefix (`anthropic/…`, `openai/…`, `google/…`, `deepseek/…`, `z-ai/…` or `*/glm-…`, `mistralai/…`, `meta-llama/…`, `qwen/…`, `x-ai/…`, `perplexity/…`, `cohere/…`) to figure out who is actually serving the request, and then sends the **right** cache hints for that backend — over the OpenAI wire format. That means caching works just as well through OpenRouter as direct, for every backend that supports it.
+
+| OpenRouter model prefix | What forge-osh sends | Cache pricing applied |
+|---|---|---|
+| `anthropic/*` (Claude Sonnet / Opus / Haiku) | Ephemeral `cache_control` markers injected into OpenAI-format messages on (system block, last tool def, last message). OpenRouter forwards the markers to Anthropic so caching activates on the underlying account. | 0.10× read · 1.25× write |
+| `openai/*` (GPT-5 / 5.x / 4.1 / 4o) | Stable `prompt_cache_key` (SHA-256 over model + system + sorted tool names) so successive turns hit the same cache shard. `prompt_cache_retention: "24h"` added for gpt-5.x and gpt-4.1. | 0.50× read |
+| `deepseek/*` | Stable `prompt_cache_key` (DeepSeek implements the same auto-cache contract as OpenAI). | 0.50× read |
+| `google/*` / `gemini/*` (2.0 Flash / 2.5 Pro / Flash) | Implicit caching is automatic at the backend — no wire change. forge-osh still reads `cachedContentTokenCount` back from `usageMetadata`. | 0.25× read |
+| `z-ai/*`, `zhipuai/*`, `glm-*`, `*/glm-*` (GLM-4.5+) | Auto-cache server-side. | 0.50× read |
+| `mistralai/*`, `meta-llama/*`, `qwen/*`, `x-ai/*`, `perplexity/*`, `cohere/*` | No caching hint sent (these backends either don't cache or would 400 on unknown fields). Usage still parsed. | n/a |
+
+The `prompt_cache_key` is intentionally hashed — the raw system prompt never appears in that field, which is visible in your OpenRouter / OpenAI dashboards.
+
+### Cache pricing multipliers
+
+`CostTracker::add_with_route(usage, provider_id, model_id, ...)` looks up the right multiplier and bills:
+
+```text
+billed_cost
+  = (uncached_input          × input_rate)
+  + (cache_read_tokens       × input_rate × read_multiplier)
+  + (cache_write_tokens      × input_rate × write_multiplier)
+  + (output_tokens           × output_rate)
+```
+
+| Resolved backend | `read_multiplier` | `write_multiplier` | Notes |
+|---|---|---|---|
+| Anthropic (direct or via OpenRouter `anthropic/*`) | **0.10×** | **1.25×** | The +25% on writes is the documented "5-minute ephemeral write" surcharge — paid once, then reads pile up at 10%. |
+| OpenAI / DeepSeek / GLM (direct or via OpenRouter) | **0.50×** | 1.0× | Auto-cache providers do not charge a write surcharge; the first uncached request pays normal input price and the prefix is cached implicitly. |
+| Google Gemini (direct or via OpenRouter) | **0.25×** | 1.0× | Implicit caching is automatic on Gemini 2.0 Flash / 2.5; we only read the metric back. |
+| Other backends (Mistral / Meta / Qwen / Grok / Perplexity / Cohere / custom) | 1.0× | 1.0× | No discount — accounting still works if a backend ever begins reporting cache fields. |
+
+The tracker now also remembers what the **same usage would have cost without any caching** (`total_uncached_cost_usd`) so `/cost` can show the dollars-saved delta.
+
+### Surfacing cache stats in the TUI
+
+The `/cost` modal (Ctrl+B or `/cost`) gained a new line:
+
+```text
+Usage & Cost
+
+ Provider : Anthropic
+ Model    : claude-sonnet-4-20250514
+ Context  : [██████░░░░░░░░░░░░░░] 31% of 200000 tokens
+ Tokens   : 184.2K tokens
+ Cost     : $0.412
+ Cache    : 142.1K cached read · 12.4K cached write · 71.3% hit · saved $1.04
+
+ Context % reflects the last prompt's size in the model's window.
+ Cumulative tokens keep growing as each turn adds to the bill.
+ Cached tokens are billed at a discount (Anthropic 0.1×, OpenAI/
+ DeepSeek 0.5×, Gemini 0.25× of the input rate).
+ Use /compact [keep] to free context with an AI summary.
+```
+
+Internally, `CostTracker` exposes `total_cache_read_tokens`, `total_cache_write_tokens`, `total_uncached_cost_usd`, `cache_hit_rate()`, `cache_savings_usd()`, and the one-line `format_cache_summary()`. The status bar's "tokens used" number now includes cached tokens (they still occupy context window space), so the progress bar reflects what's actually in the model's prompt — not just the new tokens.
+
+### What forge-osh sends per request
+
+A worked example for `claude-sonnet-4-20250514` direct via the Anthropic API, after a few turns of conversation:
+
+```jsonc
+{
+  "model": "claude-sonnet-4-20250514",
+  "max_tokens": 8192,
+  "temperature": 0.7,
+  "stream": true,
+  "system": [
+    { "type": "text", "text": "You are forge-osh ...",
+      "cache_control": { "type": "ephemeral" } }
+  ],
+  "tools": [
+    { "name": "read_file",  "description": "...", "input_schema": { ... } },
+    /* ... */
+    { "name": "graph_query", "description": "...", "input_schema": { ... },
+      "cache_control": { "type": "ephemeral" } }
+  ],
+  "messages": [
+    { "role": "user",      "content": "Refactor the auth module ..." },
+    { "role": "assistant", "content": [ /* tool_use */ ] },
+    { "role": "user",      "content": [
+        { "type": "tool_result", "tool_use_id": "...", "content": "...",
+          "cache_control": { "type": "ephemeral" } }
+    ]}
+  ]
+}
+```
+
+The same conversation through OpenRouter (`anthropic/claude-sonnet-4-20250514`) sends the OpenAI wire shape with the same `cache_control` markers attached inside the content arrays — OpenRouter forwards them transparently. For `openai/gpt-5` you'd instead see:
+
+```jsonc
+{
+  "model": "openai/gpt-5",
+  "messages": [ /* unchanged shape */ ],
+  "tools": [ /* unchanged shape */ ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "prompt_cache_key": "forge-osh-3a5e1f02",
+  "prompt_cache_retention": "24h"
+}
+```
+
+…and forge-osh then parses the final `usage` chunk for `prompt_tokens_details.cached_tokens` (and, on Anthropic-via-OpenRouter, also `cache_creation_input_tokens` or `prompt_tokens_details.cache_creation_tokens` for write counts) to populate the `Usage` struct's `cache_read_tokens` and `cache_write_tokens` fields. From that point on the cost tracker and the `/cost` modal do the rest.
+
+The result: caching is **on by default**, route-aware, priced correctly, and visible — across every provider forge-osh talks to.
 
 ---
 

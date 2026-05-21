@@ -2380,15 +2380,23 @@ fn render_token_info(frame: &mut Frame, state: &AppState, theme: &Theme) {
         let empty = 20 - filled;
         "█".repeat(filled) + &"░".repeat(empty)
     };
+    let cache_line = if state.format_cache_summary.is_empty() {
+        "Cache    : (no cached tokens yet this session)".to_string()
+    } else {
+        format!("Cache    : {}", state.format_cache_summary)
+    };
     let text = format!(
         "Usage & Cost\n\n\
          Provider : {}\n\
          Model    : {}\n\
          Context  : [{}] {}% of {} tokens\n\
          Tokens   : {}\n\
-         Cost     : {}\n\n\
+         Cost     : {}\n\
+         {}\n\n\
          Context % reflects the last prompt's size in the model's window.\n\
          Cumulative tokens keep growing as each turn adds to the bill.\n\
+         Cached tokens are billed at a discount (Anthropic 0.1×, OpenAI/\n\
+         DeepSeek 0.5×, Gemini 0.25× of the input rate).\n\
          Use /compact [keep] to free context with an AI summary.\n\n\
          Press Esc to close",
         state.provider_name,
@@ -2398,6 +2406,7 @@ fn render_token_info(frame: &mut Frame, state: &AppState, theme: &Theme) {
         state.context_limit,
         state.format_tokens,
         state.format_cost,
+        cache_line,
     );
 
     let info = Paragraph::new(text)

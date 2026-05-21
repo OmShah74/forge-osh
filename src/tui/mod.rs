@@ -527,6 +527,9 @@ pub struct AppState {
     pub session_name: String,
     pub format_tokens: String,
     pub format_cost: String,
+    /// One-line cache summary shown in the /cost modal. Populated from
+    /// `CostTracker::format_cache_summary` after every session refresh.
+    pub format_cache_summary: String,
     pub trust_mode: bool,
     pub theme: Theme,
     pub theme_name: String,
@@ -641,6 +644,7 @@ impl AppState {
             session_name: session.name.clone(),
             format_tokens: "0 tokens".to_string(),
             format_cost: "$0.00".to_string(),
+            format_cache_summary: String::new(),
             trust_mode: config.general.trust_mode,
             theme: Theme::from_name(&config.general.theme),
             theme_name: config.general.theme.clone(),
@@ -4880,6 +4884,7 @@ async fn compact_history_llm(
                 let sess = session.lock().await;
                 state.format_tokens = sess.format_tokens();
                 state.format_cost = sess.format_cost();
+                state.format_cache_summary = sess.format_cache_summary();
             }
             replace_rendered_for_compaction(state, keep, Some(&summary));
 
@@ -4918,6 +4923,7 @@ async fn compact_history_llm(
                 let sess = session.lock().await;
                 state.format_tokens = sess.format_tokens();
                 state.format_cost = sess.format_cost();
+                state.format_cache_summary = sess.format_cache_summary();
             }
             replace_rendered_for_compaction(state, keep, None);
             refresh_context_display(state, session, provider_router).await;
@@ -5076,6 +5082,7 @@ pub async fn run_tui(
         let sess = session.lock().await;
         state.format_tokens = sess.format_tokens();
         state.format_cost = sess.format_cost();
+        state.format_cache_summary = sess.format_cache_summary();
         if state.context_limit > 0 {
             let used = sess.cost_tracker.context_tokens_estimate();
             state.context_pct = ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100);
@@ -5436,6 +5443,7 @@ pub async fn run_tui(
                     let sess = session.lock().await;
                     state.format_cost = sess.format_cost();
                     state.format_tokens = sess.format_tokens();
+                    state.format_cache_summary = sess.format_cache_summary();
                     // Context % reflects what is CURRENTLY in the model's
                     // prompt (last reported prompt_tokens), not the
                     // cumulative sum across every turn — the latter would
@@ -6043,6 +6051,7 @@ pub async fn run_tui(
                         let sess = session.lock().await;
                         state.format_tokens = sess.format_tokens();
                         state.format_cost = sess.format_cost();
+                        state.format_cache_summary = sess.format_cache_summary();
                     }
                     // Context window + percentage come from provider + session.
                     {

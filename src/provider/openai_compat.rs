@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::config::models;
 use crate::error::{ForgeError, Result};
+use crate::session::tokens::TokenCounter;
 use crate::types::*;
 
 use super::Provider;
@@ -236,57 +237,214 @@ impl OpenAICompatProvider {
             || m.starts_with("o5")
     }
 
-    fn build_messages(&self, messages: &[Message]) -> Vec<Value> {
+    /// Identify the underlying provider this request will route to.
+    /// For OpenRouter we parse the model id prefix; for direct providers we
+    /// return their own id. Drives the rest of the cache strategy.
+    fn underlying_provider(&self, model: &str) -> &'static str {
+        if self.provider_id != "openrouter" {
+            return match self.provider_id.as_str() {
+                "openai" => "openai",
+                "deepseek" => "deepseek",
+                "mistral" => "mistral",
+                "groq" => "groq",
+                "grok" => "grok",
+                "together" => "together",
+                "fireworks" => "fireworks",
+                "perplexity" => "perplexity",
+                "cohere" => "cohere",
+                _ => "custom",
+            };
+        }
+        let m = model.to_ascii_lowercase();
+        if m.starts_with("anthropic/") {
+            "anthropic"
+        } else if m.starts_with("openai/") {
+            "openai"
+        } else if m.starts_with("google/") || m.starts_with("gemini/") {
+            "gemini"
+        } else if m.starts_with("deepseek/") {
+            "deepseek"
+        } else if m.starts_with("z-ai/")
+            || m.starts_with("zhipuai/")
+            || m.starts_with("zai/")
+            || m.contains("/glm-")
+            || m.starts_with("glm-")
+        {
+            "glm"
+        } else if m.starts_with("mistralai/") || m.starts_with("mistral/") {
+            "mistral"
+        } else if m.starts_with("meta-llama/") || m.starts_with("meta/") {
+            "meta"
+        } else if m.starts_with("qwen/") || m.starts_with("alibaba/") {
+            "qwen"
+        } else if m.starts_with("x-ai/") || m.starts_with("xai/") {
+            "grok"
+        } else if m.starts_with("perplexity/") {
+            "perplexity"
+        } else if m.starts_with("cohere/") {
+            "cohere"
+        } else {
+            "openrouter-other"
+        }
+    }
+
+    /// Inject Anthropic-style `cache_control` markers when serving Claude
+    /// via an OpenAI-format wire. Required for OpenRouter → anthropic/*;
+    /// harmful elsewhere (some strict compat servers 400 on unknown fields).
+    fn inject_anthropic_cache_markers(&self, model: &str) -> bool {
+        self.underlying_provider(model) == "anthropic"
+    }
+
+    /// `prompt_cache_key` is honored by OpenAI and DeepSeek (and forwarded
+    /// to them by OpenRouter). Omitted elsewhere to avoid 400s.
+    fn supports_prompt_cache_key(&self, model: &str) -> bool {
+        matches!(self.underlying_provider(model), "openai" | "deepseek")
+    }
+
+    /// `prompt_cache_retention = "24h"` is supported by gpt-5.x and gpt-4.1
+    /// on the OpenAI backend, whether reached directly or via OpenRouter.
+    fn supports_extended_cache(&self, model: &str) -> bool {
+        if self.underlying_provider(model) != "openai" {
+            return false;
+        }
+        let m = model.to_ascii_lowercase();
+        let m = m.strip_prefix("openai/").unwrap_or(&m);
+        m.starts_with("gpt-5") || m.starts_with("gpt-4.1")
+    }
+
+    /// Stable SHA-256-derived key so successive turns from the same chat
+    /// land on the same OpenAI/DeepSeek cache shard.
+    fn compute_prompt_cache_key(&self, request: &ChatRequest) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(request.model.as_bytes());
+        hasher.update(b"\x00");
+        if let Some(s) = &request.system {
+            hasher.update(s.as_bytes());
+        }
+        hasher.update(b"\x00");
+        if let Some(tools) = &request.tools {
+            let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            names.sort();
+            for n in names {
+                hasher.update(n.as_bytes());
+                hasher.update(b",");
+            }
+        }
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        format!("forge-osh-{hex}")
+    }
+
+    /// Build the messages array. When `cache_last_msg` is true the last
+    /// message's content is emitted as a one-element array with a
+    /// `cache_control: {type:"ephemeral"}` marker on it — the OpenAI-format
+    /// dialect Anthropic understands. This is only ever set when the
+    /// underlying provider is Anthropic (i.e. OpenRouter → anthropic/*).
+    fn build_messages(&self, messages: &[Message], cache_last_msg: bool) -> Vec<Value> {
+        let last_idx = messages.len().saturating_sub(1);
         messages
             .iter()
-            .map(|msg| match msg {
-                Message::User(UserContent::Text(text)) => {
-                    json!({"role": "user", "content": text})
-                }
-                Message::Assistant(content) => {
-                    let mut msg = json!({"role": "assistant"});
-                    if let Some(text) = content.text() {
-                        msg["content"] = json!(text);
+            .enumerate()
+            .map(|(i, msg)| {
+                let mark_this = cache_last_msg && i == last_idx;
+                match msg {
+                    Message::User(UserContent::Text(text)) => {
+                        if mark_this {
+                            json!({
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": text,
+                                    "cache_control": {"type": "ephemeral"}
+                                }]
+                            })
+                        } else {
+                            json!({"role": "user", "content": text})
+                        }
                     }
-                    let calls = content.tool_calls();
-                    if !calls.is_empty() {
-                        msg["tool_calls"] = json!(calls
-                            .iter()
-                            .map(|tc| json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.input.to_string()
-                                }
-                            }))
-                            .collect::<Vec<_>>());
+                    Message::Assistant(content) => {
+                        let mut msg = json!({"role": "assistant"});
+                        if let Some(text) = content.text() {
+                            if mark_this {
+                                msg["content"] = json!([{
+                                    "type": "text",
+                                    "text": text,
+                                    "cache_control": {"type": "ephemeral"}
+                                }]);
+                            } else {
+                                msg["content"] = json!(text);
+                            }
+                        }
+                        let calls = content.tool_calls();
+                        if !calls.is_empty() {
+                            msg["tool_calls"] = json!(calls
+                                .iter()
+                                .map(|tc| json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.name,
+                                        "arguments": tc.input.to_string()
+                                    }
+                                }))
+                                .collect::<Vec<_>>());
+                        }
+                        msg
                     }
-                    msg
-                }
-                Message::Tool(result) => {
-                    json!({
-                        "role": "tool",
-                        "tool_call_id": result.tool_use_id,
-                        "content": result.content
-                    })
+                    Message::Tool(result) => {
+                        if mark_this {
+                            // OpenAI tool-message format keeps `content` as a
+                            // string; OpenRouter accepts the array form with
+                            // cache_control for Anthropic routes.
+                            json!({
+                                "role": "tool",
+                                "tool_call_id": result.tool_use_id,
+                                "content": [{
+                                    "type": "text",
+                                    "text": result.content,
+                                    "cache_control": {"type": "ephemeral"}
+                                }]
+                            })
+                        } else {
+                            json!({
+                                "role": "tool",
+                                "tool_call_id": result.tool_use_id,
+                                "content": result.content
+                            })
+                        }
+                    }
                 }
             })
             .collect()
     }
 
-    fn build_tools(&self, tools: &[ToolDefinition]) -> Vec<Value> {
+    /// Build tool definitions. When `cache_last_tool` is true, attach an
+    /// ephemeral cache_control marker to the LAST tool (Anthropic dialect
+    /// over OpenAI format — caches the full tools array prefix).
+    fn build_tools(&self, tools: &[ToolDefinition], cache_last_tool: bool) -> Vec<Value> {
+        let last_idx = tools.len().saturating_sub(1);
         tools
             .iter()
-            .map(|tool| {
-                json!({
+            .enumerate()
+            .map(|(i, tool)| {
+                let mut v = json!({
                     "type": "function",
                     "function": {
                         "name": tool.name,
                         "description": tool.description,
                         "parameters": tool.parameters
                     }
-                })
+                });
+                if cache_last_tool && i == last_idx {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "cache_control".to_string(),
+                            json!({"type": "ephemeral"}),
+                        );
+                    }
+                }
+                v
             })
             .collect()
     }
@@ -317,9 +475,32 @@ impl Provider for OpenAICompatProvider {
     ) -> Result<ChatResponse> {
         let url = format!("{}/chat/completions", self.base_url);
 
+        // Prompt-cache strategy.
+        // - OpenRouter → anthropic/* needs Anthropic cache_control markers
+        //   injected in the OpenAI message format (up to 4 ephemeral
+        //   breakpoints; we use 3: system, last tool, last message).
+        // - OpenAI / DeepSeek (direct OR via OpenRouter) get a stable
+        //   prompt_cache_key for shard routing.
+        // - Gemini/GLM/etc. auto-cache server-side — no client action.
+        let anthro_markers = self.inject_anthropic_cache_markers(&request.model);
+        let big_system = request
+            .system
+            .as_ref()
+            .map(|s| TokenCounter::count_text(s) >= 1024)
+            .unwrap_or(false);
+        let has_tools = request
+            .tools
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false);
+        let big_history = TokenCounter::count_messages(&request.messages) >= 2048;
+        let mark_msg = anthro_markers && big_history;
+        let mark_tools = anthro_markers && has_tools;
+        let mark_system = anthro_markers && big_system;
+
         let mut body = json!({
             "model": request.model,
-            "messages": self.build_messages(&request.messages),
+            "messages": self.build_messages(&request.messages, mark_msg),
             "stream": true,
             // Ask the server for a final usage chunk so we can track tokens
             // and cost for every OpenAI-compatible provider.
@@ -336,21 +517,40 @@ impl Provider for OpenAICompatProvider {
             body["temperature"] = json!(request.temperature);
         }
 
-        // Inject system message at the start if provided
+        // Inject system message at the start if provided.
+        // For Anthropic routes we send the content-array form with an
+        // ephemeral cache_control marker so the system prompt is cached.
         if let Some(system) = &request.system {
+            let system_value = if mark_system {
+                json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"}
+                }])
+            } else {
+                json!(system)
+            };
             if let Some(msgs) = body["messages"].as_array_mut() {
-                msgs.insert(0, json!({"role": "system", "content": system}));
+                msgs.insert(0, json!({"role": "system", "content": system_value}));
             }
         }
 
         if let Some(tools) = &request.tools {
             if !tools.is_empty() && self.supports_tools_for(&request.model) {
-                body["tools"] = json!(self.build_tools(tools));
+                body["tools"] = json!(self.build_tools(tools, mark_tools));
             }
         }
 
         if !request.stop_sequences.is_empty() {
             body["stop"] = json!(request.stop_sequences);
+        }
+
+        // prompt_cache_key (OpenAI / DeepSeek, direct or via OpenRouter)
+        if self.supports_prompt_cache_key(&request.model) {
+            body["prompt_cache_key"] = json!(self.compute_prompt_cache_key(&request));
+            if self.supports_extended_cache(&request.model) {
+                body["prompt_cache_retention"] = json!("24h");
+            }
         }
 
         let mut req = self
@@ -459,10 +659,45 @@ impl Provider for OpenAICompatProvider {
                     }
                 }
 
-                // Usage in the final event
+                // Usage in the final event (stream_options.include_usage=true).
+                //
+                // Field shape across servers we care about:
+                // - OpenAI / DeepSeek direct: prompt_tokens (total),
+                //   prompt_tokens_details.cached_tokens (subset, ⊆ prompt).
+                // - OpenRouter → anthropic/*: also emits
+                //   prompt_tokens_details.cached_tokens (read) AND
+                //   cache_creation_input_tokens or prompt_tokens_details.
+                //   cache_creation_tokens (write). We try both keys.
+                // - Gemini direct lives in a different code path.
+                // - OpenRouter normalizes everything; missing fields default to 0.
+                //
+                // We always normalize Usage so that:
+                //   input_tokens     = uncached new tokens
+                //   cache_read_tokens  = subset already in the cache
+                //   cache_write_tokens = subset freshly populating the cache
                 if let Some(u) = parsed.get("usage") {
-                    usage.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                    let total_prompt = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                     usage.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                    let details = u.get("prompt_tokens_details");
+                    let cached = details
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let cache_write = u
+                        .get("cache_creation_input_tokens")
+                        .or_else(|| details.and_then(|d| d.get("cache_creation_tokens")))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let mut uncached = total_prompt;
+                    if cached > 0 && cached <= uncached {
+                        uncached -= cached;
+                        usage.cache_read_tokens = Some(cached);
+                    }
+                    if cache_write > 0 && cache_write <= uncached {
+                        uncached -= cache_write;
+                        usage.cache_write_tokens = Some(cache_write);
+                    }
+                    usage.input_tokens = uncached;
                 }
             }
         }
