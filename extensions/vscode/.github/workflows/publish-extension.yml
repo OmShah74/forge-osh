@@ -1,0 +1,67 @@
+name: Publish Extension
+
+# Builds + publishes six platform-specific .vsix files to the Marketplace.
+# Runs after release-binaries.yml finishes successfully on a version tag.
+
+on:
+  workflow_run:
+    workflows: ["Release Binaries"]
+    types: [completed]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: extensions/vscode
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: extensions/vscode/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ../../binaries
+          pattern: "forge-osh-*"
+
+      - name: Package + publish each platform
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          set -euo pipefail
+          for target in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
+            src="../../binaries/forge-osh-${target}"
+            if [ ! -d "$src" ]; then
+              echo "::warning::missing artifact for ${target}; skipping"
+              continue
+            fi
+            rm -rf bin && mkdir -p "bin/${target}"
+            cp "${src}"/* "bin/${target}/"
+            chmod +x "bin/${target}"/forge-osh* || true
+
+            echo "→ packaging ${target}"
+            npx vsce package --target "${target}" --out "../../osh-${target}.vsix"
+
+            if [ -n "${VSCE_PAT:-}" ]; then
+              echo "→ publishing ${target}"
+              npx vsce publish --target "${target}" --pat "${VSCE_PAT}"
+            else
+              echo "::warning::VSCE_PAT not set — packaged but not published"
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osh-vsix-bundle
+          path: osh-*.vsix

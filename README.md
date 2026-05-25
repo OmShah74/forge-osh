@@ -5,7 +5,7 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.20</code> &nbsp;·&nbsp;
+  <code>v1.0.21</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
@@ -63,14 +63,40 @@
 21. [CLI Commands Reference](#-cli-commands-reference)
 22. [Configuration Reference](#-configuration-reference)
 23. [Environment Variables](#-environment-variables)
-24. [v1.0.20 — Prompt Caching Across Providers](#-v1020--prompt-caching-across-providers)
+24. [v1.0.21 — JSON-RPC Bridge, Streaming Thinking & VS Code Extension](#-v1021--json-rpc-bridge-streaming-thinking--vs-code-extension)
+    - [What ships in v1.0.21](#what-ships-in-v1021)
+    - [The `stream-json` I/O surface](#the-stream-json-io-surface)
+    - [`--jsonrpc-version` handshake](#--jsonrpc-version-handshake)
+    - [Outbound event additions (ThinkingDelta / ThinkingEnd / DiffPreview / TurnUsage)](#outbound-event-additions)
+    - [Stable tool-call ids on `ToolStart` / `ToolEnd`](#stable-tool-call-ids-on-toolstart--toolend)
+    - [Anthropic extended-thinking content blocks](#anthropic-extended-thinking-content-blocks)
+    - [Diff preview before permission prompt](#diff-preview-before-permission-prompt)
+    - [Per-turn-step cost delta](#per-turn-step-cost-delta)
+    - [Release-binary naming workflow](#release-binary-naming-workflow)
+    - [OSH VS Code Extension (companion product)](#osh-vs-code-extension-companion-product)
+        - [Architecture and binary discovery](#architecture-and-binary-discovery)
+        - [Chat panel surface](#chat-panel-surface)
+        - [Slash command parity (47 commands)](#slash-command-parity-47-commands)
+        - [`@file` attachment palette](#file-attachment-palette)
+        - [Inline diff cards in chat (green + / red −)](#inline-diff-cards-in-chat-green---red-)
+        - [Live activity indicator and tool timers](#live-activity-indicator-and-tool-timers)
+        - [Hardened cancel (3-second force-clear)](#hardened-cancel-3-second-force-clear)
+        - [Watchdog and repeat-error guard](#watchdog-and-repeat-error-guard)
+        - [Goal cards in chat](#goal-cards-in-chat)
+        - [Context-window ring with hover detail](#context-window-ring-with-hover-detail)
+        - [In-extension API key entry + `keys.json` watcher](#in-extension-api-key-entry--keysjson-watcher)
+        - [Side panels (Chat / Goals / Sessions / MCP / Skills)](#side-panels)
+        - [Settings surface](#settings-surface)
+        - [Editor integrations (`Ctrl+L`, `Ctrl+K`)](#editor-integrations-ctrll-ctrlk)
+        - [Reload / dev / package / publish flow](#reload-dev-package-publish-flow)
+25. [v1.0.20 — Prompt Caching Across Providers](#-v1020--prompt-caching-across-providers)
     - [Why prompt caching matters](#why-prompt-caching-matters)
     - [Per-provider cache strategy](#per-provider-cache-strategy)
     - [OpenRouter — caching across underlying backends](#openrouter--caching-across-underlying-backends)
     - [Cache pricing multipliers](#cache-pricing-multipliers)
     - [Surfacing cache stats in the TUI](#surfacing-cache-stats-in-the-tui)
     - [What forge-osh sends per request](#what-forge-osh-sends-per-request)
-25. [v1.0.19 — `/goal` Primitive (Durable, Autonomous, Verifiable Goals)](#-v1019--goal-primitive-durable-autonomous-verifiable-goals)
+26. [v1.0.19 — `/goal` Primitive (Durable, Autonomous, Verifiable Goals)](#-v1019--goal-primitive-durable-autonomous-verifiable-goals)
     - [What `/goal` is and why it matters](#what-goal-is-and-why-it-matters)
     - [Goal Architecture](#goal-architecture)
     - [The Goal Contract — GoalSpec](#the-goal-contract--goalspec)
@@ -85,7 +111,7 @@
     - [On-disk layout](#goal-on-disk-layout)
     - [Examples & worked recipes](#goal-examples--worked-recipes)
     - [Enabling /goal — the feature flag](#enabling-goal--the-feature-flag)
-26. [v1.0.18 — MCP (Model Context Protocol) Integration](#-v1018--mcp-model-context-protocol-integration)
+27. [v1.0.18 — MCP (Model Context Protocol) Integration](#-v1018--mcp-model-context-protocol-integration)
     - [What MCP is and why it matters](#what-mcp-is-and-why-it-matters)
     - [Architecture](#mcp-architecture)
     - [Catalog of built-in servers](#mcp-catalog-of-built-in-servers)
@@ -98,7 +124,7 @@
     - [Authenticated-identity rules for the model](#authenticated-identity-rules-for-the-model)
     - [Examples per service](#mcp-examples-per-service)
     - [Configuration & file layout](#mcp-configuration--file-layout)
-27. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
+28. [v1.0.15 — Architecture & Skills Overhaul](#-v1015--architecture--skills-overhaul)
     - [Permission Modes](#permission-modes-plan--accept-edits--bypass--default)
     - [Extended Thinking](#extended-thinking-thinkingconfig)
     - [Tool Executor Rewrite](#tool-executor-rewrite)
@@ -114,9 +140,9 @@
     - [Skills Architecture](#skills-architecture-project--user--bundled)
     - [Skills UX — Commands & Status Bar](#skills-ux--commands--status-bar)
     - [How to Use, Add, Modify & Delete Skills](#how-to-use-add-modify--delete-skills)
-28. [Future Roadmap](#-future-roadmap)
-29. [Contributing](#-contributing)
-30. [License & Contact](#-license--contact)
+29. [Future Roadmap](#-future-roadmap)
+30. [Contributing](#-contributing)
+31. [License & Contact](#-license--contact)
 
 ---
 
@@ -1254,6 +1280,336 @@ max_conversation_lines = 1000
 | `FIREWORKS_API_KEY` | Fireworks API key |
 | `PERPLEXITY_API_KEY` | Perplexity API key |
 | `COHERE_API_KEY` | Cohere API key |
+
+---
+
+## 🧩 v1.0.21 — JSON-RPC Bridge, Streaming Thinking & VS Code Extension
+
+Version 1.0.21 turns `forge-osh` from a terminal-only agent into one that can be **driven as a subprocess by any IDE** — and ships the first such consumer, the **OSH VS Code Extension** (publisher `OmShah74`). The Rust binary gains a new `stream-json` I/O surface that speaks NDJSON JSON-RPC over stdio, a `--jsonrpc-version` handshake probe, four new outbound events (`ThinkingDelta`, `ThinkingEnd`, `DiffPreview`, `TurnUsage`), and stable tool-call ids that let IDEs correlate `ToolStart` / `ToolEnd` pairs. Anthropic extended-thinking content blocks now stream through the same pipeline. The CLI surface — every TUI, every slash command, every modal — is **unchanged**: this release is strictly additive.
+
+> **Bottom line**: nothing the CLI user does behaves differently. But you can now point any editor, dashboard, or custom GUI at `forge-osh --output-format=stream-json --stdin-json` and get the full agent event stream as line-delimited JSON, including extended thinking, per-turn cost deltas, and pre-permission diff previews.
+
+### What ships in v1.0.21
+
+- **`stream-json` I/O surface** — `--output-format=stream-json --stdin-json` makes the binary read NDJSON commands on stdin and emit NDJSON events on stdout. stderr is reserved for human-readable logs and never mixes with the protocol stream.
+- **`--jsonrpc-version` probe** — prints the wire-schema version (currently `1`) and exits. IDEs use this during their handshake to refuse incompatible binaries.
+- **`ThinkingDelta` + `ThinkingEnd` events** — Anthropic extended thinking now streams as discrete reasoning chunks before the visible answer, so IDEs can render a "Thinking…" panel that fills in live.
+- **`DiffPreview` event** — computed unified diff for any file-mutation tool, emitted *before* the corresponding permission request so an IDE can open a native diff editor next to the prompt.
+- **`TurnUsage` event** — per-turn-step usage (input / output / cache_read / cache_write / cost_usd) emitted as a delta, so IDEs can show "this turn cost $X" without subtracting cumulative snapshots.
+- **Stable tool-call ids** — `ToolStart` and `ToolEnd` now carry the provider-issued `id` (stable across the pair within a single turn). IDEs use this to correlate tool-card UI without name-based matching.
+- **Goal worker pattern-match fix** — `AgentEvent::ToolStart { name, input, .. }` correctly accepts the new `id` field.
+- **OSH VS Code Extension (companion product)** — see [§OSH VS Code Extension](#osh-vs-code-extension-companion-product) below for the full feature set.
+
+### The `stream-json` I/O surface
+
+`OutputFormat` is a new enum in `src/cli.rs` with three variants:
+
+| Variant       | Use case                                                                |
+|---------------|-------------------------------------------------------------------------|
+| `tui`         | Default ratatui-based interactive terminal UI.                          |
+| `text`        | Plain stdout streaming for non-interactive pipes (`echo prompt \| forge-osh -p anthropic --output-format=text`). |
+| `stream-json` | NDJSON JSON-RPC over stdio for IDE integrations (e.g. VS Code).         |
+
+Pair `--output-format=stream-json` with `--stdin-json` to also read commands as NDJSON. The full schema lives in `src/jsonrpc/{inbound,outbound}.rs` (21 inbound commands, 17 outbound events, schema v1).
+
+```bash
+# IDE handshake — IDEs probe this on every spawn
+forge-osh --jsonrpc-version
+# → 1
+
+# Drive forge-osh as a subprocess
+forge-osh --output-format=stream-json --stdin-json -p anthropic -m claude-sonnet-4-5
+# stdin  ← {"type":"user_message","text":"explain main.rs"}
+# stdout → {"type":"ready","jsonrpc_version":1,"forge_version":"1.0.21",...}
+#          {"type":"assistant_text_delta","text":"Looking at "}
+#          {"type":"assistant_text_delta","text":"main.rs..."}
+#          {"type":"tool_call_start","id":"call_1","name":"read_file",...}
+#          {"type":"tool_call_end","id":"call_1","output_excerpt":"...","is_error":false}
+#          {"type":"usage","input":1200,"output":340,"cache_read":11000,...}
+#          {"type":"done","reason":"end_turn"}
+```
+
+### `--jsonrpc-version` handshake
+
+IDEs that ship a bundled binary cannot assume the user hasn't dropped a different version into `osh.binaryPath`. The flag prints a single integer and exits, so the IDE can probe:
+
+```ts
+const v = parseInt(execSync(`${binaryPath} --jsonrpc-version`).toString().trim(), 10);
+if (v !== EXPECTED_VERSION) refuseToAttach();
+```
+
+This is what the OSH extension does on every cold start. Mismatches surface a clean error instead of a confusing protocol-parse failure.
+
+### Outbound event additions
+
+Four new variants on `AgentEvent` (and matching `OutboundEvent` in `src/jsonrpc/outbound.rs`):
+
+```rust
+ThinkingDelta { text: String },
+ThinkingEnd,
+DiffPreview { tool_call_id: String, path: String, unified_diff: String },
+TurnUsage   { input: u32, output: u32, cache_read: u32, cache_write: u32, cost_usd: f64 },
+```
+
+All four are emitted only when the active provider supports the underlying capability — non-Anthropic providers never emit `ThinkingDelta`, non-file tools never emit `DiffPreview`. The TUI consumer in `src/tui/mod.rs` ignores them via a `_` fallback arm, so the CLI is unaffected.
+
+### Stable tool-call ids on `ToolStart` / `ToolEnd`
+
+Previously `ToolStart` and `ToolEnd` carried only `name` — fine for the TUI which renders sequentially, but ambiguous when an IDE renders tool cards as upserts (the same tool can fire twice in a single turn). Both events now carry an `id: String` field populated from the provider's tool-call id. The id is stable for the duration of a single turn step.
+
+### Anthropic extended-thinking content blocks
+
+`src/provider/anthropic.rs` now parses three new SSE event types:
+
+- `content_block_start` with `type: "thinking"` → emits `StreamEvent::ThinkingStart`.
+- `content_block_delta` with `type: "thinking_delta"` → emits `StreamEvent::ThinkingDelta(text)`.
+- `content_block_stop` for a `thinking` block → emits `StreamEvent::ThinkingDone`.
+
+The agent loop's stream forwarder (`src/agent/loop.rs`) translates these into `AgentEvent::ThinkingDelta` / `AgentEvent::ThinkingEnd`. The TUI's reasoning summary still works because the underlying token stream is unchanged; the IDE just gets the events too.
+
+### Diff preview before permission prompt
+
+`AgentLoop::maybe_emit_diff_preview` runs before any file-mutation tool with `PermissionLevel::Mutating`/`Destructive`:
+
+1. Calls `tools::executor::is_file_mutation_tool(name)` to check if a diff makes sense.
+2. Calls `tools::fs::preview_file_tool_change(name, input, ctx)` to compute the unified diff *without* applying the change.
+3. Derives `path` from the tool's input (`path`, `destination`, or `source`).
+4. Emits `AgentEvent::DiffPreview { tool_call_id, path, unified_diff }` — the IDE can render it inline or open it in a native diff editor.
+
+Errors are swallowed: the permission flow still works without a preview. The TUI ignores the event.
+
+### Per-turn-step cost delta
+
+The existing `usage` event reports cumulative session usage. The new `TurnUsage` event reports the **marginal cost of the single most recent provider call**, so IDEs can show "this turn cost $X" without subtracting snapshots. The cost is computed using the same provider-aware per-million-token rates as the session tracker (uncached tokens only — cache discounts are already applied centrally).
+
+### Release-binary naming workflow
+
+Release binaries now follow a versioned naming convention enforced by the VS Code extension:
+
+```
+C:\forge-build\release\
+  forge-osh_v1.0.19.exe
+  forge-osh_v1.0.20.exe
+  forge-osh_v1.0.21.exe   ← latest, auto-picked by the extension
+```
+
+Each binary is named `forge-osh_v<major>.<minor>.<patch>.exe`. **Existing versioned exes MUST NOT be overwritten** — releases are immutable so the maintainer can bisect / rollback. The extension's `osh.releaseDir` scans this folder and picks the highest semver automatically.
+
+To publish a new version:
+
+```bash
+# 1. Bump Cargo.toml: version = "1.0.<next>"
+cargo build --release
+
+# 2. Copy (don't move) to the release dir with the versioned name
+cp target/release/forge-osh.exe "C:/forge-build/release/forge-osh_v1.0.<next>.exe"
+
+# 3. In VS Code: OSH: Restart Agent Process
+#    The extension auto-picks the highest version. Verify with:
+#    OSH: Show Active Binary Path
+```
+
+No extension setting change, no reinstall — just drop the new exe and restart.
+
+### OSH VS Code Extension (companion product)
+
+The VS Code extension lives under `extensions/vscode/` and is published on the Marketplace as `OmShah74.osh` (display name **OSH — Open Source Harness**). It speaks NDJSON JSON-RPC to a `forge-osh` subprocess via the schema described above.
+
+#### Architecture and binary discovery
+
+```
+┌──────────────────────────────┐         stdio (NDJSON)
+│  VS Code Extension Host      │  ←──────────────────────→  forge-osh
+│  ┌────────────────────────┐  │   stdin: ForgeCommand[]      (Rust)
+│  │ OshClient (TS)         │  │   stdout: ForgeEvent[]
+│  │  - line-buffered NDJSON │  │   stderr: human logs
+│  │  - restart w/ backoff  │  │
+│  │  - busy state ⇄ ctx    │  │
+│  └────────────────────────┘  │
+│  ┌────────────────────────┐  │
+│  │ ChatViewProvider        │  │  postMessage()  ┌────────────────────┐
+│  │  - event translation   │  │  ─────────────→  │  Webview (chat.js) │
+│  │  - slash dispatch      │  │  ←─────────────  │  vanilla TS + CSS  │
+│  │  - file attachment     │  │  fromWebview     └────────────────────┘
+│  └────────────────────────┘  │
+│  ┌────────────────────────┐  │
+│  │ Side panel TreeViews    │  │
+│  │  Goals · Sessions · MCP │  │
+│  │  · Skills              │  │
+│  └────────────────────────┘  │
+└──────────────────────────────┘
+```
+
+Binary discovery is **four-tier**, in priority order, implemented in `src/runtime/binary.ts`:
+
+1. **`osh.binaryPath` setting** — exact path or glob (e.g. `C:\forge-build\release\forge-osh_v*.exe`). Highest version wins for globs.
+2. **`osh.releaseDir`** — folder scanned for `forge-osh_v<x.y.z>[.exe]`; highest semver wins. Default: `C:\forge-build\release` on Windows, `~/forge-build/release` elsewhere.
+3. **Bundled** — `extensions/vscode/bin/<platform-arch>/forge-osh[.exe]` shipped in the `.vsix` for Marketplace installs.
+4. **PATH** — `forge-osh` from `$PATH` as last-resort fallback.
+
+Drop a new `forge-osh_v<next>.exe` into the release folder, run **OSH: Restart Agent Process**, and the extension picks it up — no setting change, no reinstall.
+
+#### Chat panel surface
+
+The chat is a single CSP-locked webview (`media/webview/chat.{html,css,js}`) rendered inside the OSH activity bar container. All assistant text is inserted via `textContent` (never `innerHTML`) so prompt-injection cannot escape into the DOM. Streaming deltas are batched on `requestAnimationFrame` so the UI stays smooth at 200+ events/second.
+
+Header surface, in order:
+`OSH` brand · `v1.0.21` subtitle · `provider` pill · `model` pill · ⟁ MCP · ✦ Skills · ◎ Goals · ＋ new · ⌫ clear · ? help · ⚙ settings.
+
+Composer surface:
+context-window ring (with hover popover) · cumulative cost text · activity indicator · `@ to attach file` hint · slash palette · file palette · attachments chip row · textarea · gradient send button · keyboard hint row.
+
+#### Slash command parity (47 commands)
+
+Every CLI slash from `src/tui/help.rs` is reachable from the extension. Typing `/` in the composer opens a filtered autocomplete palette grouped by category:
+
+| Category | Commands |
+|---|---|
+| Conversation | `/help` `/clear` `/new` `/save` `/load` `/sessions` `/resume` `/rename` `/compact` `/undo` `/cancel` `/copy` `/export` |
+| Model & Provider | `/model` `/provider` `/key` `/keys` `/settings` `/config` `/effort` `/theme` `/trust` `/vim` `/fast` |
+| Status | `/cost` `/stats` `/status` `/session` `/doctor` `/logs` `/binary` `/release` `/restart` |
+| Skills & Goals | `/skill` `/skills` `/goal` `/team` |
+| Agent infra | `/mcp` `/lsp` `/permissions` `/hooks` `/forge-graph` |
+| VCS | `/commit` `/diff` |
+| Workspace | `/init` `/find` `/add-dir` `/quit` `/exit` |
+
+Native ones drive typed JSON-RPC commands (e.g. `/clear` → `new_session`). Agent-side ones (`/commit`, `/diff`, `/doctor`) send a natural-language prompt the LLM acts on. TUI-only ones (`/theme`, `/vim`, `/fast`) are listed for parity and forwarded as text so the agent at least sees them. Unknown slashes are forwarded as `user_message` text with a warning — nothing is silently dropped.
+
+#### `@file` attachment palette
+
+Typing `@` in the composer opens a workspace file picker (live-filtered, excludes `node_modules`/`dist`/`build`/`.git`/etc.). Arrow keys / Enter / Tab insert; click also works. Inserted as `@path/to/file` token. Attached files appear as removable chips above the textarea. On submit, the extension reads each file's contents and ships them to the agent as `context_blocks` of kind `file`, so the LLM gets the actual file text alongside the message.
+
+#### Inline diff cards in chat (green + / red −)
+
+When the agent emits a `DiffPreview` event (see Rust side above), the chat renders a full diff card with proper per-line coloring:
+
+- **Green** for `+` added lines.
+- **Red** for `-` removed lines.
+- **Dim** for context lines.
+- **Purple** for `@@` hunk markers.
+
+The header shows the file path + an **"Open in editor"** button to launch VS Code's native diff. The footer shows `+N / −N` totals. Long diffs scroll inside the card (max 22em) instead of stretching forever.
+
+#### Live activity indicator and tool timers
+
+A pulsing purple chip in the composer area shows what the agent is doing in real time:
+
+- `Thinking…` while extended thinking streams.
+- `Generating…` while assistant text tokens arrive.
+- `Running <tool>…` while a tool is executing (e.g. `Running bash…`).
+- `Working…` between events so the UI is never blank during a busy turn.
+
+Every running tool card also shows a live `MM:SS` pill in its header. After 20 seconds on the same tool, a yellow hint appears ("Still running. The agent buffers output until the command finishes.") so users know it isn't stuck. On completion the timer freezes at the final elapsed seconds.
+
+#### Hardened cancel (3-second force-clear)
+
+Clicking the floating red ■ Stop button (or pressing **Esc** while busy) calls `requestCancel()`:
+
+1. Sends `{ type: "cancel" }` to the agent.
+2. Posts a "Cancellation requested…" system line.
+3. Starts a **3-second deadline** — if the agent doesn't acknowledge with `done` / `error`, the UI **force-resets**: every still-running tool card is marked "Cancelled", live assistant text is finalized, busy clears.
+
+No more wedged UI when the agent ignores cancel.
+
+#### Watchdog and repeat-error guard
+
+- **90-second silence watchdog**: if no events arrive while the UI thinks the agent is busy, a yellow banner offers `Cancel` / `Restart`.
+- **Repeat-error guard**: if 3 tool errors fire in a single turn (e.g. `'black' is not recognized` looping on Windows), a red banner appears with **"Stop the chain"** + **"Dismiss"** buttons. Resets cleanly on the next user message.
+
+#### Goal cards in chat
+
+When the agent emits `goal_event` payloads, the chat renders a live goal card with a `GOAL` badge, the goal id prefix, objective text, state pill (running / paused / completed / failed), turn count, and cumulative cost. The card upserts as new events stream in. The Goals tree refreshes after `spawn_goal` so the side panel always reflects current state.
+
+#### Context-window ring with hover detail
+
+An SVG ring in the composer area shows % of context window used. Color shifts **yellow at 60%** and **red at 85%**. Auto-sized per model (Claude 200k, GPT-4.1 1M, Gemini 2M, etc.) or overridden via `osh.contextWindow`. Click or hover for a popover with the full breakdown: model, provider, last-turn input, cumulative input/output, cache read/write, cache hit %, cumulative cost.
+
+#### In-extension API key entry + `keys.json` watcher
+
+- **`OSH: Set API Key…`** command (and `/key` slash) prompts for a provider, prompts for a key (masked), writes `~/.forge-osh/keys.json`, then offers to restart the agent.
+- **File watcher** on `~/.forge-osh/keys.json` — when you change keys via the CLI, the extension auto-restarts the agent so changes take effect immediately (no stale keys).
+
+#### Side panels
+
+Five tree views in the OSH activity bar container, each disposable from chat header shortcuts (⟁ MCP · ✦ Skills · ◎ Goals):
+
+| View | Backing tree data | Context-menu actions |
+|---|---|---|
+| **Chat** | Webview (above) | new, clear, switch model, cancel, refresh |
+| **Goals** | `goal_event` stream, in-memory map | pause, resume, verify-now, force-complete, clear |
+| **Sessions** | `~/.forge-osh/sessions/*.json` on disk | (load via command palette) |
+| **MCP Servers** | `mcp_command list` → system_message JSON | connect, disconnect, enable, disable |
+| **Skills** | `skill_command list` | show, reload, delete |
+
+#### Settings surface
+
+`package.json` exposes 18 settings under the `osh.*` namespace:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `osh.binaryPath` | `""` | Exact path or glob override for binary discovery. |
+| `osh.releaseDir` | platform default | Folder scanned for `forge-osh_v*.exe`. |
+| `osh.provider` | `anthropic` | Default LLM provider (18 choices). |
+| `osh.model` | `claude-sonnet-4-20250514` | Default model id for the active provider. |
+| `osh.trustMode` | `false` | Auto-approve every tool permission. **DANGEROUS**. |
+| `osh.diffBeforeApply` | `true` | Show native VS Code diff editor before approving file edits. |
+| `osh.maxTokens` | `8192` | Max response tokens per turn. |
+| `osh.thinking` | `false` | Extended-thinking control: `false` / `true` / integer token budget. |
+| `osh.thinking.budget` | `0` | Token budget for extended thinking when above is `true`. |
+| `osh.effortLevel` | `3` | Creativity/effort 1–5. |
+| `osh.statusBar.show` | `false` | Show OSH cost/model item in VS Code's status bar. |
+| `osh.statusBar.showCacheHit` | `true` | When status bar visible, show cache hit %. |
+| `osh.contextWindow` | `0` (auto) | Override the model's context window for the chat ring. |
+| `osh.systemPrompt` | `""` | Additional system prompt appended to every turn. |
+| `osh.permissionRules.skipDestructiveConfirm` | `false` | Skip modal for destructive tool actions. **DANGEROUS**. |
+| `osh.networkTimeoutMs` | `60000` | HTTP timeout (ms) for provider network calls. |
+| `osh.maxConcurrentTools` | `4` | Maximum concurrent tool calls per turn. |
+| `osh.welcomeChips` | `[]` | Custom welcome-screen quick prompts. |
+| `osh.autoSaveSessions` | `true` | Auto-save conversation to `~/.forge-osh/sessions/` after each turn. |
+| `osh.logLevel` | `info` | Log verbosity for the agent process (forwarded as `RUST_LOG`). |
+| `osh.autoStart` | `true` | Spawn the agent process automatically on workspace open. |
+
+#### Editor integrations (Ctrl+L, Ctrl+K)
+
+- **`Ctrl+L`** (`Cmd+L` on Mac) — `OSH: Ask About Selection`. Captures the active editor's selection with file path and line range, prefills the chat composer with a labelled context block, and focuses the chat panel.
+- **`Ctrl+K`** (`Cmd+K`) — `OSH: Edit Selection…`. Prompts for an instruction, sends `selection + instruction` to the agent, waits for the streamed reply, and **replaces the selection in place** with the response. No round-trip through the chat panel.
+- **`Ctrl+Alt+O`** (`Cmd+Alt+O`) — `OSH: Open Chat`.
+- **`Ctrl+Alt+H`** (`Cmd+Alt+H`) — `OSH: Help (Slash Commands)`.
+- **`Ctrl+Alt+Backspace`** — `OSH: Clear Conversation`.
+- **`Esc`** — cancels a running turn when the composer is focused.
+
+Editor context-menu also exposes `OSH: Ask About Selection` and `OSH: Edit Selection…` when a selection is present.
+
+#### Reload / dev / package / publish flow
+
+```bash
+# Install deps (~120 MB node_modules)
+cd extensions/vscode
+npm install
+
+# Dev loop — open extensions/vscode in VS Code, then press F5
+# (or Run and Debug → "Run OSH Extension"). A second window opens
+# with [Extension Development Host] in the title. Edit code, then:
+npm run build                    # one-shot esbuild → out/extension.js
+# … and Ctrl+R inside the Extension Dev Host.
+
+# Or stay in watch mode for instant rebuilds on save:
+npm run watch
+
+# Type-check and lint (CI runs both)
+npm run typecheck
+npm run lint
+
+# Package a local .vsix for sideloading
+npm run package
+code --install-extension osh-0.1.4.vsix
+
+# Publish to the Marketplace (requires VSCE_PAT)
+npx vsce login OmShah74
+npm run publish
+```
+
+The extension's full Marketplace setup guide lives at `extensions/vscode/SETUP.md`; the changelog at `extensions/vscode/CHANGELOG.md`; the streaming-output roadmap at `extensions/vscode/future_plan.md`.
 
 ---
 

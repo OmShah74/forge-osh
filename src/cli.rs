@@ -1,4 +1,23 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// I/O surface for the agent process.
+///
+/// - `tui`         — the default ratatui-based interactive terminal UI.
+/// - `text`        — plain stdout streaming used by non-interactive pipes.
+/// - `stream-json` — NDJSON JSON-RPC over stdio (for IDE integrations such
+///                   as the VS Code extension). See `src/jsonrpc/`.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormat {
+    Tui,
+    Text,
+    StreamJson,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        OutputFormat::Tui
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -53,6 +72,21 @@ pub struct Cli {
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    // ---- IDE / JSON-RPC mode (used by the VS Code extension) ------------
+    /// I/O surface. `tui` (default), `text`, or `stream-json` for IDEs.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Tui)]
+    pub output_format: OutputFormat,
+
+    /// Read commands from stdin as NDJSON. Pair with
+    /// `--output-format=stream-json`.
+    #[arg(long)]
+    pub stdin_json: bool,
+
+    /// Print the JSON-RPC wire-schema version and exit. IDEs use this
+    /// during their handshake to refuse incompatible binaries.
+    #[arg(long)]
+    pub jsonrpc_version: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,

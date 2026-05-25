@@ -326,6 +326,7 @@ impl App {
                     name,
                     output,
                     is_error,
+                    ..
                 } => {
                     if is_error {
                         eprintln!("[{name} ERROR]: {output}");

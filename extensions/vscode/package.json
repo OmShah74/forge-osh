@@ -1,0 +1,457 @@
+{
+  "name": "osh",
+  "displayName": "OSH — Open Source Harness",
+  "description": "Provider-agnostic AI coding harness for VS Code. Bring any LLM, run any tool, stream every token. Powered by forge-osh.",
+  "version": "0.1.4",
+  "publisher": "OmShah74",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OmShah74/forge-osh"
+  },
+  "homepage": "https://github.com/OmShah74/forge-osh",
+  "bugs": {
+    "url": "https://github.com/OmShah74/forge-osh/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "claude",
+    "openai",
+    "gemini",
+    "ollama",
+    "openrouter",
+    "coding-assistant",
+    "llm",
+    "harness",
+    "osh",
+    "forge"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "osh.openChat",
+        "title": "OSH: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "osh.askAboutSelection",
+        "title": "OSH: Ask About Selection"
+      },
+      {
+        "command": "osh.editSelection",
+        "title": "OSH: Edit Selection…"
+      },
+      {
+        "command": "osh.cancel",
+        "title": "OSH: Cancel Current Task",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "osh.openCostPanel",
+        "title": "OSH: Show Cost & Cache Stats"
+      },
+      {
+        "command": "osh.switchModel",
+        "title": "OSH: Switch Model…"
+      },
+      {
+        "command": "osh.switchProvider",
+        "title": "OSH: Switch Provider…"
+      },
+      {
+        "command": "osh.newSession",
+        "title": "OSH: New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "osh.loadSession",
+        "title": "OSH: Load Session…"
+      },
+      {
+        "command": "osh.renameSession",
+        "title": "OSH: Rename Session…"
+      },
+      {
+        "command": "osh.saveSession",
+        "title": "OSH: Save Session"
+      },
+      {
+        "command": "osh.compactContext",
+        "title": "OSH: Compact Context"
+      },
+      {
+        "command": "osh.undo",
+        "title": "OSH: Undo Last File Change"
+      },
+      {
+        "command": "osh.invokeSkill",
+        "title": "OSH: Invoke Skill…"
+      },
+      {
+        "command": "osh.spawnGoal",
+        "title": "OSH: Spawn Goal…"
+      },
+      {
+        "command": "osh.buildGraph",
+        "title": "OSH: Build Code Graph"
+      },
+      {
+        "command": "osh.openSettings",
+        "title": "OSH: Open Settings"
+      },
+      {
+        "command": "osh.openLogs",
+        "title": "OSH: Show Logs (stderr)"
+      },
+      {
+        "command": "osh.restartBinary",
+        "title": "OSH: Restart Agent Process",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "osh.refreshTrees",
+        "title": "OSH: Refresh Side Panels",
+        "icon": "$(refresh)"
+      },
+      { "command": "osh.reloadHooks",        "title": "OSH: Reload Hooks" },
+      { "command": "osh.permissionRules",    "title": "OSH: Permission Rules…" },
+      { "command": "osh.pickRelease",        "title": "OSH: Pick Release Binary…" },
+      { "command": "osh.showActiveBinary",   "title": "OSH: Show Active Binary Path" },
+      { "command": "osh.setApiKey",          "title": "OSH: Set API Key…",          "icon": "$(key)" },
+      { "command": "osh.clearChat",          "title": "OSH: Clear Conversation",    "icon": "$(clear-all)" },
+      { "command": "osh.help",               "title": "OSH: Help (Slash Commands)", "icon": "$(question)" },
+
+      { "command": "osh.goal.pause",         "title": "Pause",          "icon": "$(debug-pause)" },
+      { "command": "osh.goal.resume",        "title": "Resume",         "icon": "$(debug-continue)" },
+      { "command": "osh.goal.clear",         "title": "Clear",          "icon": "$(clear-all)" },
+      { "command": "osh.goal.verifyNow",     "title": "Verify Now",     "icon": "$(check)" },
+      { "command": "osh.goal.forceComplete", "title": "Force Complete", "icon": "$(pass-filled)" },
+
+      { "command": "osh.mcp.connect",        "title": "Connect",        "icon": "$(plug)" },
+      { "command": "osh.mcp.disconnect",     "title": "Disconnect",     "icon": "$(debug-disconnect)" },
+      { "command": "osh.mcp.enable",         "title": "Enable",         "icon": "$(check)" },
+      { "command": "osh.mcp.disable",        "title": "Disable",        "icon": "$(circle-slash)" },
+
+      { "command": "osh.skill.show",         "title": "Show",           "icon": "$(eye)" },
+      { "command": "osh.skill.reload",       "title": "Reload Registry","icon": "$(refresh)" },
+      { "command": "osh.skill.delete",       "title": "Delete",         "icon": "$(trash)" }
+    ],
+    "keybindings": [
+      {
+        "command": "osh.askAboutSelection",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "osh.editSelection",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "osh.openChat",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o"
+      },
+      {
+        "command": "osh.cancel",
+        "key": "escape",
+        "when": "osh.busy && !inputFocus && !editorFocus"
+      },
+      {
+        "command": "osh.help",
+        "key": "ctrl+alt+h",
+        "mac": "cmd+alt+h"
+      },
+      {
+        "command": "osh.clearChat",
+        "key": "ctrl+alt+backspace",
+        "mac": "cmd+alt+backspace"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "osh.askAboutSelection",
+          "group": "1_osh@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "osh.editSelection",
+          "group": "1_osh@2",
+          "when": "editorHasSelection"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "osh.newSession",
+          "when": "view == osh.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "osh.clearChat",
+          "when": "view == osh.chatView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "osh.switchModel",
+          "when": "view == osh.chatView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "osh.help",
+          "when": "view == osh.chatView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "osh.cancel",
+          "when": "view == osh.chatView && osh.busy",
+          "group": "navigation@5"
+        },
+        {
+          "command": "osh.refreshTrees",
+          "when": "view == osh.goalsView || view == osh.sessionsView || view == osh.mcpView || view == osh.skillsView",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        { "command": "osh.goal.pause",         "when": "view == osh.goalsView && viewItem == osh.goal", "group": "inline@1" },
+        { "command": "osh.goal.resume",        "when": "view == osh.goalsView && viewItem == osh.goal", "group": "inline@2" },
+        { "command": "osh.goal.verifyNow",     "when": "view == osh.goalsView && viewItem == osh.goal", "group": "1_actions@1" },
+        { "command": "osh.goal.forceComplete", "when": "view == osh.goalsView && viewItem == osh.goal", "group": "1_actions@2" },
+        { "command": "osh.goal.clear",         "when": "view == osh.goalsView && viewItem == osh.goal", "group": "9_destructive@1" },
+
+        { "command": "osh.mcp.connect",     "when": "view == osh.mcpView && viewItem == osh.mcp.disabled", "group": "inline@1" },
+        { "command": "osh.mcp.disconnect",  "when": "view == osh.mcpView && viewItem == osh.mcp.enabled",  "group": "inline@1" },
+        { "command": "osh.mcp.enable",      "when": "view == osh.mcpView && viewItem == osh.mcp.disabled", "group": "1_actions@1" },
+        { "command": "osh.mcp.disable",     "when": "view == osh.mcpView && viewItem == osh.mcp.enabled",  "group": "1_actions@1" },
+
+        { "command": "osh.skill.show",   "when": "view == osh.skillsView && viewItem == osh.skill", "group": "inline@1" },
+        { "command": "osh.skill.delete", "when": "view == osh.skillsView && viewItem == osh.skill", "group": "9_destructive@1" }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "osh",
+          "title": "OSH",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "osh": [
+        {
+          "id": "osh.chatView",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "osh.goalsView",
+          "name": "Goals"
+        },
+        {
+          "id": "osh.sessionsView",
+          "name": "Sessions"
+        },
+        {
+          "id": "osh.mcpView",
+          "name": "MCP Servers"
+        },
+        {
+          "id": "osh.skillsView",
+          "name": "Skills"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "OSH",
+      "properties": {
+        "osh.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional exact path or glob like `C:\\forge-build\\release\\forge-osh_v*.exe` overriding auto-discovery. Leave empty to pick the latest versioned binary from `osh.releaseDir` or fall back to the bundled one."
+        },
+        "osh.releaseDir": {
+          "type": "string",
+          "default": "",
+          "description": "Folder scanned for versioned `forge-osh_v<x.y.z>[.exe]` binaries. The highest version wins. Leave empty for the platform default (`C:\\forge-build\\release` on Windows, `~/forge-build/release` elsewhere)."
+        },
+        "osh.provider": {
+          "type": "string",
+          "default": "anthropic",
+          "enum": [
+            "anthropic",
+            "openai",
+            "gemini",
+            "groq",
+            "grok",
+            "openrouter",
+            "mistral",
+            "deepseek",
+            "together",
+            "fireworks",
+            "perplexity",
+            "cohere",
+            "ollama",
+            "llamacpp",
+            "lmstudio",
+            "vllm",
+            "jan",
+            "localai"
+          ],
+          "description": "Default LLM provider."
+        },
+        "osh.model": {
+          "type": "string",
+          "default": "claude-sonnet-4-20250514",
+          "description": "Default model id for the active provider."
+        },
+        "osh.trustMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, all tool permissions are auto-approved. DANGEROUS — only use in trusted workspaces."
+        },
+        "osh.diffBeforeApply": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a native VS Code diff editor before approving file edits."
+        },
+        "osh.maxTokens": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 256,
+          "maximum": 200000,
+          "description": "Max response tokens per turn."
+        },
+        "osh.thinking": {
+          "type": [
+            "boolean",
+            "number"
+          ],
+          "default": false,
+          "description": "Extended-thinking control. `false` = off, `true` = provider default, or a token-budget integer."
+        },
+        "osh.effortLevel": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Creativity/effort level (1 = deterministic, 5 = maximum)."
+        },
+        "osh.statusBar.show": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the OSH cost/model item in VS Code's bottom-right status bar. The in-chat context ring is always available regardless."
+        },
+        "osh.statusBar.showCacheHit": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the status bar item is visible, show the cache-hit percentage."
+        },
+        "osh.contextWindow": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Override the model's context window (tokens) used by the in-chat context ring. 0 = auto-detect by model id."
+        },
+        "osh.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Additional system prompt appended to every turn. Leave blank for the agent's default."
+        },
+        "osh.thinking.budget": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 200000,
+          "description": "Token budget for extended thinking when osh.thinking is true. 0 = provider default."
+        },
+        "osh.permissionRules.skipDestructiveConfirm": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip the modal confirmation for destructive tool actions. DANGEROUS — only enable for sandboxed workspaces."
+        },
+        "osh.networkTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "description": "HTTP timeout (ms) for provider network calls."
+        },
+        "osh.maxConcurrentTools": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 32,
+          "description": "Maximum number of tool calls the agent runs in parallel within a turn."
+        },
+        "osh.welcomeChips": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Custom welcome-screen quick prompts (one per array entry). Empty uses the built-in set."
+        },
+        "osh.autoSaveSessions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save the conversation to ~/.forge-osh/sessions/ after each turn."
+        },
+        "osh.logLevel": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "info",
+          "description": "Log verbosity for the agent process (forwarded as RUST_LOG)."
+        },
+        "osh.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Spawn the agent process automatically on workspace open."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "lint": "eslint src --ext ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vscode-test",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@vscode/test-electron": "^2.4.0",
+    "@vscode/vsce": "^2.27.0",
+    "esbuild": "^0.21.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.4.0"
+  }
+}
