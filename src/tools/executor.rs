@@ -274,7 +274,7 @@ fn decide_permission(
     }
 }
 
-fn is_file_mutation_tool(tool_name: &str) -> bool {
+pub fn is_file_mutation_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "write_file" | "edit_file" | "create_file" | "delete_file" | "copy_file" | "move_file"

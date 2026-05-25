@@ -22,3 +22,44 @@ todo.txt
 /permissions.json
 test_errors.log
 target-build/
+
+# ── Node / VS Code extension build artifacts ───────────────────────────
+# Apply repo-wide so any subdirectory (extensions/vscode/, tools/, etc.)
+# stays safe even if its own .gitignore is missed.
+node_modules/
+out/
+build/
+.next/
+.cache/
+*.vsix
+*.tsbuildinfo
+.npm/
+.yarn/
+.pnpm-store/
+.vscode-test/
+
+# Per-extension bundled binaries — never commit these, the extension
+# auto-discovers from osh.releaseDir (~/forge-build/release/) instead.
+extensions/vscode/bin/
+
+# ── Editor / IDE local state ───────────────────────────────────────────
+.vs/
+.idea/
+*.iml
+.history/
+
+# ── Test / coverage artifacts ──────────────────────────────────────────
+coverage/
+.nyc_output/
+*.lcov
+
+# ── Logs ───────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Local secrets (defense-in-depth on top of keys.json rule above) ────
+*.pem
+*.key
+secrets.json

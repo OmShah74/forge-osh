@@ -297,6 +297,7 @@ impl Provider for AnthropicProvider {
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_input = String::new();
+        let mut in_thinking_block = false;
         let mut usage = Usage::default();
         let mut stop_reason = CompletionReason::EndTurn;
         let mut buffer = String::new();
@@ -358,6 +359,8 @@ impl Provider for AnthropicProvider {
                                     id: current_tool_id.clone(),
                                     name: current_tool_name.clone(),
                                 });
+                            } else if cb["type"] == "thinking" || cb["type"] == "redacted_thinking" {
+                                in_thinking_block = true;
                             }
                         }
                     }
@@ -367,6 +370,10 @@ impl Provider for AnthropicProvider {
                                 if let Some(text) = delta["text"].as_str() {
                                     full_text.push_str(text);
                                     let _ = tx.send(StreamEvent::Token(text.to_string()));
+                                }
+                            } else if delta["type"] == "thinking_delta" {
+                                if let Some(text) = delta["thinking"].as_str() {
+                                    let _ = tx.send(StreamEvent::ThinkingDelta(text.to_string()));
                                 }
                             } else if delta["type"] == "input_json_delta" {
                                 if let Some(json_delta) = delta["partial_json"].as_str() {
@@ -380,6 +387,10 @@ impl Provider for AnthropicProvider {
                         }
                     }
                     "content_block_stop" => {
+                        if in_thinking_block {
+                            in_thinking_block = false;
+                            let _ = tx.send(StreamEvent::ThinkingDone);
+                        }
                         if !current_tool_name.is_empty() {
                             let input: Value =
                                 serde_json::from_str(&current_tool_input).unwrap_or(json!({}));

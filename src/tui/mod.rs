@@ -5308,7 +5308,7 @@ pub async fn run_tui(
                     state.streaming_text.push_str(&t);
                     // Do NOT force auto_scroll here — user may have scrolled up
                 }
-                AgentEvent::ToolStart { name, input } => {
+                AgentEvent::ToolStart { name, input, .. } => {
                     state.spinner.stop();
                     // Commit any streaming text before tool execution
                     commit_streaming_text(&mut state);
@@ -5324,6 +5324,7 @@ pub async fn run_tui(
                     name,
                     output,
                     is_error,
+                    ..
                 } => {
                     state.spinner.stop();
                     if !state.auto_scroll {
@@ -5533,6 +5534,13 @@ pub async fn run_tui(
                         });
                     }
                 }
+                // JSON-RPC-only events. The TUI already renders thinking
+                // via the spinner + cumulative cost via session.cost_tracker;
+                // these variants are forwarded to IDEs only.
+                AgentEvent::ThinkingDelta { .. }
+                | AgentEvent::ThinkingEnd
+                | AgentEvent::DiffPreview { .. }
+                | AgentEvent::TurnUsage { .. } => {}
             }
         }
 

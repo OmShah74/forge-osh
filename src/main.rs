@@ -4,14 +4,24 @@
 use clap::Parser;
 
 use forge_agent::app::App;
-use forge_agent::cli::Cli;
-use forge_agent::config;
+use forge_agent::cli::{Cli, OutputFormat};
+use forge_agent::{config, jsonrpc};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
+    // Short-circuit: handshake probe for the IDE extension. No App, no
+    // config load, no provider router — must be instant and side-effect
+    // free so a missing API key cannot block startup.
+    if cli.jsonrpc_version {
+        println!("{}", jsonrpc::JSONRPC_VERSION);
+        return Ok(());
+    }
+
+    // Initialize logging. In stream-json mode all log output MUST go to
+    // stderr — anything on stdout that isn't a valid OutboundEvent
+    // corrupts the NDJSON stream and breaks the extension's parser.
     let log_dir = config::log_dir();
     std::fs::create_dir_all(&log_dir).ok();
 
@@ -41,6 +51,12 @@ async fn main() -> anyhow::Result<()> {
     {
         let router = app.provider_router.read().await;
         if router.available_providers().is_empty() {
+            // Never run the interactive welcome wizard in IDE mode —
+            // its stdout prints would corrupt the NDJSON stream.
+            if cli.output_format == OutputFormat::StreamJson || cli.stdin_json {
+                drop(router);
+                return run_main(app, &cli).await;
+            }
             run_first_time_setup().await?;
             // Reload after setup
             drop(router);
@@ -54,6 +70,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_main(app: App, cli: &Cli) -> anyhow::Result<()> {
+    // JSON-RPC over stdio for IDE integrations. Takes precedence over
+    // every other I/O surface — once you ask for stream-json the binary
+    // must not print banners, prompts, or any non-protocol stdout.
+    if cli.output_format == OutputFormat::StreamJson || cli.stdin_json {
+        return jsonrpc::run(app).await;
+    }
+
     // Non-interactive mode
     let prompt_text = cli.prompt.join(" ");
     if !prompt_text.is_empty() {

@@ -171,6 +171,12 @@ pub enum CompletionReason {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Token(String),
+    /// Provider streamed a chunk of "extended thinking" / reasoning content
+    /// distinct from the visible answer. Providers without thinking support
+    /// simply never emit this.
+    ThinkingDelta(String),
+    /// All thinking blocks for this assistant turn have been received.
+    ThinkingDone,
     ToolCallStart { id: String, name: String },
     ToolCallDelta { id: String, arguments_delta: String },
     ToolCallEnd { id: String },

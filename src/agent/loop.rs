@@ -32,15 +32,47 @@ use super::system_prompt;
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     ThinkingStart,
+    /// One chunk of extended-thinking / reasoning content. Emitted between
+    /// `ThinkingStart` and `ThinkingEnd` if (and only if) the active
+    /// provider streams thinking separately from the visible answer.
+    ThinkingDelta {
+        text: String,
+    },
+    /// All thinking content for the current assistant turn has been received.
+    /// The next `Token` (if any) is the visible answer.
+    ThinkingEnd,
     Token(String),
     ToolStart {
+        /// Provider-issued tool-call id (stable across Start/End within a
+        /// single turn). Empty string is reserved for legacy emitters.
+        id: String,
         name: String,
         input: serde_json::Value,
     },
     ToolEnd {
+        /// Pairs with the `id` from the matching `ToolStart`.
+        id: String,
         name: String,
         output: String,
         is_error: bool,
+    },
+    /// Computed unified diff for a file-mutation tool, emitted *before*
+    /// the corresponding permission request so an IDE can open a native
+    /// diff editor next to the prompt. Suppressed for non-file tools.
+    DiffPreview {
+        tool_call_id: String,
+        path: String,
+        unified_diff: String,
+    },
+    /// Usage for the most recent provider call only (NOT cumulative).
+    /// `cost_usd` is the marginal cost of this turn step. Useful for IDEs
+    /// that want to show "this turn cost $X" without subtracting snapshots.
+    TurnUsage {
+        input: u32,
+        output: u32,
+        cache_read: u32,
+        cache_write: u32,
+        cost_usd: f64,
     },
     ContextWarning {
         used: u32,
@@ -857,12 +889,27 @@ impl AgentLoop {
             };
             let (response, did_stream) = call_result?;
 
-            // 7. Record usage
+            // 7. Record usage + emit a per-turn-step delta so IDEs can show
+            //    "this turn cost $X" without subtracting cumulative snapshots.
             {
                 let mut session = self.session.lock().await;
                 let router = self.provider_router.read().await;
                 let (input_cost, output_cost) = router.active_costs();
                 session.record_usage(&response.usage, input_cost, output_cost);
+                let u = &response.usage;
+                let cache_read = u.cache_read_tokens.unwrap_or(0);
+                let cache_write = u.cache_write_tokens.unwrap_or(0);
+                // Cost-per-token math mirrors session::tokens (uncached only —
+                // cached tokens have their own multipliers tracked centrally).
+                let step_cost = (u.input_tokens as f64 / 1_000_000.0) * input_cost
+                    + (u.output_tokens as f64 / 1_000_000.0) * output_cost;
+                let _ = self.event_tx.send(AgentEvent::TurnUsage {
+                    input: u.input_tokens,
+                    output: u.output_tokens,
+                    cache_read,
+                    cache_write,
+                    cost_usd: step_cost,
+                });
             }
 
             if !did_stream {
@@ -955,9 +1002,11 @@ impl AgentLoop {
             let mut futs = Vec::with_capacity(safe.len());
             for (idx, tc) in safe.into_iter() {
                 let _ = self.event_tx.send(AgentEvent::ToolStart {
+                    id: tc.id.clone(),
                     name: tc.name.clone(),
                     input: tc.input.clone(),
                 });
+                Self::maybe_emit_diff_preview(&self.event_tx, &tc, &ctx).await;
 
                 let executor = executor.clone();
                 let ctx = ctx.clone();
@@ -1008,6 +1057,7 @@ impl AgentLoop {
                         .await;
 
                         let _ = event_tx.send(AgentEvent::ToolEnd {
+                            id: tc.id.clone(),
                             name: tc.name.clone(),
                             output: output.content.clone(),
                             is_error: output.is_error,
@@ -1025,6 +1075,7 @@ impl AgentLoop {
                         let output =
                             ToolOutput::error(format!("Tool '{}' task failed: {e}", tc.name));
                         let _ = self.event_tx.send(AgentEvent::ToolEnd {
+                            id: tc.id.clone(),
                             name: tc.name.clone(),
                             output: output.content.clone(),
                             is_error: true,
@@ -1045,9 +1096,11 @@ impl AgentLoop {
                 continue;
             }
             let _ = self.event_tx.send(AgentEvent::ToolStart {
+                id: tc.id.clone(),
                 name: tc.name.clone(),
                 input: tc.input.clone(),
             });
+            Self::maybe_emit_diff_preview(&self.event_tx, &tc, &ctx).await;
             let output = match AssertUnwindSafe(Self::execute_single(
                 executor.as_ref(),
                 &tc,
@@ -1075,6 +1128,7 @@ impl AgentLoop {
                 Self::append_lsp_post_write_diagnostics(&self.lsp, &tc, output, working_dir_pb)
                     .await;
             let _ = self.event_tx.send(AgentEvent::ToolEnd {
+                id: tc.id.clone(),
                 name: tc.name.clone(),
                 output: output.content.clone(),
                 is_error: output.is_error,
@@ -1314,6 +1368,40 @@ impl AgentLoop {
         }
     }
 
+    /// Compute and emit a `DiffPreview` event for file-mutation tools so
+    /// IDEs can show a native diff editor alongside the permission prompt.
+    /// Errors are swallowed — the permission flow still works without it.
+    async fn maybe_emit_diff_preview(
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        tc: &ToolCall,
+        ctx: &ToolContext,
+    ) {
+        if !crate::tools::executor::is_file_mutation_tool(&tc.name) {
+            return;
+        }
+        let preview =
+            match crate::tools::fs::preview_file_tool_change(&tc.name, &tc.input, ctx).await {
+                Some(p) => p,
+                None => return,
+            };
+        // Derive `path` from the tool's input — every file-mutation tool
+        // takes either "path" (write/edit/create/delete) or "source"/"destination"
+        // (copy/move). The IDE just needs something to label the diff view with.
+        let path = tc
+            .input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .or_else(|| tc.input.get("destination").and_then(|v| v.as_str()))
+            .or_else(|| tc.input.get("source").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let _ = event_tx.send(AgentEvent::DiffPreview {
+            tool_call_id: tc.id.clone(),
+            path,
+            unified_diff: preview,
+        });
+    }
+
     #[instrument(skip_all, fields(tool = %tc.name, id = %tc.id))]
     #[allow(clippy::too_many_arguments)]
     async fn execute_single(
@@ -1446,9 +1534,18 @@ impl AgentLoop {
             let forwarder = tokio::spawn(async move {
                 let mut rx = stream_rx;
                 while let Some(event) = rx.recv().await {
-                    if let StreamEvent::Token(t) = event {
-                        did_stream_clone.store(true, Ordering::Release);
-                        let _ = event_tx_clone.send(AgentEvent::Token(t));
+                    match event {
+                        StreamEvent::Token(t) => {
+                            did_stream_clone.store(true, Ordering::Release);
+                            let _ = event_tx_clone.send(AgentEvent::Token(t));
+                        }
+                        StreamEvent::ThinkingDelta(t) => {
+                            let _ = event_tx_clone.send(AgentEvent::ThinkingDelta { text: t });
+                        }
+                        StreamEvent::ThinkingDone => {
+                            let _ = event_tx_clone.send(AgentEvent::ThinkingEnd);
+                        }
+                        _ => {}
                     }
                 }
             });

@@ -681,7 +681,7 @@ async fn drain_agent_events(
                     }
                 }
             }
-            AgentEvent::ToolStart { name, input } => {
+            AgentEvent::ToolStart { name, input, .. } => {
                 latest_tool = Some(name.clone());
                 if let Some(p) = extract_path_from_tool_input(&name, &input) {
                     if !files_touched.iter().any(|x| x == &p) {
