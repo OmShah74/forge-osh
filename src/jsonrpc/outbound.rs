@@ -36,6 +36,18 @@ pub enum OutboundEvent {
         output_excerpt: String,
         is_error: bool,
     },
+    /// Live incremental stdout/stderr from a long-running tool (currently
+    /// `bash` and `powershell`). Emitted between `ToolCallStart` and the
+    /// corresponding `ToolCallEnd`. IDEs append `text` to the live tool
+    /// output panel so commands like `cargo build` tick line-by-line
+    /// instead of jumping from "running" straight to the final buffered
+    /// `output_excerpt`. Added in JSONRPC_VERSION=2.
+    ToolOutputDelta {
+        id: String,
+        /// `"stdout"` or `"stderr"`.
+        stream: String,
+        text: String,
+    },
     PermissionRequest {
         id: String,
         tool: String,

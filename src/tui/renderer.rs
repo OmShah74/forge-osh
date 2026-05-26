@@ -21,15 +21,29 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     let theme = state.theme.clone();
     let area = frame.area();
 
-    // Fill the entire frame with the theme's background colour.
-    // Without this, cells not covered by any widget keep the terminal's native
-    // background — on light terminals, the dark theme's light-coloured text
-    // would be invisible against the white background.
-    if theme.bg != Color::Reset {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(theme.bg).fg(theme.fg)),
-            area,
-        );
+    // Fill the entire frame with the theme's background colour AND an explicit
+    // space symbol in every cell.  `Block::default().style(...)` only calls
+    // `Buffer::set_style` which updates `fg`/`bg`/modifier but never touches
+    // `Cell::symbol`.  Cells previously written with a colored background and
+    // a real character (e.g. wrapped diff lines highlighted red/green) would
+    // therefore keep their old symbol on the next frame, and ratatui's diff
+    // could mis-send the cell to the terminal — leaving "ghost" highlighted
+    // text behind when the user scrolled past or cleared the conversation.
+    // Writing a space into every cell with the theme bg defeats that:
+    // every cell now has a known, uniform baseline before widgets render.
+    {
+        let buf = frame.buffer_mut();
+        let fill_style = Style::default().bg(theme.bg).fg(theme.fg);
+        let buf_area = buf.area;
+        let clip = area.intersection(buf_area);
+        for y in clip.top()..clip.bottom() {
+            for x in clip.left()..clip.right() {
+                let cell = &mut buf[(x, y)];
+                cell.reset();
+                cell.set_symbol(" ");
+                cell.set_style(fill_style);
+            }
+        }
     }
 
     // Compute input area height based on content (min 3, max 8 rows)
@@ -319,6 +333,27 @@ fn secret_summary(secs: &[crate::mcp::SecretStatus]) -> String {
         format!("{}/{} need!", present, total)
     } else {
         format!("{}/{}", present, total)
+    }
+}
+
+/// Render a diff line prefixed with the 4-space indent and pad it on the right
+/// with spaces so the colored background fills the full row width.  When the
+/// line is longer than `pad_width`, it is returned as-is (ratatui's wrap will
+/// handle the overflow per-row; the wrapped continuation rows won't be padded
+/// but the leading row — which is what dominates the visual band — will be).
+fn pad_diff_line(text_line: &str, pad_width: usize) -> String {
+    let prefixed = format!("    {text_line}");
+    let cur = unicode_width::UnicodeWidthStr::width(prefixed.as_str());
+    if cur >= pad_width || pad_width == 0 {
+        prefixed
+    } else {
+        let pad = pad_width - cur;
+        let mut out = String::with_capacity(prefixed.len() + pad);
+        out.push_str(&prefixed);
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        out
     }
 }
 
@@ -715,18 +750,22 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                     .count()
                     + 1;
 
+                // Available width for padding diff lines so their colored
+                // background fills the row (avoids jagged right edges and
+                // makes the buffer-diff between frames unambiguous).
+                let pad_width = (area.width as usize).saturating_sub(5);
                 for text_line in preview.iter().take(max_lines) {
                     if is_diff {
                         if text_line.starts_with('+') && !text_line.starts_with("+++") {
                             // Addition — bright green text on dark green background
                             lines.push(Line::from(Span::styled(
-                                format!("    {text_line}"),
+                                pad_diff_line(text_line, pad_width),
                                 Style::default().fg(theme.added_fg).bg(theme.added_bg),
                             )));
                         } else if text_line.starts_with('-') && !text_line.starts_with("---") {
                             // Removal — bright red text on dark red background
                             lines.push(Line::from(Span::styled(
-                                format!("    {text_line}"),
+                                pad_diff_line(text_line, pad_width),
                                 Style::default().fg(theme.removed_fg).bg(theme.removed_bg),
                             )));
                         } else if text_line.starts_with("@@") {

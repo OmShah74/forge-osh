@@ -217,12 +217,30 @@
       ctxPopover.addEventListener("mouseleave", () => ctxPopover.classList.add("hidden"));
     }
     helpModal && helpModal.addEventListener("click", (e) => { if (e.target === helpModal) closeHelp(); });
+    // The modal's ✕ close button used to have an inline `onclick=` handler
+    // in the HTML, but the webview's CSP (`script-src 'nonce-...'` with no
+    // 'unsafe-inline') blocks inline event handlers — so the visible X
+    // silently did nothing. Wire it from here instead.
+    const modalCloseBtn = helpModal && helpModal.querySelector(".modal-close");
+    if (modalCloseBtn) modalCloseBtn.addEventListener("click", () => closeHelp());
     document.addEventListener("click", (e) => {
       if (!slashPalette.contains(e.target) && e.target !== inputEl) hideSlash();
       if (!filePalette.contains(e.target) && e.target !== inputEl) hideFiles();
     });
-    watchCancel && watchCancel.addEventListener("click", () => { send({ type: "cancel" }); watchBanner.classList.add("hidden"); });
-    watchRestart && watchRestart.addEventListener("click", () => { slash("restart"); watchBanner.classList.add("hidden"); setBusy(false); });
+    // Watchdog dismiss buttons also reset lastEventAt so the banner
+    // doesn't immediately reappear on the next tick when the agent is
+    // still mid-turn but the user just acknowledged the wait.
+    watchCancel && watchCancel.addEventListener("click", () => {
+      send({ type: "cancel" });
+      watchBanner.classList.add("hidden");
+      bump();
+    });
+    watchRestart && watchRestart.addEventListener("click", () => {
+      slash("restart");
+      watchBanner.classList.add("hidden");
+      setBusy(false);
+      bump();
+    });
   }
 
   function submit() {
@@ -294,11 +312,17 @@
     if (slashFiltered.length === 0) return;
     slashActiveIdx = (slashActiveIdx + d + slashFiltered.length) % slashFiltered.length;
     renderSlash();
+    // Keep the highlighted row visible after arrow-key navigation.
+    // Done here (rather than inside renderSlash) so per-keystroke
+    // re-filters don't re-scroll the palette to the top entry.
+    const active = slashPalette.querySelector(".slash-item.active");
+    if (active) active.scrollIntoView({ block: "nearest" });
   }
   function renderSlash() {
     slashPalette.innerHTML = "";
     slashFiltered.forEach((c, i) => {
-      const row = el("div", { class: "slash-item" + (i === slashActiveIdx ? " active" : "") });
+      const isActive = i === slashActiveIdx;
+      const row = el("div", { class: "slash-item" + (isActive ? " active" : "") });
       row.appendChild(el("span", { class: "slash-name", text: c.name }));
       row.appendChild(el("span", { class: "slash-desc", text: c.desc }));
       row.appendChild(el("span", { class: "slash-cat", text: c.cat || "" }));
@@ -347,11 +371,14 @@
     if (fileEntries.length === 0) return;
     fileActiveIdx = (fileActiveIdx + d + fileEntries.length) % fileEntries.length;
     renderFiles();
+    const active = filePalette.querySelector(".slash-item.active");
+    if (active) active.scrollIntoView({ block: "nearest" });
   }
   function renderFiles() {
     filePalette.innerHTML = "";
     fileEntries.forEach((rel, i) => {
-      const row = el("div", { class: "slash-item" + (i === fileActiveIdx ? " active" : "") });
+      const isActive = i === fileActiveIdx;
+      const row = el("div", { class: "slash-item" + (isActive ? " active" : "") });
       const parts = rel.split("/");
       const name = parts.pop();
       const dir = parts.join("/");
@@ -547,6 +574,37 @@
   }
   function finalizeAssistant() {
     if (!liveAssistant) return;
+    // If the user currently has a text selection that lives inside the
+    // streaming assistant bubble, defer the markdown re-render until the
+    // selection collapses — otherwise our `innerHTML = ""` reset destroys
+    // their selection mid-copy.  Re-check every 500 ms; cap at ~10 s so
+    // we don't leak the bubble in raw-text form forever.
+    const sel = window.getSelection && window.getSelection();
+    const selectionInsideBubble =
+      sel &&
+      sel.rangeCount > 0 &&
+      sel.toString().length > 0 &&
+      liveAssistant.contains(sel.anchorNode);
+    if (selectionInsideBubble) {
+      const bubble = liveAssistant;
+      liveAssistant = null; // unblock next turn
+      let waited = 0;
+      const tick = () => {
+        const s = window.getSelection && window.getSelection();
+        const stillSelecting =
+          s && s.toString().length > 0 && bubble.contains(s.anchorNode);
+        if (!stillSelecting || waited > 10_000) {
+          const raw = bubble.textContent || "";
+          bubble.innerHTML = "";
+          renderMarkdownInto(bubble, raw);
+          return;
+        }
+        waited += 500;
+        setTimeout(tick, 500);
+      };
+      setTimeout(tick, 500);
+      return;
+    }
     const raw = liveAssistant.textContent || "";
     liveAssistant.innerHTML = "";
     renderMarkdownInto(liveAssistant, raw);
@@ -627,22 +685,126 @@
     card.appendChild(head);
     const body = renderToolInput(kind, name, input);
     if (body) card.appendChild(body);
-    // Hint that appears when shell commands run long
+    // For shell tools (bash/powershell) we will stream live stdout/stderr
+    // into a <pre>.  Other tools rarely emit deltas; the element is harmless
+    // for them and is removed in toolEnd if it stayed empty.
+    const live = el("pre", { class: "tool-output live" });
+    live.dataset.empty = "1";
+    card.appendChild(live);
+    // Hint that appears if a tool runs long AND no output ever arrives.
     const hint = el("div", { class: "tool-long-hint hidden" });
-    hint.textContent = "Still running. The agent buffers output until the command finishes.";
+    hint.textContent = "Still running. Waiting for output from the command.";
     card.appendChild(hint);
     messagesEl.appendChild(card);
     card._startedAt = Date.now();
     card._timer = timer;
     card._hint = hint;
+    card._live = live;
+    card._liveBuf = [];
+    card._liveRaf = false;
     card._tick = setInterval(() => {
       const secs = Math.floor((Date.now() - card._startedAt) / 1000);
       timer.textContent = `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
-      if (secs >= 20 && hint.classList.contains("hidden")) hint.classList.remove("hidden");
+      // Only show the long-running hint if we have NOT yet received any
+      // live output — once chunks start arriving, the user can see progress.
+      if (secs >= 20 && hint.classList.contains("hidden") && live.dataset.empty === "1") {
+        hint.classList.remove("hidden");
+      }
     }, 1000);
     toolCards.set(id, card);
     lastSeenToolId = id;
     scrollToBottom();
+  }
+
+  // Live stdout/stderr from a long-running shell tool. We batch incoming
+  // chunks into a single RAF flush so a flood (e.g. `cargo build`'s 1000+
+  // lines) doesn't trigger a layout per chunk.  Stderr is wrapped in a
+  // <span class="stderr"> so the CSS can tint it red within the same <pre>.
+  function toolOutputDelta(id, stream, text) {
+    const card = toolCards.get(id);
+    if (!card || !card._live) return;
+    if (text == null || text === "") return;
+    card._liveBuf.push({ stream, text });
+    if (card._liveRaf) return;
+    card._liveRaf = true;
+    requestAnimationFrame(() => {
+      card._liveRaf = false;
+      if (!card._live) return;
+      const live = card._live;
+      // Are we already pinned to the bottom of the OUTER messages list
+      // AND the bottom of the INNER live <pre>?  We need both to decide
+      // whether auto-scroll should follow new content.
+      // Slack is larger when the floating Stop button is visible — the
+      // button occupies the bottom ~50 px of the viewport, so a user
+      // whose eye is on the last visible row is actually further from
+      // scrollHeight than the bare-bottom 40 px would suggest.
+      const wrapEl = document.getElementById("messages-wrap");
+      const slack = wrapEl && wrapEl.classList.contains("with-stop") ? 80 : 40;
+      const messagesNearBottom =
+        messagesEl.scrollTop + messagesEl.clientHeight >=
+        messagesEl.scrollHeight - slack;
+      const liveNearBottom =
+        live.scrollTop + live.clientHeight >= live.scrollHeight - 20;
+      const frag = document.createDocumentFragment();
+      for (const chunk of card._liveBuf) {
+        if (chunk.stream === "stderr") {
+          const span = document.createElement("span");
+          span.className = "stderr";
+          span.textContent = chunk.text;
+          frag.appendChild(span);
+        } else {
+          frag.appendChild(document.createTextNode(chunk.text));
+        }
+      }
+      card._liveBuf.length = 0;
+      live.appendChild(frag);
+      live.dataset.empty = "0";
+      // Cap the visible live tail at ~64 KB by trimming child nodes from
+      // the FRONT until the total text length fits. Walking child nodes
+      // (instead of stringifying live.textContent) preserves stderr
+      // <span> coloring on the surviving tail.
+      const MAX_LIVE_CHARS = 64 * 1024;
+      let totalLen = live.textContent.length;
+      if (totalLen > MAX_LIVE_CHARS) {
+        // Drop oldest children until we're under the cap; if the first
+        // surviving child is partially over-budget, slice its leading
+        // text to fit exactly.
+        while (live.firstChild && totalLen > MAX_LIVE_CHARS) {
+          const childLen = live.firstChild.textContent
+            ? live.firstChild.textContent.length
+            : 0;
+          if (totalLen - childLen >= MAX_LIVE_CHARS) {
+            totalLen -= childLen;
+            live.removeChild(live.firstChild);
+          } else {
+            const overflow = totalLen - MAX_LIVE_CHARS;
+            const node = live.firstChild;
+            if (node.nodeType === Node.TEXT_NODE) {
+              node.textContent = node.textContent.slice(overflow);
+            } else {
+              // Element span (stderr) — slice its text content in place.
+              node.textContent = node.textContent.slice(overflow);
+            }
+            totalLen = MAX_LIVE_CHARS;
+            break;
+          }
+        }
+        // Prepend a header note so the user knows the tail was trimmed.
+        const note = document.createElement("span");
+        note.style.opacity = "0.6";
+        note.textContent = "[...older output dropped to fit...]\n";
+        live.insertBefore(note, live.firstChild);
+      }
+      // Hide the "Waiting for output" hint as soon as any output arrives.
+      if (card._hint && !card._hint.classList.contains("hidden")) {
+        card._hint.classList.add("hidden");
+      }
+      // Pin the inner <pre> scrollbar to the bottom so new lines stay
+      // visible — without this, once content exceeds max-height the user
+      // would only ever see the top portion and miss every new line.
+      if (liveNearBottom) live.scrollTop = live.scrollHeight;
+      if (messagesNearBottom) scrollToBottom();
+    });
   }
 
   function toolKind(name) {
@@ -697,9 +859,32 @@
       div.textContent = String(input.path || input.file_path);
       return div;
     }
-    // Generic JSON fallback
+    // Generic JSON fallback — toggle .expanded on click so users can
+    // inspect content that exceeds the 4.5 em soft-cap. We only attach
+    // the click handler when content actually overflows (otherwise the
+    // cursor:pointer + click would be misleading), and we bail when the
+    // user has an active text selection (so drag-to-select-and-copy
+    // doesn't get hijacked into a collapse/expand).
     const inp = el("div", { class: "tool-input" });
     inp.textContent = formatToolInput(input);
+    // Defer the overflow check to the next frame so the element is in
+    // the DOM and its scrollHeight / clientHeight are computable.
+    requestAnimationFrame(() => {
+      const overflows = inp.scrollHeight > inp.clientHeight + 1;
+      if (!overflows) {
+        // Short input — drop the pointer cursor and the fade ::after so
+        // the user isn't led to expect an expand affordance.
+        inp.style.cursor = "default";
+        inp.classList.add("no-overflow");
+        return;
+      }
+      inp.title = "Click to expand / collapse";
+      inp.addEventListener("click", () => {
+        const sel = window.getSelection && window.getSelection();
+        if (sel && sel.toString && sel.toString().length > 0) return;
+        inp.classList.toggle("expanded");
+      });
+    });
     return inp;
   }
   function toolEnd(id, output, isError) {
@@ -724,8 +909,74 @@
     } else {
       consecutiveErrors = 0;
     }
+
+    // Flush any pending live chunks that hadn't been RAF'd yet.
+    if (card._liveBuf && card._liveBuf.length > 0 && card._live) {
+      for (const chunk of card._liveBuf) {
+        if (chunk.stream === "stderr") {
+          const span = document.createElement("span");
+          span.className = "stderr";
+          span.textContent = chunk.text;
+          card._live.appendChild(span);
+        } else {
+          card._live.appendChild(document.createTextNode(chunk.text));
+        }
+      }
+      card._liveBuf.length = 0;
+      card._live.dataset.empty = "0";
+      // Pin to the bottom of the inner <pre> after final flush so the
+      // user sees the last line, not whatever happened to be visible
+      // when the tool finished.
+      card._live.scrollTop = card._live.scrollHeight;
+    }
+
+    const live = card._live;
+    const liveHasContent = !!(live && live.dataset.empty === "0");
+
     const trimmed = (output || "").trim();
-    if (trimmed) {
+    // Freeze the live element — keep it visible as the canonical output if
+    // it received any chunks. Streaming tools (bash/powershell) take this
+    // path; the existing collapsible block is suppressed since it would
+    // duplicate everything the user just watched scroll past.
+    if (live) {
+      if (liveHasContent) {
+        live.classList.remove("live");
+        if (isError) live.classList.add("is-error");
+        // Edge case: the final buffered excerpt may be LONGER than the
+        // live tail if the live tail itself was truncated client-side.
+        // In that case, surface the longer buffered version under a
+        // collapsed "buffered tail" details element so the user can
+        // inspect it without losing the live scroll.
+        if (
+          trimmed &&
+          trimmed.length > live.textContent.length + 200
+        ) {
+          const det = el("details", { class: "tool-output-collapse" });
+          det.appendChild(
+            el("summary", {
+              text: `buffered output (${trimmed.length} chars) — click to expand`,
+            }),
+          );
+          const out = el("pre", {
+            class: "tool-output" + (isError ? " is-error" : ""),
+          });
+          out.textContent =
+            trimmed.length > 8000
+              ? trimmed.slice(0, 8000) + "\n…[truncated]"
+              : trimmed;
+          det.appendChild(out);
+          card.appendChild(det);
+        }
+      } else {
+        // No streaming chunks ever arrived — drop the empty placeholder.
+        live.remove();
+        card._live = null;
+      }
+    }
+
+    // Non-streaming tools (or shell tools that produced zero output): keep
+    // the existing one-shot rendering of the buffered excerpt.
+    if (!liveHasContent && trimmed) {
       const long = trimmed.length > 600;
       let host;
       if (long) {
@@ -736,7 +987,20 @@
         host = el("div");
       }
       const out = el("pre", { class: "tool-output" + (isError ? " is-error" : "") });
-      out.textContent = trimmed.length > 8000 ? trimmed.slice(0, 8000) + "\n…[truncated]" : trimmed;
+      // Avoid stacking two truncation markers on top of each other —
+      // the Rust accumulator already prepends `[Output truncated — ...]`
+      // when it hits its byte cap, so adding our own `…[truncated]` on
+      // top is confusing. Only append the JS marker if no Rust-side
+      // truncation banner is present.
+      const alreadyTruncated =
+        trimmed.startsWith("[Output truncated") || trimmed.includes("...truncated...");
+      if (trimmed.length > 8000) {
+        out.textContent = alreadyTruncated
+          ? trimmed.slice(0, 8000)
+          : trimmed.slice(0, 8000) + "\n…[truncated]";
+      } else {
+        out.textContent = trimmed;
+      }
       host.appendChild(out);
       card.appendChild(host);
     }
@@ -946,6 +1210,16 @@
     busy = b;
     btnSend.disabled = b;
     if (floatingStop) floatingStop.classList.toggle("hidden", !b);
+    // Lift the floating "↓ latest" chip above the centered Stop button
+    // while the agent is busy, so the two don't crowd into the same row
+    // on a narrow sidebar.  CSS handles the actual offset via the class.
+    const wrap = document.getElementById("messages-wrap");
+    if (wrap) wrap.classList.toggle("with-stop", !!b);
+    // Toggle aria-busy on the messages region so screen readers do NOT
+    // announce every streaming text-delta in real time (which would be
+    // thousands of announcements per turn). The region is announced once
+    // when busy drops to false, summarising the final state.
+    if (messagesEl) messagesEl.setAttribute("aria-busy", b ? "true" : "false");
     if (!b) { watchBanner.classList.add("hidden"); setActivity(""); }
     else if (!currentActivity) setActivity("Working…");
     bump();
@@ -990,15 +1264,23 @@
     currentActivity = label;
     const el2 = document.getElementById("activity-indicator");
     if (!el2) return;
-    if (!label) { el2.classList.add("hidden"); el2.textContent = ""; }
-    else { el2.classList.remove("hidden"); el2.textContent = label; }
+    if (!label) { el2.classList.add("hidden"); el2.textContent = ""; el2.removeAttribute("title"); }
+    // Tooltip with the full label — the indicator caps at 200 px width and
+    // text-overflows long tool names like `mcp__playwright__execute_command`
+    // mid-word; the title gives users the unambiguous full string on hover.
+    else { el2.classList.remove("hidden"); el2.textContent = label; el2.title = label; }
   }
   function startWatchdog() {
     if (watchdogTimer) clearInterval(watchdogTimer);
     watchdogTimer = setInterval(() => {
       if (!busy) return;
       const idle = Date.now() - lastEventAt;
-      if (idle > 90_000) watchBanner.classList.remove("hidden");
+      // 60-second threshold (was 90 s). bump() is now called on EVERY
+      // event the agent emits — including tool_output_delta — so a
+      // streaming `cargo build` properly resets the watchdog with each
+      // line.  60 s of true silence is well past the median tool time
+      // without being so long the UI feels unresponsive.
+      if (idle > 60_000) watchBanner.classList.remove("hidden");
     }, 5000);
   }
   function setState(state) {
@@ -1024,37 +1306,77 @@
     const lines = raw.split("\n");
     let i = 0, listBuffer = null, listType = null;
     const flushList = () => { if (listBuffer) { target.appendChild(listBuffer); listBuffer = null; listType = null; } };
+    // Buffer consecutive non-blank, non-special lines into a single <p> so
+    // soft line breaks inside a paragraph collapse to spaces (standard
+    // markdown behaviour) and consecutive paragraphs get proper vertical
+    // separation via the browser's default <p> margins. Previously each
+    // line was emitted as its own <div> with no margin → paragraphs ran
+    // together visually, and blank lines became literal <br>s.
+    let paraBuf = [];
+    const flushPara = () => {
+      if (paraBuf.length === 0) return;
+      const p = document.createElement("p");
+      renderInlineInto(p, paraBuf.join(" "));
+      target.appendChild(p);
+      paraBuf = [];
+    };
     while (i < lines.length) {
       const line = lines[i];
       if (line.startsWith("```")) {
-        flushList();
+        flushPara(); flushList();
+        // Preserve the fence's optional language identifier so the rendered
+        // <code> can be tagged `lang-rust`, `lang-ts`, etc. for future
+        // syntax highlighting and so the user can see what language the
+        // assistant declared.
+        const lang = line.slice(3).trim();
         const start = i + 1; let end = start;
         while (end < lines.length && !lines[end].startsWith("```")) end++;
-        target.appendChild(renderCodeBlock(lines.slice(start, end).join("\n")));
+        target.appendChild(renderCodeBlock(lines.slice(start, end).join("\n"), lang));
         i = end + 1; continue;
       }
       const h = /^(#{1,4})\s+(.*)$/.exec(line);
-      if (h) { flushList(); const lev = h[1].length; const hEl = document.createElement("h" + lev); renderInlineInto(hEl, h[2]); target.appendChild(hEl); i++; continue; }
-      if (line.startsWith("> ")) { flushList(); const q = document.createElement("blockquote"); renderInlineInto(q, line.slice(2)); target.appendChild(q); i++; continue; }
+      if (h) { flushPara(); flushList(); const lev = h[1].length; const hEl = document.createElement("h" + lev); renderInlineInto(hEl, h[2]); target.appendChild(hEl); i++; continue; }
+      if (line.startsWith("> ")) { flushPara(); flushList(); const q = document.createElement("blockquote"); renderInlineInto(q, line.slice(2)); target.appendChild(q); i++; continue; }
       const ul = /^[-*]\s+(.*)$/.exec(line);
       const ol = /^(\d+)\.\s+(.*)$/.exec(line);
       if (ul || ol) {
+        flushPara();
         const kind = ul ? "ul" : "ol";
         if (listType !== kind) { flushList(); listBuffer = document.createElement(kind); listType = kind; }
         const li = document.createElement("li"); renderInlineInto(li, (ul ? ul[1] : ol[2])); listBuffer.appendChild(li); i++; continue;
       }
-      if (line.trim() === "") { flushList(); target.appendChild(document.createElement("br")); i++; continue; }
+      if (line.trim() === "") {
+        // Blank line = paragraph break. Skip emitting <br> here; the
+        // margin between successive <p> elements provides the gap, and
+        // consecutive blank lines collapse to a single paragraph break.
+        flushPara(); flushList(); i++; continue;
+      }
       flushList();
-      const p = document.createElement("div"); renderInlineInto(p, line); target.appendChild(p); i++;
+      paraBuf.push(line);
+      i++;
     }
+    flushPara();
     flushList();
   }
-  function renderCodeBlock(code) {
+  function renderCodeBlock(code, lang) {
     const pre = document.createElement("pre");
-    const codeEl = document.createElement("code"); codeEl.textContent = code; pre.appendChild(codeEl);
+    if (lang) pre.dataset.lang = lang;
+    const codeEl = document.createElement("code");
+    if (lang) codeEl.className = "lang-" + lang;
+    codeEl.textContent = code;
+    pre.appendChild(codeEl);
+    // Tiny language pill in the top-left so the user sees what language
+    // the assistant tagged the block with. Sits behind the copy button.
+    if (lang) {
+      const tag = document.createElement("span");
+      tag.className = "code-lang";
+      tag.textContent = lang;
+      pre.appendChild(tag);
+    }
     const btn = document.createElement("button"); btn.className = "copy-btn"; btn.textContent = "Copy";
     btn.onclick = () => { send({ type: "copy", text: code }); btn.textContent = "Copied!"; setTimeout(() => (btn.textContent = "Copy"), 1500); };
-    pre.appendChild(btn); return pre;
+    pre.appendChild(btn);
+    return pre;
   }
   function renderInlineInto(target, line) {
     for (const tok of tokenizeInline(line)) {
@@ -1075,9 +1397,44 @@
   function tokenizeInline(line) {
     const out = []; let i = 0;
     while (i < line.length) {
+      // Backslash escape — emit the next char as literal text and skip
+      // its markdown meaning. Handles `\*`, `\_`, `\`​`, `\[`, `\\`, etc.
+      if (line[i] === "\\" && i + 1 < line.length) {
+        out.push({ kind: "text", text: line[i + 1] });
+        i += 2;
+        continue;
+      }
       if (line[i] === "`") { const end = line.indexOf("`", i + 1); if (end !== -1) { out.push({ kind: "code", text: line.slice(i + 1, end) }); i = end + 1; continue; } }
-      if (line[i] === "*" && line[i + 1] === "*") { const end = line.indexOf("**", i + 2); if (end !== -1) { out.push({ kind: "bold", text: line.slice(i + 2, end) }); i = end + 2; continue; } }
+      // Bold — both **...** and __...__.
+      if (
+        (line[i] === "*" && line[i + 1] === "*") ||
+        (line[i] === "_" && line[i + 1] === "_")
+      ) {
+        const marker = line[i] + line[i + 1];
+        const end = line.indexOf(marker, i + 2);
+        if (end !== -1) { out.push({ kind: "bold", text: line.slice(i + 2, end) }); i = end + 2; continue; }
+      }
+      // Italic — single *...* or _..._. For underscore italics, only
+      // treat as a marker if the underscore is at a word boundary so
+      // identifiers like `snake_case_name` aren't shredded.
       if (line[i] === "*") { const end = line.indexOf("*", i + 1); if (end !== -1) { out.push({ kind: "italic", text: line.slice(i + 1, end) }); i = end + 1; continue; } }
+      if (line[i] === "_") {
+        const prev = i === 0 ? "" : line[i - 1];
+        const isWordBoundaryBefore = i === 0 || /[\s(\[{<.,;:!?'"]/.test(prev);
+        if (isWordBoundaryBefore) {
+          const end = line.indexOf("_", i + 1);
+          // Require the closing `_` to be at a word boundary too.
+          if (end !== -1) {
+            const next = end + 1 >= line.length ? "" : line[end + 1];
+            const isWordBoundaryAfter = end + 1 >= line.length || /[\s)\]}>.,;:!?'"]/.test(next);
+            if (isWordBoundaryAfter) {
+              out.push({ kind: "italic", text: line.slice(i + 1, end) });
+              i = end + 1;
+              continue;
+            }
+          }
+        }
+      }
       if (line[i] === "[") {
         const close = line.indexOf("]", i + 1);
         if (close !== -1 && line[close + 1] === "(") {
@@ -1086,7 +1443,11 @@
         }
       }
       let j = i;
-      while (j < line.length && line[j] !== "`" && line[j] !== "*" && line[j] !== "[") j++;
+      while (
+        j < line.length &&
+        line[j] !== "`" && line[j] !== "*" && line[j] !== "_" &&
+        line[j] !== "[" && line[j] !== "\\"
+      ) j++;
       out.push({ kind: "text", text: line.slice(i, j === i ? i + 1 : j) });
       i = j === i ? i + 1 : j;
     }
@@ -1142,6 +1503,7 @@
       case "thinking_end": closeThinking(); setActivity(busy ? "Working…" : ""); break;
       case "tool_start": setActivity(`Running ${msg.name}…`); toolStart(msg.id, msg.name, msg.input); break;
       case "tool_end": setActivity(busy ? "Working…" : ""); toolEnd(msg.id, msg.output, msg.is_error); break;
+      case "tool_output_delta": toolOutputDelta(msg.id, msg.stream, msg.text); break;
       case "permission": permission(msg); break;
       case "usage": applyUsage(msg.usage); break;
       case "compaction": compactionBadge(`compaction: ${msg.stage}${msg.summary ? " · " + msg.summary : ""}`); break;

@@ -15,7 +15,7 @@ pub use outbound::OutboundEvent;
 /// Wire-format major version. Bump on any breaking change. The IDE reads
 /// `forge-osh --jsonrpc-version` on startup and refuses to attach on
 /// mismatch.
-pub const JSONRPC_VERSION: u32 = 1;
+pub const JSONRPC_VERSION: u32 = 2;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -102,6 +102,9 @@ fn translate(ev: AgentEvent) -> Vec<OutboundEvent> {
             output_excerpt: output,
             is_error,
         }],
+        AgentEvent::ToolOutputDelta { id, stream, text } => {
+            vec![OutboundEvent::ToolOutputDelta { id, stream, text }]
+        }
         AgentEvent::DiffPreview {
             tool_call_id,
             path,
@@ -200,6 +203,24 @@ pub async fn run(app: App) -> anyhow::Result<()> {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (perm_tx, mut perm_rx) = mpsc::unbounded_channel::<PermissionRequest>();
     let (_perm_resp_tx, perm_resp_rx) = mpsc::unbounded_channel::<PermissionResponse>();
+    // Streaming tool-output channel.  Long-running shell/powershell tools push
+    // line-sized `ToolOutputChunk`s here; the forwarder spawned below
+    // re-emits them through `event_tx` as `AgentEvent::ToolOutputDelta`,
+    // which the existing translation path converts into
+    // `OutboundEvent::ToolOutputDelta` on stdout.
+    let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<crate::types::ToolOutputChunk>();
+    {
+        let event_tx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(chunk) = chunk_rx.recv().await {
+                let _ = event_tx.send(AgentEvent::ToolOutputDelta {
+                    id: chunk.tool_call_id,
+                    stream: chunk.stream,
+                    text: chunk.text,
+                });
+            }
+        });
+    }
 
     // Build the AgentLoop once with cheap-to-clone Arcs.
     let agent = Arc::new(AgentLoop {
@@ -224,6 +245,7 @@ pub async fn run(app: App) -> anyhow::Result<()> {
         )),
         thinking: Arc::new(parking_lot::RwLock::new(ThinkingConfig::Disabled)),
         skill_registry: app.skills.clone(),
+        output_chunk_tx: Some(chunk_tx),
     });
 
     let pending: PendingPerms = Arc::new(PlMutex::new(HashMap::new()));

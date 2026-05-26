@@ -118,8 +118,14 @@ impl ToolExecutor {
         // ── Execute with cancellation race ───────────────────────────────────
         debug!(tool = %tool_call.name, "executing");
         let start = std::time::Instant::now();
+        // Per-call ctx clone with the matching tool_call_id baked in so
+        // streaming tools (bash/powershell) can tag stdout/stderr deltas
+        // against the right ToolCallStart. Cheap clone — a few Arcs and an
+        // Option<UnboundedSender>.
+        let mut per_call_ctx = ctx.clone();
+        per_call_ctx.tool_call_id = Some(tool_call.id.clone());
         let execute_fut =
-            AssertUnwindSafe(tool.execute(tool_call.input.clone(), ctx)).catch_unwind();
+            AssertUnwindSafe(tool.execute(tool_call.input.clone(), &per_call_ctx)).catch_unwind();
         let execute_result = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -353,6 +359,8 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
         };
         match decide_permission(
             "bash",
@@ -379,6 +387,8 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
         };
         match decide_permission(
             "write_file",
@@ -410,6 +420,8 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
         };
         match decide_permission(
             "bash",
@@ -442,6 +454,8 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
         };
         match decide_permission(
             "write_file",
@@ -474,6 +488,8 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
         };
         match decide_permission(
             "write_file",
@@ -501,6 +517,8 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
         };
         match decide_permission(
             "task_create",
@@ -562,6 +580,8 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
         };
         let call = ToolCall {
             id: "panic-1".into(),

@@ -56,6 +56,18 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    /// Incremental stdout/stderr from a long-running tool (currently `bash`
+    /// and `powershell`). Emitted between `ToolStart` and `ToolEnd` so IDEs
+    /// can show live tail output instead of waiting for the buffered
+    /// `output_excerpt` on `ToolEnd`. The TUI ignores this — it has no live
+    /// rendering path for tool output today.
+    ToolOutputDelta {
+        /// Matches the `id` from `ToolStart`/`ToolEnd`.
+        id: String,
+        /// `"stdout"` or `"stderr"`.
+        stream: String,
+        text: String,
+    },
     /// Computed unified diff for a file-mutation tool, emitted *before*
     /// the corresponding permission request so an IDE can open a native
     /// diff editor next to the prompt. Suppressed for non-file tools.
@@ -157,6 +169,13 @@ pub struct AgentLoop {
     /// Current thinking config (Disabled / Enabled / Budget).
     pub thinking: Arc<parking_lot::RwLock<ThinkingConfig>>,
     pub skill_registry: SharedSkillRegistry,
+    /// Optional channel for streaming `ToolOutputChunk`s produced by
+    /// long-running tools (bash/powershell stdout/stderr lines).  When set,
+    /// the construction site is expected to spawn a forwarder task that
+    /// reads from the paired receiver and emits `AgentEvent::ToolOutputDelta`
+    /// into `event_tx`.  The TUI leaves this `None` (no live rendering path);
+    /// the JSON-RPC bridge wires it up.
+    pub output_chunk_tx: Option<mpsc::UnboundedSender<crate::types::ToolOutputChunk>>,
 }
 
 #[derive(Debug)]
@@ -395,6 +414,12 @@ impl AgentLoop {
             file_cache: Some(self.file_cache.clone()),
             active_skill_scope,
             skill_registry: Some(self.skill_registry.clone()),
+            // Cloned chunk sender for streaming tools. Per-call `tool_call_id`
+            // is populated by `ToolExecutor::execute` immediately before the
+            // tool runs (see `tools::executor`), so emitted deltas can be
+            // tagged with the matching `ToolCallStart` id.
+            output_chunk_tx: self.output_chunk_tx.clone(),
+            tool_call_id: None,
         }
     }
 

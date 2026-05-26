@@ -281,6 +281,19 @@ impl PermissionMode {
 // Tool context
 // ---------------------------------------------------------------------------
 
+/// One incremental chunk of stdout/stderr produced by a long-running tool
+/// (currently `bash` and `powershell`).  Wired through the AgentLoop's
+/// chunk channel and surfaced on the JSON-RPC bridge as `tool_output_delta`,
+/// letting IDE webviews show live tail output instead of waiting for the
+/// final `tool_call_end` buffered excerpt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolOutputChunk {
+    pub tool_call_id: String,
+    /// `"stdout"` or `"stderr"`.
+    pub stream: String,
+    pub text: String,
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub working_dir: std::path::PathBuf,
@@ -309,6 +322,15 @@ pub struct ToolContext {
     /// need skill lookup must fall back to loading from disk.
     #[doc(hidden)]
     pub skill_registry: Option<crate::skills::SharedSkillRegistry>,
+    /// Channel for streaming intermediate tool output (e.g. live stdout from
+    /// a long-running `bash`/`powershell` command). Set by the AgentLoop when
+    /// a chunk-forwarder is wired up (the JSON-RPC bridge always does this;
+    /// the TUI leaves it `None` and tools fall back to buffered output).
+    pub output_chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolOutputChunk>>,
+    /// The id of the tool call currently being executed. Set by the executor
+    /// immediately before `Tool::execute` so streaming tools can tag deltas
+    /// with the matching id from `ToolCallStart`.
+    pub tool_call_id: Option<String>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -344,6 +366,22 @@ impl ToolContext {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Convenience: send one stdout/stderr chunk through `output_chunk_tx`
+    /// tagged with the current `tool_call_id`. No-op if either is unset
+    /// (TUI surface, unit tests). Errors on the channel are dropped — the
+    /// chunk is best-effort and never blocks tool execution.
+    pub fn emit_output_chunk(&self, stream: &str, text: impl Into<String>) {
+        if let (Some(tx), Some(id)) = (&self.output_chunk_tx, &self.tool_call_id) {
+            let _ = tx.send(ToolOutputChunk {
+                tool_call_id: id.clone(),
+                stream: stream.to_string(),
+                text: text.into(),
+            });
         }
     }
 }

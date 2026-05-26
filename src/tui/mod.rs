@@ -5190,6 +5190,9 @@ pub async fn run_tui(
         permission_mode: permission_mode_state.clone(),
         thinking: thinking_state.clone(),
         skill_registry: skill_registry.clone(),
+        // TUI has no live tool-output rendering path; leave the chunk
+        // sender unset and shell tools fall back to buffered output.
+        output_chunk_tx: None,
     });
     // Expose to command handlers below via AppState fields.
     state.agent_cancel = Some(agent_cancel.clone());
@@ -5540,7 +5543,8 @@ pub async fn run_tui(
                 AgentEvent::ThinkingDelta { .. }
                 | AgentEvent::ThinkingEnd
                 | AgentEvent::DiffPreview { .. }
-                | AgentEvent::TurnUsage { .. } => {}
+                | AgentEvent::TurnUsage { .. }
+                | AgentEvent::ToolOutputDelta { .. } => {}
             }
         }
 

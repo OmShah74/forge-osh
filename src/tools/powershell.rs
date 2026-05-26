@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::Tool;
@@ -217,6 +217,14 @@ impl Tool for PowerShellTool {
         let (ps_prog, ps_args_prefix): (&str, Vec<&str>) =
             ("pwsh", vec!["-NoProfile", "-NonInteractive", "-Command"]);
 
+        // Stream stdout/stderr line-by-line so the JSON-RPC bridge can emit
+        // tool_output_delta events for live IDE rendering. Parallel reader
+        // tasks prevent one stream's flood from starving the other (which is
+        // what made the old sequential read_to_end pair look frozen during a
+        // long `cargo build`).
+        let chunk_tx = ctx.output_chunk_tx.clone();
+        let tool_call_id = ctx.tool_call_id.clone();
+
         let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
             let work_dir_path = Path::new(&work_dir);
 
@@ -231,26 +239,9 @@ impl Tool for PowerShellTool {
                 .spawn()
                 .map_err(|e| format!("Failed to spawn PowerShell: {e}"))?;
 
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
+            let stdout_pipe = child.stdout.take();
+            let stderr_pipe = child.stderr.take();
 
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_end(&mut stdout_buf)
-                    .await
-                    .map_err(|e| format!("Failed to read stdout: {e}"))?;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                err.read_to_end(&mut stderr_buf)
-                    .await
-                    .map_err(|e| format!("Failed to read stderr: {e}"))?;
-            }
-
-            let status = child
-                .wait()
-                .await
-                .map_err(|e| format!("Failed to wait for process: {e}"))?;
-
-            // Truncate if too long (keep tail)
             let trim_tail = |buf: Vec<u8>| -> String {
                 if buf.len() > max_output_bytes / 2 {
                     let start = buf.len() - max_output_bytes / 2;
@@ -260,6 +251,78 @@ impl Tool for PowerShellTool {
                     String::from_utf8_lossy(&buf).to_string()
                 }
             };
+
+            let stdout_task = {
+                let tx = chunk_tx.clone();
+                let id = tool_call_id.clone();
+                tokio::spawn(async move {
+                    let mut acc: Vec<u8> = Vec::new();
+                    if let Some(out) = stdout_pipe {
+                        let mut reader = BufReader::new(out);
+                        let mut buf = Vec::with_capacity(4096);
+                        loop {
+                            buf.clear();
+                            match reader.read_until(b'\n', &mut buf).await {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    acc.extend_from_slice(&buf);
+                                    if let (Some(tx), Some(id)) = (tx.as_ref(), id.as_ref()) {
+                                        let text = String::from_utf8_lossy(&buf).to_string();
+                                        let _ = tx.send(crate::types::ToolOutputChunk {
+                                            tool_call_id: id.clone(),
+                                            stream: "stdout".into(),
+                                            text,
+                                        });
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    acc
+                })
+            };
+            let stderr_task = {
+                let tx = chunk_tx.clone();
+                let id = tool_call_id.clone();
+                tokio::spawn(async move {
+                    let mut acc: Vec<u8> = Vec::new();
+                    if let Some(err) = stderr_pipe {
+                        let mut reader = BufReader::new(err);
+                        let mut buf = Vec::with_capacity(4096);
+                        loop {
+                            buf.clear();
+                            match reader.read_until(b'\n', &mut buf).await {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    acc.extend_from_slice(&buf);
+                                    if let (Some(tx), Some(id)) = (tx.as_ref(), id.as_ref()) {
+                                        let text = String::from_utf8_lossy(&buf).to_string();
+                                        let _ = tx.send(crate::types::ToolOutputChunk {
+                                            tool_call_id: id.clone(),
+                                            stream: "stderr".into(),
+                                            text,
+                                        });
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    acc
+                })
+            };
+
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| format!("Failed to wait for process: {e}"))?;
+            let stdout_buf = stdout_task
+                .await
+                .map_err(|e| format!("stdout reader task failed: {e}"))?;
+            let stderr_buf = stderr_task
+                .await
+                .map_err(|e| format!("stderr reader task failed: {e}"))?;
 
             let stdout = trim_tail(stdout_buf);
             let stderr = trim_tail(stderr_buf);

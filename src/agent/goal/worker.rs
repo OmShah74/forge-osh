@@ -200,6 +200,9 @@ pub async fn run_worker(mut ctx: WorkerCtx, deps: WorkerDeps) {
         permission_mode,
         thinking,
         skill_registry: deps.skill_registry.clone(),
+        // Goal workers run in the background; live tool output is not
+        // surfaced to any UI for them.
+        output_chunk_tx: None,
     });
 
     // Initial state persistence + first checkpoint

@@ -310,6 +310,9 @@ impl App {
             )),
             thinking: Arc::new(parking_lot::RwLock::new(ThinkingConfig::Disabled)),
             skill_registry: self.skills.clone(),
+            // Non-interactive one-shot mode prints buffered output; no live
+            // streaming consumer is wired up here.
+            output_chunk_tx: None,
         };
 
         // Spawn agent
