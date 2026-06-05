@@ -52,9 +52,9 @@ pub async fn summarize_messages(
     let mut transcript = String::new();
     for msg in messages {
         match msg {
-            Message::User(UserContent::Text(t)) => {
+            Message::User(uc) => {
                 transcript.push_str("User: ");
-                transcript.push_str(t);
+                transcript.push_str(&uc.to_text());
                 transcript.push_str("\n\n");
             }
             Message::Assistant(content) => {

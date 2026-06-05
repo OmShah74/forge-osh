@@ -35,6 +35,14 @@ type ToWebview =
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_end"; id: string; output: string; is_error: boolean }
   | {
+      // Live stdout/stderr chunk for an in-flight tool. The webview appends
+      // `text` to the matching tool card's <pre class="tool-output live">.
+      type: "tool_output_delta";
+      id: string;
+      stream: "stdout" | "stderr";
+      text: string;
+    }
+  | {
       type: "permission";
       id: string;
       tool: string;
@@ -214,6 +222,14 @@ export class ChatViewProvider
           id: ev.id,
           output: ev.output_excerpt,
           is_error: ev.is_error,
+        });
+        break;
+      case "tool_output_delta":
+        this.post({
+          type: "tool_output_delta",
+          id: ev.id,
+          stream: ev.stream,
+          text: ev.text,
         });
         break;
       case "diff_preview":
@@ -579,7 +595,10 @@ export class ChatViewProvider
       <button id="btn-mcp"      class="icon-btn" title="MCP servers panel"  aria-label="MCP">⟁</button>
       <button id="btn-skills"   class="icon-btn" title="Skills panel"       aria-label="Skills">✦</button>
       <button id="btn-goals"    class="icon-btn" title="Goals panel"        aria-label="Goals">◎</button>
-      <button id="btn-new"      class="icon-btn" title="New session"        aria-label="New session">＋</button>
+      <!-- Plain ASCII "+" for consistency with the other thin-glyph
+           header buttons; the previous fullwidth U+FF0B variant was
+           noticeably wider/heavier than its neighbours. -->
+      <button id="btn-new"      class="icon-btn" title="New session"        aria-label="New session">+</button>
       <button id="btn-clear"    class="icon-btn" title="Clear conversation" aria-label="Clear">⌫</button>
       <button id="btn-help"     class="icon-btn" title="Help (slash commands)" aria-label="Help">?</button>
       <button id="btn-settings" class="icon-btn" title="Settings"           aria-label="Settings">⚙</button>
@@ -587,7 +606,11 @@ export class ChatViewProvider
   </header>
 
   <div id="messages-wrap">
-    <main id="messages" role="log" aria-live="polite" aria-atomic="false"></main>
+    <!-- aria-busy is toggled from chat.js while the agent is streaming, so
+         screen readers skip the thousand-per-turn delta announcements and
+         only announce the final state when the turn ends. aria-live stays
+         on "polite" so post-turn updates still get spoken. -->
+    <main id="messages" role="log" aria-live="polite" aria-atomic="false" aria-busy="false"></main>
     <button id="jump-bottom" title="Jump to latest">↓ latest</button>
     <button id="floating-stop" class="floating-stop hidden" title="Stop agent (Esc)" aria-label="Stop">■ Stop</button>
   </div>
@@ -632,7 +655,10 @@ export class ChatViewProvider
 
   <div id="help-modal" class="modal-backdrop hidden">
     <div class="modal">
-      <button class="modal-close" aria-label="Close" onclick="document.getElementById('help-modal').classList.add('hidden')">✕</button>
+      <!-- Close button is wired from chat.js (wireEvents) — inline onclick
+           is blocked by the webview CSP (script-src 'nonce-...' only) and
+           would silently fail. -->
+      <button class="modal-close" aria-label="Close">✕</button>
       <h2>OSH Help</h2>
       <div class="modal-body"></div>
     </div>

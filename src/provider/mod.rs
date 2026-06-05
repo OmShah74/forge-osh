@@ -35,7 +35,7 @@ pub trait Provider: Send + Sync {
         let total_chars: usize = messages
             .iter()
             .map(|m| match m {
-                Message::User(UserContent::Text(t)) => t.len(),
+                Message::User(uc) => uc.to_text().len(),
                 Message::Assistant(content) => {
                     content.text().map(|t| t.len()).unwrap_or(0)
                         + content

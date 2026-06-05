@@ -46,7 +46,10 @@ body {
     var(--vscode-sideBarSectionHeader-background, var(--vscode-sideBar-background)) 0%,
     var(--vscode-sideBar-background) 100%
   );
-  user-select: none;
+  /* user-select was `none` on the entire header — that blocked copying
+   * the model/provider strings in the header buttons for debugging.
+   * Allow selection by default; only the icon-only buttons opt out. */
+  user-select: text;
   position: relative;
   flex-wrap: wrap;
   min-width: 0;
@@ -80,6 +83,11 @@ body {
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.10) inset,
     0 1px 3px rgba(0, 0, 0, 0.2);
+  /* Soft outer ring tied to the accent — gives the mark visual weight
+   * on light themes where the gradient otherwise blends with the
+   * sidebar bg. */
+  outline: 1px solid color-mix(in srgb, var(--osh-accent) 30%, transparent);
+  outline-offset: 0;
   display: grid;
   place-items: center;
   position: relative;
@@ -131,9 +139,31 @@ body {
   transition: background-color 0.12s;
   white-space: nowrap;
   line-height: 1.2;
+  user-select: none;
 }
 .icon-btn:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.15));
+}
+/* Provider/model buttons opt back IN to text selection — the visible
+ * string is useful when copying for bug reports. */
+#btn-provider, #btn-model { user-select: text; }
+/* Visible keyboard focus ring everywhere. `outline: none` lower in this
+ * file removes the default focus outline for visual reasons; reinstate
+ * it for keyboard users via :focus-visible (mouse clicks don't trigger
+ * it, so we don't get the "purple ring on click" eyesore). */
+.icon-btn:focus-visible,
+.perm-btn:focus-visible,
+.chip:focus-visible,
+.slash-item:focus-visible,
+.link-btn:focus-visible,
+.modal-close:focus-visible,
+.diff-open-btn:focus-visible,
+.copy-btn:focus-visible,
+.send-btn:focus-visible,
+#jump-bottom:focus-visible,
+.floating-stop:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 
 #btn-provider,
@@ -152,12 +182,24 @@ body {
 #btn-provider::before { content: "⟐ "; opacity: 0.6; }
 #btn-model::before    { content: "✦ "; opacity: 0.7; }
 
-/* When width is really narrow, drop the brand-sub */
-@container (max-width: 280px) {
+/* When width is really narrow, drop the brand-sub first, then start
+ * shrinking and shedding header buttons so the row doesn't wrap and
+ * double the header height.
+ *
+ * Note: an earlier `@container (max-width: 320px)` rule lived here too,
+ * but no ancestor of the header has `container-type: inline-size` set —
+ * so the @container query never matched and was dead code.  The plain
+ * @media query below is what actually drives the responsive behaviour. */
+@media (max-width: 320px) {
   .brand-sub { display: none; }
+  .icon-btn { padding: 3px 5px; }
+  #btn-provider, #btn-model { max-width: 90px; font-size: 10px; }
 }
-@media (max-width: 280px) {
-  .brand-sub { display: none; }
+@media (max-width: 260px) {
+  /* Below ~260 px (narrow sidebar), hide the lower-priority buttons
+   * — the user can still reach those panels via /mcp, /skills, /goal,
+   * the activity bar, or VS Code's command palette. */
+  #btn-mcp, #btn-skills, #btn-goals, #btn-help { display: none; }
 }
 
 /* ─── Messages area ─────────────────────────────────────────────── */
@@ -188,7 +230,9 @@ body {
   border: 1px solid var(--vscode-textBlockQuote-border, transparent);
   border-radius: var(--osh-radius);
   padding: 8px 12px;
-  max-width: 92%;
+  /* Drop from 92% to 80% so the bubble feels asymmetric (right-aligned)
+   * even on narrow sidebars — was previously nearly edge-to-edge. */
+  max-width: 80%;
   white-space: pre-wrap;
 }
 
@@ -196,6 +240,16 @@ body {
   padding: 2px 0;
   max-width: 100%;
 }
+
+/* Paragraph spacing inside the assistant bubble.  The renderer now emits
+ * <p> per paragraph (was <div> with no margin), which gave us proper
+ * vertical separation between paragraphs — but also added an unwanted
+ * 1 em top margin to the first <p> that pushed the response away from
+ * the "OSH" role label.  Trim the outermost margins and tighten the
+ * inter-paragraph gap for chat density. */
+.msg.assistant .bubble > p { margin: 0.5em 0; }
+.msg.assistant .bubble > p:first-child { margin-top: 0; }
+.msg.assistant .bubble > p:last-child  { margin-bottom: 0; }
 
 .msg .role-label {
   font-size: 10px;
@@ -218,15 +272,15 @@ body {
   white-space: pre-wrap;
 }
 .thinking summary {
-  cursor: pointer;
+  /* `list-style: none` + ::-webkit-details-marker { display: none } now
+   * come from the unified `details > summary` rules further down; we
+   * only need the .thinking-specific look here. */
   opacity: 0.75;
   user-select: none;
   margin-bottom: 4px;
-  list-style: none;            /* hide default disclosure marker */
   outline: none;
   padding: 2px 0;
 }
-.thinking summary::-webkit-details-marker { display: none; }
 .thinking summary .sum-inner {
   display: inline-flex;
   gap: 6px;
@@ -252,8 +306,10 @@ body {
 .thinking summary:hover { opacity: 1; }
 .thinking > div {
   margin-top: 6px;
-  padding-left: 14px;
-  border-left: 1px dashed color-mix(in srgb, var(--osh-accent) 40%, transparent);
+  /* The parent .thinking already has 10 px left padding + a 2 px solid
+   * left border.  Adding another 14 px + dashed border felt over-
+   * decorated.  Trim to a slight indent that still groups visually. */
+  padding-left: 8px;
 }
 
 /* Tool-call cards */
@@ -311,6 +367,9 @@ body {
   color: var(--vscode-errorForeground);
 }
 
+/* Tool input — truncated to ~4.5 em with a soft fade and an explicit
+ * "show more" affordance.  The pre-existing rule used overflow:hidden
+ * with no visual indicator, so users never knew content was cut. */
 .tool-card .tool-input {
   font-family: var(--osh-mono);
   font-size: 11px;
@@ -319,8 +378,35 @@ body {
   white-space: pre-wrap;
   max-height: 4.5em;
   overflow: hidden;
+  position: relative;
+  cursor: pointer;
 }
+.tool-card .tool-input::after {
+  /* Soft fade so the user sees the cut boundary. Hidden when expanded. */
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 1.4em;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    var(--vscode-editorWidget-background, var(--vscode-editor-background)) 100%
+  );
+  pointer-events: none;
+}
+.tool-card .tool-input.expanded {
+  max-height: 24em;
+  overflow: auto;
+}
+.tool-card .tool-input.expanded::after { display: none; }
+/* When JS determines the input doesn't overflow, drop the fade and the
+ * pointer affordance so the card doesn't promise a non-existent expand. */
+.tool-card .tool-input.no-overflow { cursor: text; }
+.tool-card .tool-input.no-overflow::after { display: none; }
 
+/* Single canonical .tool-output rule. The earlier file had a second
+ * conflicting definition further down (max-height: 16em) that silently
+ * won; both have been merged here. */
 .tool-card .tool-output {
   margin-top: 6px;
   padding: 6px 8px;
@@ -329,8 +415,12 @@ body {
   font-family: var(--osh-mono);
   font-size: 11px;
   white-space: pre-wrap;
-  max-height: 14em;
+  max-height: 16em;
   overflow: auto;
+  /* Match the outer #messages container — when JS auto-scrolls the inner
+   * pre via `scrollTop = scrollHeight`, the user sees a smooth follow
+   * instead of a jarring snap. */
+  scroll-behavior: smooth;
 }
 
 .tool-card.is-error {
@@ -355,9 +445,15 @@ body {
 }
 .permission-card.lvl-mutating {
   --osh-perm-border: var(--vscode-charts-yellow, #d7a020);
+  /* Match the tinting pattern of the other risk levels — previously
+   * yellow and blue cards had only a coloured border with the default
+   * widget background, while green and red were tinted, making them
+   * look visually unfinished next to each other. */
+  --osh-perm-bg: color-mix(in srgb, var(--vscode-charts-yellow, #d7a020) 8%, var(--vscode-editorWidget-background));
 }
 .permission-card.lvl-network {
   --osh-perm-border: var(--vscode-charts-blue, #4f8cff);
+  --osh-perm-bg: color-mix(in srgb, var(--vscode-charts-blue, #4f8cff) 8%, var(--vscode-editorWidget-background));
 }
 .permission-card.lvl-shell,
 .permission-card.lvl-destructive {
@@ -382,9 +478,12 @@ body {
 }
 
 .permission-card .perm-summary {
-  font-family: var(--osh-mono);
-  font-size: 11px;
-  opacity: 0.85;
+  /* Prose summaries like "Execute command: cargo build" read better in
+   * the default UI font; only inline <code> tags inside the summary
+   * should drop to mono (handled by the global `code` rule). */
+  font-family: inherit;
+  font-size: 12px;
+  opacity: 0.9;
   white-space: pre-wrap;
   max-height: 12em;
   overflow: auto;
@@ -452,6 +551,10 @@ body {
   opacity: 0.75;
   font-style: italic;
   padding: 4px 8px;
+  /* Preserve newlines in multi-line system payloads (cost summaries,
+   * forwarded stack traces, etc.) — default `normal` collapsed them. */
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 .system.warn  { color: var(--vscode-editorWarning-foreground); opacity: 0.95; }
 .system.error { color: var(--vscode-errorForeground); opacity: 1; }
@@ -475,9 +578,12 @@ body {
   max-height: 18em;
 }
 
-/* Compaction badge */
+/* Compaction badge — rendered as a small inline-block pill that sits on
+ * its own row but stays left-aligned with the rest of the timeline.
+ * Previously `align-self: center` floated it to the column center while
+ * neighbouring rows were left-aligned, making it look orphaned. */
 .compaction-badge {
-  align-self: center;
+  align-self: flex-start;
   font-size: 10px;
   padding: 3px 8px;
   border-radius: 999px;
@@ -497,15 +603,24 @@ pre {
   font-family: var(--osh-mono);
   font-size: 12px;
   margin: 8px 0;
-  position: relative;
 }
+/* `position: relative` is needed only by assistant code blocks so their
+ * .copy-btn can absolute-position inside.  Scoping the rule avoids
+ * paying the compositor cost on tool-output / tool-shell / sys-collapsed
+ * <pre>s that have no positioned children. */
+.msg.assistant pre { position: relative; }
 pre .copy-btn {
   position: absolute;
   top: 4px;
   right: 4px;
   padding: 2px 8px;
   font-size: 10px;
-  opacity: 0;
+  /* Was opacity:0 until pre:hover — that hid the button entirely on
+   * touch and keyboard. Keep it visible at moderate opacity and only
+   * brighten on hover/focus.  0.4 was too faint on light themes where
+   * the secondary background has low contrast; 0.6 reads cleanly on
+   * both dark and light themes. */
+  opacity: 0.6;
   transition: opacity 0.15s;
   background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
   color: var(--vscode-foreground);
@@ -513,7 +628,29 @@ pre .copy-btn {
   border-radius: 3px;
   cursor: pointer;
 }
-pre:hover .copy-btn { opacity: 1; }
+pre:hover .copy-btn,
+pre .copy-btn:focus-visible,
+pre .copy-btn:hover { opacity: 1; }
+
+/* Language tag (top-left) for fenced code blocks the assistant declared
+ * with ```rust / ```ts / ```python etc. Sits unobtrusively until hover. */
+pre .code-lang {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  font-size: 9px;
+  font-family: var(--osh-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.45;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--osh-accent) 12%, transparent);
+  color: var(--vscode-foreground);
+  user-select: none;
+  pointer-events: none;
+}
+pre:hover .code-lang { opacity: 0.75; }
 
 code {
   font-family: var(--osh-mono);
@@ -521,8 +658,23 @@ code {
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 0.92em;
+  /* Inline `code` previously had no wrapping rules — a long token like
+   * `some_extremely_long_function_name` would push the bubble wider than
+   * the sidebar.  `anywhere` lets the browser break inside the token at
+   * any character when no natural break fits. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
-pre code { background: transparent; padding: 0; }
+pre code {
+  background: transparent;
+  padding: 0;
+  /* Don't break inside fenced code blocks — they have horizontal scroll. */
+  overflow-wrap: normal;
+  word-break: normal;
+  /* Match the parent <pre>'s font-size so block code doesn't shrink to
+   * 0.92 × 12 px ≈ 11 px (visibly smaller than the surrounding pre). */
+  font-size: inherit;
+}
 
 a { color: var(--vscode-textLink-foreground); }
 a:hover { color: var(--vscode-textLink-activeForeground); }
@@ -532,6 +684,10 @@ h1 { font-size: 1.25em; }
 h2 { font-size: 1.15em; }
 h3 { font-size: 1.05em; }
 h4 { font-size: 1.0em; }
+/* Inline code in headings — the global `code { font-size: 0.92em }` made
+ * code tokens noticeably smaller than the heading they sit inside.
+ * Bring code closer to heading size and trim the chip padding. */
+h1 code, h2 code, h3 code, h4 code { font-size: 0.95em; padding: 0 3px; }
 
 ul, ol { margin: 4px 0; padding-left: 20px; }
 li { margin: 2px 0; }
@@ -559,18 +715,26 @@ blockquote {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s, transform 0.15s;
+  transition: opacity 0.15s, transform 0.15s, bottom 0.15s;
   z-index: 10;
 }
 #jump-bottom.visible { opacity: 1; pointer-events: auto; }
 #jump-bottom:hover { background: var(--vscode-button-hoverBackground); }
+/* When the centered ■ Stop button is also visible, lift the right-side
+ * ↓ latest chip above it so the two don't crowd into the same row on a
+ * narrow sidebar. The class is toggled from chat.js when busy=true. */
+#messages-wrap.with-stop #jump-bottom {
+  bottom: 54px;
+}
 
 /* ─── Composer ─────────────────────────────────────────────────── */
 
 #composer {
   position: relative;
   border-top: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.2));
-  padding: 8px 12px 10px 12px;
+  /* Tighten the bottom padding — combined with the .footer-hints row's
+   * own intrinsic height, the composer was visibly bottom-heavy. */
+  padding: 8px 12px 6px 12px;
   background: var(--vscode-sideBar-background);
   display: flex;
   flex-direction: column;
@@ -585,6 +749,11 @@ blockquote {
   font-family: var(--osh-mono);
   opacity: 0.85;
   flex-wrap: wrap;
+  /* When the row wraps, keep both rows vertically centered so the small
+   * text labels don't look adrift next to the 28-px ctx-ring on the
+   * line above. */
+  align-content: center;
+  row-gap: 4px;
 }
 
 /* tool timer + long-running hint */
@@ -638,14 +807,24 @@ blockquote {
   font-family: inherit;
   font-size: 13px;
   resize: none;
+  /* One full visible line at first focus.  Math: 1.45 × 13 px line-height
+   * (= 18.85 px) + 18 px vertical padding + 2 px borders ≈ 39 px.  Round up
+   * to 40 to leave a hair of breathing room above the descender — the
+   * earlier 36 px clipped the top ~3 px of the cursor row. */
+  min-height: 40px;
   max-height: 220px;
   overflow-y: auto;
   outline: none;
   line-height: 1.45;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
   min-width: 0;
 }
 #input:focus { border-color: var(--vscode-focusBorder); }
+#input:focus-visible {
+  /* Belt-and-braces visible ring for keyboard users; mouse focus uses
+   * just the border-color change above. */
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+}
 
 .send-btn {
   background: linear-gradient(135deg, var(--osh-accent) 0%, var(--osh-accent-2) 100%);
@@ -673,8 +852,12 @@ blockquote {
 
 kbd {
   font-family: var(--osh-mono);
-  font-size: 10px;
-  padding: 1px 4px;
+  /* Bumped from 10px → 11px for legibility (was sub-pixel after kerning
+   * on standard-density displays). Tabular-nums keeps digit widths
+   * stable across font fallbacks. */
+  font-size: 11px;
+  font-feature-settings: "tnum";
+  padding: 1px 5px;
   border-radius: 3px;
   background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.18));
   border: 1px solid rgba(127, 127, 127, 0.25);
@@ -810,9 +993,22 @@ kbd {
   opacity: 0.6;
 }
 .modal .modal-close:hover { opacity: 1; }
+/* Help table — auto-layout so the cmd column gets only the width its
+ * longest entry needs.  Earlier the fixed-layout + nowrap + 35 % width
+ * combo silently clipped long entries like "Ctrl/Cmd + Alt + Backspace"
+ * on narrow modals.  We now let cmd content wrap (it's mostly +-joined
+ * tokens that break cleanly between words) and only switch to nowrap
+ * when there's enough room. */
 .modal table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.modal table td { padding: 4px 8px 4px 0; vertical-align: top; }
-.modal table td.cmd { font-family: var(--osh-mono); color: var(--vscode-textLink-foreground); white-space: nowrap; }
+.modal table td { padding: 4px 8px 4px 0; vertical-align: top; overflow-wrap: anywhere; word-wrap: break-word; }
+.modal table td.cmd {
+  font-family: var(--osh-mono);
+  color: var(--vscode-textLink-foreground);
+  white-space: normal;
+  width: 1%;
+  /* `width: 1%` + auto layout gives the cmd column its content's minimum
+   * width without stealing space from the description column. */
+}
 
 /* ─── State banner ───────────────────────────────────────────── */
 
@@ -845,6 +1041,10 @@ kbd {
   background: linear-gradient(135deg, var(--osh-accent) 0%, var(--osh-accent-2) 100%);
   -webkit-background-clip: text;
   background-clip: text;
+  /* Standard `color: transparent` is the cross-browser fallback; the
+   * webkit prefix below ensures the gradient still shows in webview
+   * engines that only honour the prefixed property. */
+  color: transparent;
   -webkit-text-fill-color: transparent;
 }
 .welcome p {
@@ -873,9 +1073,13 @@ kbd {
   border-color: var(--osh-accent);
 }
 .welcome ul {
+  /* `display: inline-block` lets the UL only be as wide as its longest
+   * tip; combined with the parent's `text-align: center` this perfectly
+   * centers the bullet block beneath the welcome chips, instead of the
+   * earlier left-aligned-inside-a-300px-box look. */
+  display: inline-block;
   text-align: left;
   margin: 8px auto;
-  max-width: 300px;
   padding-left: 18px;
   line-height: 1.7;
   font-size: 11px;
@@ -908,7 +1112,11 @@ kbd {
   background: var(--osh-accent);
   flex: 0 0 auto;
 }
-.activity-indicator.hidden { display: none; }
+.activity-indicator.hidden {
+  display: none;
+  /* Stop the pulse from running invisibly when the indicator is hidden. */
+  animation: none;
+}
 @keyframes act-pulse {
   0%, 100% { opacity: 0.9; }
   50%      { opacity: 0.55; }
@@ -930,15 +1138,17 @@ kbd {
   font-weight: 700;
   letter-spacing: 0.05em;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45), 0 0 0 2px color-mix(in srgb, var(--vscode-errorForeground) 30%, transparent);
+  /* Use the theme's widget-shadow token so the drop shadow softens on
+   * light themes (was a hard rgba(0,0,0,0.45) that looked heavy). */
+  box-shadow: 0 4px 14px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.45)), 0 0 0 2px color-mix(in srgb, var(--vscode-errorForeground) 30%, transparent);
   z-index: 12;
   animation: stop-pulse 1.4s ease-in-out infinite;
 }
 .floating-stop:hover { transform: translateX(-50%) translateY(-1px); }
 .floating-stop.hidden { display: none; }
 @keyframes stop-pulse {
-  0%, 100% { box-shadow: 0 4px 14px rgba(0,0,0,0.45), 0 0 0 2px color-mix(in srgb, var(--vscode-errorForeground) 30%, transparent); }
-  50%      { box-shadow: 0 4px 14px rgba(0,0,0,0.45), 0 0 0 8px color-mix(in srgb, var(--vscode-errorForeground) 8%, transparent); }
+  0%, 100% { box-shadow: 0 4px 14px var(--vscode-widget-shadow, rgba(0,0,0,0.45)), 0 0 0 2px color-mix(in srgb, var(--vscode-errorForeground) 30%, transparent); }
+  50%      { box-shadow: 0 4px 14px var(--vscode-widget-shadow, rgba(0,0,0,0.45)), 0 0 0 8px color-mix(in srgb, var(--vscode-errorForeground) 8%, transparent); }
 }
 
 /* ─── Enhanced tool cards ────────────────────────────────────── */
@@ -959,6 +1169,12 @@ kbd {
 .tool-card.kind-read  .tool-icon { background: color-mix(in srgb, var(--vscode-charts-blue, #4f8cff) 15%, var(--vscode-editor-background)); border-color: var(--vscode-charts-blue, #4f8cff); }
 .tool-card.kind-web   .tool-icon { background: color-mix(in srgb, var(--vscode-charts-green, #5db663) 15%, var(--vscode-editor-background)); border-color: var(--vscode-charts-green, #5db663); }
 .tool-card.kind-mcp   .tool-icon { background: color-mix(in srgb, var(--osh-accent) 18%, var(--vscode-editor-background)); border-color: var(--osh-accent); }
+/* lsp / graph / skill cards used to fall back to the unstyled grey icon
+ * chip, looking visually unfinished next to the five themed kinds.  Give
+ * each its own accent so every tool card type is recognisable at a glance. */
+.tool-card.kind-lsp   .tool-icon { background: color-mix(in srgb, var(--vscode-charts-orange, #d18b32) 15%, var(--vscode-editor-background)); border-color: var(--vscode-charts-orange, #d18b32); }
+.tool-card.kind-graph .tool-icon { background: color-mix(in srgb, var(--osh-accent-2) 15%, var(--vscode-editor-background)); border-color: var(--osh-accent-2); }
+.tool-card.kind-skill .tool-icon { background: color-mix(in srgb, var(--vscode-charts-red, #d04040) 12%, var(--vscode-editor-background)); border-color: var(--vscode-charts-red, #d04040); }
 
 .tool-card pre.tool-shell {
   background: var(--vscode-editor-background);
@@ -969,7 +1185,10 @@ kbd {
   font-family: var(--osh-mono);
   font-size: 11.5px;
   white-space: pre-wrap;
-  color: var(--vscode-charts-yellow, #d7a020);
+  /* Use the theme's normal foreground — the earlier yellow tint clashed
+   * with the kind-shell yellow icon and failed contrast on light themes.
+   * The shell-icon chip alone is enough to mark this as a shell card. */
+  color: var(--vscode-foreground);
 }
 .tool-card pre.tool-shell code { color: inherit; background: transparent; padding: 0; }
 
@@ -978,27 +1197,78 @@ kbd {
   font-size: 11.5px;
   color: var(--vscode-textLink-foreground);
   margin-top: 4px;
-  word-break: break-all;
+  /* `break-all` broke at any character — Windows paths like
+   *   C:\Use[wrap]rs\OM[wrap] SHAH\... looked mangled.  `anywhere` plus
+   * `normal` word-break prefers natural break points (slashes, spaces)
+   * and only falls back to character splits when a single token exceeds
+   * the line. */
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
-.tool-card pre.tool-output {
-  margin: 6px 0 0 0;
-  padding: 6px 8px;
-  border-radius: var(--osh-radius-sm);
-  background: var(--vscode-editor-background);
-  font-family: var(--osh-mono);
-  font-size: 11px;
-  white-space: pre-wrap;
-  max-height: 16em;
-  overflow: auto;
-}
+/* Note: the base `.tool-card pre.tool-output` rule lives further up the
+ * file under the single canonical declaration; only the error / live /
+ * inner-span variants are kept here. */
 .tool-card pre.tool-output.is-error {
   background: color-mix(in srgb, var(--vscode-errorForeground) 10%, var(--vscode-editor-background));
   color: var(--vscode-errorForeground);
   border: 1px solid color-mix(in srgb, var(--vscode-errorForeground) 35%, transparent);
 }
+/* Live (streaming) tool output — visible while the tool is running so the
+ * user can tail stdout/stderr.  The left border is the only style
+ * difference from the post-end version (which drops the .live class),
+ * so freezing has no layout jump. */
+.tool-card pre.tool-output.live {
+  border-left: 2px solid var(--vscode-progressBar-background, #14b8a6);
+  /* Keep the live tail tall enough to be useful — once content exceeds
+   * this we rely on the inner scrollbar (and JS pins it to the bottom). */
+  max-height: 22em;
+  min-height: 0;
+  /* Smooth transition from "empty placeholder" to "has content" — the
+   * previous CSS toggled `display: none ↔ block` which caused a visible
+   * pop on the first chunk arrival. Now the empty state is a collapsed
+   * max-height + zero padding instead. */
+  transition: max-height 0.15s ease-out, padding 0.15s ease-out, opacity 0.15s;
+}
+.tool-card pre.tool-output.live[data-empty="1"] {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top: 0;
+  border-bottom: 0;
+  margin-top: 0;
+  opacity: 0;
+  overflow: hidden;
+}
+.tool-card pre.tool-output .stderr {
+  color: var(--vscode-errorForeground);
+}
 .tool-card .tool-output-collapse { margin-top: 6px; }
 .tool-card .tool-output-collapse summary { font-family: var(--osh-mono); font-size: 11px; opacity: 0.7; cursor: pointer; }
+
+/* Unified disclosure-triangle treatment for every <details> in the UI.
+ * The browser's default ▸/▾ marker was visible on .sys-collapsed and
+ * .tool-output-collapse but hidden on .thinking (which uses its own
+ * custom rotating glyph), creating visually inconsistent disclosures.
+ * Now: hide the default marker on ALL details, render a single ▶ that
+ * rotates 90° on [open] for the collapses that don't supply their own
+ * custom glyph. */
+details > summary { cursor: pointer; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary { list-style: none; }
+.sys-collapsed > summary::before,
+.tool-output-collapse > summary::before {
+  content: "▶";
+  font-size: 9px;
+  opacity: 0.55;
+  margin-right: 6px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.sys-collapsed[open] > summary::before,
+.tool-output-collapse[open] > summary::before {
+  transform: rotate(90deg);
+}
 
 /* ─── Diff card ──────────────────────────────────────────────── */
 
@@ -1046,10 +1316,28 @@ kbd {
   max-height: 22em;
   overflow: auto;
   padding: 4px 0;
+  /* Reserve space for the vertical scrollbar so it doesn't overlap the
+   * rightmost characters of long add/del lines. `stable` is supported in
+   * Chromium 88+ (VS Code's webview engine is always newer). */
+  scrollbar-gutter: stable;
 }
 .diff-line { padding: 0 10px; white-space: pre; line-height: 1.45; }
-.diff-line.add  { background: color-mix(in srgb, #2bbd5e 18%, transparent); color: #2bbd5e; }
-.diff-line.del  { background: color-mix(in srgb, #d04040 18%, transparent); color: #d04040; }
+/* Theme-aware diff colors — prefer the editor's own diff tokens so
+ * light, dark, and high-contrast themes all get readable contrast.
+ * Fall back to the chart green/red so we never end up with pure
+ * transparent if the user's theme omits the diff tokens. */
+.diff-line.add {
+  background: var(--vscode-diffEditor-insertedTextBackground,
+    color-mix(in srgb, var(--vscode-charts-green, #5db663) 18%, transparent));
+  color: var(--vscode-gitDecoration-addedResourceForeground,
+    var(--vscode-charts-green, #5db663));
+}
+.diff-line.del {
+  background: var(--vscode-diffEditor-removedTextBackground,
+    color-mix(in srgb, var(--vscode-charts-red, #d04040) 18%, transparent));
+  color: var(--vscode-gitDecoration-deletedResourceForeground,
+    var(--vscode-charts-red, #d04040));
+}
 .diff-line.ctx  { opacity: 0.85; }
 .diff-line.hunk { color: var(--osh-accent); opacity: 0.75; }
 .diff-line.file { opacity: 0.55; font-weight: 600; }
@@ -1061,8 +1349,8 @@ kbd {
   font-family: var(--osh-mono);
   font-size: 10.5px;
 }
-.diff-add { color: #2bbd5e; }
-.diff-del { color: #d04040; }
+.diff-add { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-charts-green, #5db663)); }
+.diff-del { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-charts-red, #d04040)); }
 
 /* ─── Goal cards ─────────────────────────────────────────────── */
 
@@ -1107,6 +1395,17 @@ kbd {
   border: 1px solid color-mix(in srgb, var(--osh-accent) 40%, transparent);
   padding: 2px 8px; border-radius: 999px;
   font-family: var(--osh-mono); font-size: 10.5px;
+  /* Cap chip width so a long path like `src/very/long/path/to/file.rs`
+   * doesn't stretch the chip across the whole row. The middle span gets
+   * the ellipsis; the icon and the ✕ remove button stay visible. */
+  max-width: 20em;
+  min-width: 0;
+}
+.file-chip > span:not(.chip-icon):not(.chip-remove) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .file-chip .chip-icon { font-size: 11px; }
 .file-chip .chip-remove {

@@ -11,8 +11,51 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// How a team is orchestrated. The two modes are genuinely different
+/// execution strategies (see `Coordinator`):
+///
+/// - **Orchestrator** (default): a central orchestrator fans work out in
+///   *bounded waves* (`max_parallel_workers` at a time), then runs a mandatory
+///   integration/review pass that reconciles the results. Best when the
+///   sub-tasks touch shared code and must be merged coherently (refactors,
+///   features). Later waves see earlier waves' findings via the shared board.
+///
+/// - **Swarm**: every planned worker is launched *at once* (no wave cap) and
+///   the workers cross-pollinate through the shared board blackboard rather
+///   than through a central reviewer. Review is optional. Best for
+///   embarrassingly-parallel breadth-first work (investigation, multi-file
+///   independent edits, large fan-out research).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamMode {
+    #[default]
+    Orchestrator,
+    Swarm,
+}
+
+impl TeamMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "orchestrator" | "orch" | "central" => Some(TeamMode::Orchestrator),
+            "swarm" | "parallel" | "peer" => Some(TeamMode::Swarm),
+            _ => None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            TeamMode::Orchestrator => "orchestrator",
+            TeamMode::Swarm => "swarm",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamBusConfig {
+    /// Orchestration strategy. Defaults to Orchestrator for back-compat with
+    /// boards persisted before this field existed.
+    #[serde(default)]
+    pub mode: TeamMode,
     pub max_parallel_workers: usize,
     pub require_review: bool,
     pub conflict_strategy: String,
@@ -21,9 +64,33 @@ pub struct TeamBusConfig {
 impl Default for TeamBusConfig {
     fn default() -> Self {
         Self {
+            mode: TeamMode::Orchestrator,
             max_parallel_workers: 3,
             require_review: true,
             conflict_strategy: "Prefer disjoint file ownership. If two workers report the same artifact path, mark the board as conflict and require coordinator review.".to_string(),
+        }
+    }
+}
+
+impl TeamBusConfig {
+    /// Build a config tuned for the given orchestration mode.
+    pub fn for_mode(mode: TeamMode) -> Self {
+        match mode {
+            TeamMode::Orchestrator => Self::default(),
+            TeamMode::Swarm => Self {
+                mode: TeamMode::Swarm,
+                // Swarm launches the whole roster concurrently; the wave cap is
+                // raised so `queued_worker_ids` releases every planned task.
+                max_parallel_workers: 16,
+                // Peers reconcile via the shared board, so a central review pass
+                // is optional rather than mandatory.
+                require_review: false,
+                conflict_strategy:
+                    "Peers share findings via the team board. Before editing a file, check the \
+                     shared findings for a teammate already owning it; coordinate by leaving a \
+                     note in your result rather than overwriting."
+                        .to_string(),
+            },
         }
     }
 }
@@ -168,6 +235,10 @@ pub struct TeamBoard {
 
 impl TeamBoard {
     pub fn from_goal(goal: String, working_dir: PathBuf) -> Self {
+        Self::from_goal_with_mode(goal, working_dir, TeamMode::Orchestrator)
+    }
+
+    pub fn from_goal_with_mode(goal: String, working_dir: PathBuf, mode: TeamMode) -> Self {
         let now = Utc::now();
         let id = format!("team-{}", &Uuid::new_v4().to_string()[..8]);
         let tasks = planned_tasks_from_goal(&goal);
@@ -175,14 +246,14 @@ impl TeamBoard {
             id,
             goal,
             phase: TeamPhase::Planning,
-            bus_config: TeamBusConfig::default(),
+            bus_config: TeamBusConfig::for_mode(mode),
             working_dir,
             tasks,
             events: Vec::new(),
             created_at: now,
             updated_at: now,
         };
-        board.record_event("team board created");
+        board.record_event(format!("team board created ({} mode)", mode.label()));
         board
     }
 
@@ -512,6 +583,10 @@ impl TeamBoard {
             self.working_dir.display()
         ));
         out.push_str(&format!(
+            "Mode: **{}**\n",
+            self.bus_config.mode.label()
+        ));
+        out.push_str(&format!(
             "Bus: max {} worker(s), review {}, conflict strategy: {}\n",
             self.bus_config.max_parallel_workers,
             if self.bus_config.require_review {
@@ -603,13 +678,29 @@ fn build_team_bus_context(board: &TeamBoard, task: &TeamTask) -> String {
         .iter()
         .filter(|candidate| candidate.kind == TeamTaskKind::Worker)
         .map(|candidate| {
+            let me = if candidate.id == task.id { "  ← you" } else { "" };
             format!(
-                "- {}: {} [{}]",
-                candidate.id, candidate.title, candidate.status
+                "- {}: {} [{}]{}",
+                candidate.id, candidate.title, candidate.status, me
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
+
+    // Shared blackboard: surface what teammates have already discovered or
+    // changed so workers spawned in later waves build on prior findings
+    // WITHOUT routing back through the human. This is the team's message bus —
+    // the durable board is the shared memory every worker reads from.
+    let shared_findings = build_shared_findings(board, task);
+
+    let mode_note = match board.bus_config.mode {
+        TeamMode::Swarm =>
+            "Mode: SWARM — peers run concurrently. Coordinate via the shared findings below \
+             instead of a central reviewer; do not silently overwrite a file another peer owns.",
+        TeamMode::Orchestrator =>
+            "Mode: ORCHESTRATOR — a central reviewer integrates all results after the workers \
+             finish. Stay within your assignment; the reviewer reconciles overlaps.",
+    };
 
     format!(
         r#"You are a worker in a forge-osh Agent Team.
@@ -619,14 +710,16 @@ Common Team Bus
 - Task id: {task_id}
 - Team goal: {goal}
 - Working directory: {working_dir}
+- {mode_note}
 - Conflict strategy: {conflict_strategy}
 - Your assignment: {title}
 
 Team Roster
 {roster}
-
+{shared_findings}
 Protocol
 - Stay within your assignment and avoid overlapping another task's likely file ownership.
+- Read the "Shared findings from teammates" above before you start; build on it, don't redo it.
 - Prefer read-only investigation unless your task explicitly requires code changes.
 - If you edit files, report every changed path under an "Artifacts:" section.
 - If you notice conflicting work, state it clearly instead of silently overwriting.
@@ -640,10 +733,50 @@ Artifacts:
         task_id = task.id,
         goal = board.goal,
         working_dir = board.working_dir.display(),
+        mode_note = mode_note,
         conflict_strategy = board.bus_config.conflict_strategy,
         title = task.title,
-        roster = roster
+        roster = roster,
+        shared_findings = shared_findings,
     )
+}
+
+/// Render completed teammates' result summaries + artifacts as a shared
+/// blackboard section. Returns an empty string (no header) when no peer has
+/// finished yet, so the very first wave isn't cluttered.
+fn build_shared_findings(board: &TeamBoard, task: &TeamTask) -> String {
+    let mut out = String::new();
+    let mut any = false;
+    for peer in board
+        .tasks
+        .iter()
+        .filter(|t| t.kind == TeamTaskKind::Worker && t.id != task.id)
+        .filter(|t| t.result.is_some() || !t.artifacts.is_empty())
+    {
+        if !any {
+            out.push_str("\nShared findings from teammates (build on these)\n");
+            any = true;
+        }
+        out.push_str(&format!("- {} [{}]: {}\n", peer.id, peer.status, peer.title));
+        if let Some(result) = &peer.result {
+            let summary = result
+                .lines()
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty())
+                .unwrap_or("");
+            if !summary.is_empty() {
+                out.push_str(&format!("    summary: {}\n", truncate(summary, 240)));
+            }
+        }
+        for artifact in peer.artifacts.iter().take(6) {
+            out.push_str(&format!(
+                "    artifact: {} — {}\n",
+                artifact.path,
+                truncate(&artifact.summary, 120)
+            ));
+        }
+    }
+    out
 }
 
 fn build_review_prompt(board: &TeamBoard) -> String {

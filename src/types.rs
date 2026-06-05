@@ -13,7 +13,75 @@ pub enum Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UserContent {
+    /// Plain text (the overwhelmingly common case).
     Text(String),
+    /// An ordered, interleaved sequence of text and image parts. Order is
+    /// significant: it preserves exactly where each pasted image sat in the
+    /// user's input string so the model receives images in the right place
+    /// relative to the surrounding words (crucial for multi-image prompts).
+    Multimodal(Vec<UserPart>),
+}
+
+/// One ordered piece of a multimodal user message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UserPart {
+    Text(String),
+    Image(ImageRef),
+}
+
+/// A base64-encoded image attached to a user message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageRef {
+    /// MIME type, e.g. `image/png` or `image/jpeg`.
+    pub media_type: String,
+    /// Base64-encoded image bytes (no `data:` prefix).
+    pub data: String,
+}
+
+impl ImageRef {
+    /// `data:<media_type>;base64,<data>` form (used by OpenAI-compatible APIs).
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
+}
+
+impl UserContent {
+    /// Flatten to plain text for token counting, display fallbacks, and any
+    /// provider/path that does not handle images. Images become a compact
+    /// `[image]` placeholder so positions are still legible.
+    pub fn to_text(&self) -> String {
+        match self {
+            UserContent::Text(t) => t.clone(),
+            UserContent::Multimodal(parts) => {
+                let mut out = String::new();
+                for p in parts {
+                    match p {
+                        UserPart::Text(t) => out.push_str(t),
+                        UserPart::Image(_) => out.push_str("[image]"),
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// Borrowed view of every image part, in order.
+    pub fn images(&self) -> Vec<&ImageRef> {
+        match self {
+            UserContent::Text(_) => Vec::new(),
+            UserContent::Multimodal(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    UserPart::Image(img) => Some(img),
+                    UserPart::Text(_) => None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn has_images(&self) -> bool {
+        matches!(self, UserContent::Multimodal(parts) if parts.iter().any(|p| matches!(p, UserPart::Image(_))))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +349,19 @@ impl PermissionMode {
 // Tool context
 // ---------------------------------------------------------------------------
 
+/// One incremental chunk of stdout/stderr produced by a long-running tool
+/// (currently `bash` and `powershell`).  Wired through the AgentLoop's
+/// chunk channel and surfaced on the JSON-RPC bridge as `tool_output_delta`,
+/// letting IDE webviews show live tail output instead of waiting for the
+/// final `tool_call_end` buffered excerpt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolOutputChunk {
+    pub tool_call_id: String,
+    /// `"stdout"` or `"stderr"`.
+    pub stream: String,
+    pub text: String,
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub working_dir: std::path::PathBuf,
@@ -309,6 +390,21 @@ pub struct ToolContext {
     /// need skill lookup must fall back to loading from disk.
     #[doc(hidden)]
     pub skill_registry: Option<crate::skills::SharedSkillRegistry>,
+    /// Channel for streaming intermediate tool output (e.g. live stdout from
+    /// a long-running `bash`/`powershell` command). Set by the AgentLoop when
+    /// a chunk-forwarder is wired up (the JSON-RPC bridge always does this;
+    /// the TUI leaves it `None` and tools fall back to buffered output).
+    pub output_chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolOutputChunk>>,
+    /// The id of the tool call currently being executed. Set by the executor
+    /// immediately before `Tool::execute` so streaming tools can tag deltas
+    /// with the matching id from `ToolCallStart`.
+    pub tool_call_id: Option<String>,
+    /// Live shared team blackboard. Present only for workers running as part of
+    /// a team / swarm (set by the coordinator or the `spawn_team` runner);
+    /// `None` for the normal single-agent loop. The `team_post` / `team_read`
+    /// tools use it for peer-to-peer coordination without the orchestrator.
+    #[doc(hidden)]
+    pub team_blackboard: Option<crate::agent::team_bus::SharedBlackboard>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -344,6 +440,23 @@ impl ToolContext {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
+            team_blackboard: None,
+        }
+    }
+
+    /// Convenience: send one stdout/stderr chunk through `output_chunk_tx`
+    /// tagged with the current `tool_call_id`. No-op if either is unset
+    /// (TUI surface, unit tests). Errors on the channel are dropped — the
+    /// chunk is best-effort and never blocks tool execution.
+    pub fn emit_output_chunk(&self, stream: &str, text: impl Into<String>) {
+        if let (Some(tx), Some(id)) = (&self.output_chunk_tx, &self.tool_call_id) {
+            let _ = tx.send(ToolOutputChunk {
+                tool_call_id: id.clone(),
+                stream: stream.to_string(),
+                text: text.into(),
+            });
         }
     }
 }

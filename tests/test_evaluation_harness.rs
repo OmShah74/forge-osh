@@ -105,7 +105,7 @@ async fn golden_compaction_uses_mock_provider_and_installs_summary_only() {
     let mut history = forge_agent::session::history::ConversationHistory::new("eval".into());
     for message in messages {
         match message {
-            Message::User(UserContent::Text(text)) => history.add_user(text),
+            Message::User(uc) => history.add_user_content(uc),
             Message::Assistant(content) => history.add_assistant(content),
             Message::Tool(result) => history.add_tool_result(result),
         }
@@ -213,6 +213,9 @@ async fn golden_permission_and_diff_review_prevent_unapproved_file_write() {
         file_cache: None,
         active_skill_scope: None,
         skill_registry: None,
+        output_chunk_tx: None,
+        tool_call_id: None,
+        team_blackboard: None,
     };
 
     let output = executor
@@ -258,6 +261,9 @@ async fn golden_plan_mode_denies_mutating_tool_without_prompt() {
         file_cache: None,
         active_skill_scope: None,
         skill_registry: None,
+        output_chunk_tx: None,
+        tool_call_id: None,
+        team_blackboard: None,
     };
 
     let output = executor

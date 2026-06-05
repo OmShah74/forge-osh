@@ -58,6 +58,28 @@ impl GeminiProvider {
                     "role": "user",
                     "parts": [{"text": text}]
                 })),
+                Message::User(UserContent::Multimodal(parts)) => {
+                    // Gemini parts: text + inlineData (base64) in order.
+                    let mut out: Vec<Value> = Vec::with_capacity(parts.len());
+                    for part in parts {
+                        match part {
+                            UserPart::Text(t) => {
+                                if !t.is_empty() {
+                                    out.push(json!({"text": t}));
+                                }
+                            }
+                            UserPart::Image(img) => {
+                                out.push(json!({
+                                    "inlineData": {
+                                        "mimeType": img.media_type,
+                                        "data": img.data
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                    Some(json!({"role": "user", "parts": out}))
+                }
                 Message::Assistant(content) => {
                     let mut parts = Vec::new();
                     if let Some(text) = content.text() {

@@ -200,6 +200,9 @@ pub async fn run_worker(mut ctx: WorkerCtx, deps: WorkerDeps) {
         permission_mode,
         thinking,
         skill_registry: deps.skill_registry.clone(),
+        // Goal workers run in the background; live tool output is not
+        // surfaced to any UI for them.
+        output_chunk_tx: None,
     });
 
     // Initial state persistence + first checkpoint
@@ -842,8 +845,15 @@ async fn run_verification_phase(ctx: &WorkerCtx) -> VerifyOutcome {
     if ctx.spec.verifiers.is_empty() {
         let _ = persist::append_progress(
             &ctx.id,
-            "VERIFY: no verifiers configured — trusting CLAIM_DONE",
+            "VERIFY: no verifiers configured — completing UNVERIFIED (trusting the model's \
+             self-reported, self-run checks; add verifiers to a spec.toml for empirical gating)",
         );
+        let _ = ctx.events_tx.send((
+            ctx.id.clone(),
+            GoalEvent::Progress {
+                line: "completing UNVERIFIED — no verifiers configured".into(),
+            },
+        ));
         return VerifyOutcome::NoVerifiers;
     }
 

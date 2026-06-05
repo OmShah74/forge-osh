@@ -5,7 +5,7 @@
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
   <br/>
-  <code>v1.0.21</code> &nbsp;·&nbsp;
+  <code>v1.0.22</code> &nbsp;·&nbsp;
   <strong>MIT License</strong> &nbsp;·&nbsp;
   <a href="mailto:omamitshah@gmail.com">Request Binary</a>
 </div>
@@ -1280,6 +1280,32 @@ max_conversation_lines = 1000
 | `FIREWORKS_API_KEY` | Fireworks API key |
 | `PERPLEXITY_API_KEY` | Perplexity API key |
 | `COHERE_API_KEY` | Cohere API key |
+
+---
+
+## 🎨 v1.0.22 — Molten Rust UI Overhaul
+
+Version 1.0.22 is a complete visual reforge of the TUI in the **Molten Rust**
+design language — warm, near-black ash backgrounds with a saturated ember
+accent ramp, replacing the old gray-on-dark look. Highlights:
+
+- **Six "fluid" themes** (cycle with `^R`): `molten-rust` (default), `fluid-green`,
+  `liquid-blue`, `glittery-gold`, `bright-neon`, `fluid-purple` — each a full
+  recolor, not just an accent swap.
+- **Every modal reforged** — rounded borders, filled bodies, accent titles, and
+  accent selection bars across the picker, confirmation, help, key manager,
+  session/skill browsers, MCP manager, and the new goal manager.
+- **Modern startup banner** — an "ANSI Shadow" `FORGE OSH` wordmark painted in a
+  vertical ember gradient, responsive (side-by-side when wide, stacked when narrow).
+- **Restyled chrome** — header brand mark + colored context meter, accent keycap
+  status bar, ember scrollbars, and a redesigned prompt.
+- **Input soft-wrap fix** — long prompts now wrap onto the next line instead of
+  scrolling horizontally and hiding the start; multi-line/clipboard paste is
+  preserved and the caret stays aligned with the text.
+- **Goal UX** — interactive `/goals` manager modal (navigate + pause/resume/clear)
+  and a live in-chat "goal running" spinner.
+
+The CLI surface — every slash command, keybinding, and label — is unchanged.
 
 ---
 

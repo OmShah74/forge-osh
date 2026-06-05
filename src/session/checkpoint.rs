@@ -90,8 +90,8 @@ impl Checkpoint {
 
         for msg in &session.history.messages {
             match msg {
-                crate::types::Message::User(crate::types::UserContent::Text(text)) => {
-                    md.push_str(&format!("## You\n\n{text}\n\n"));
+                crate::types::Message::User(uc) => {
+                    md.push_str(&format!("## You\n\n{}\n\n", uc.to_text()));
                 }
                 crate::types::Message::Assistant(content) => {
                     md.push_str("## Assistant\n\n");

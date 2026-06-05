@@ -231,7 +231,8 @@ fn build_compaction_aware_transcript(
 
     for (idx, msg) in messages.iter().enumerate() {
         let text = match msg {
-            Message::User(UserContent::Text(t)) => {
+            Message::User(uc) => {
+                let t = uc.to_text();
                 if t.starts_with("[Previous conversation summary]:") {
                     format!("[{idx}] COMPACTED_SUMMARY\n{t}\n")
                 } else {

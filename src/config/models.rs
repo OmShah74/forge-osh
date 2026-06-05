@@ -1936,6 +1936,44 @@ pub fn models_for_provider(provider_id: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Whether a model is known to accept image (vision) input.
+///
+/// Returns `None` when the model id is not in the built-in catalog — e.g. a
+/// user-supplied custom model id — so callers can fail gracefully on the
+/// unknown case (we cannot assert a custom model supports vision). Lookup is
+/// scoped to the provider first, then falls back to an id-only match.
+pub fn model_supports_vision(provider_id: &str, model_id: &str) -> Option<bool> {
+    let catalog = builtin_model_catalog();
+    catalog
+        .iter()
+        .find(|m| m.provider_id == provider_id && m.id == model_id)
+        .or_else(|| catalog.iter().find(|m| m.id == model_id))
+        .map(|m| m.supports_vision)
+}
+
+/// Up to `n` vision-capable models for a provider, cheapest input cost first —
+/// used to suggest alternatives when the active model cannot see images.
+/// Falls back to vision models from *any* provider if the provider has none.
+pub fn suggest_vision_models(provider_id: &str, n: usize) -> Vec<ModelInfo> {
+    let mut v: Vec<ModelInfo> = builtin_model_catalog()
+        .into_iter()
+        .filter(|m| m.provider_id == provider_id && m.supports_vision)
+        .collect();
+    if v.is_empty() {
+        v = builtin_model_catalog()
+            .into_iter()
+            .filter(|m| m.supports_vision)
+            .collect();
+    }
+    v.sort_by(|a, b| {
+        a.input_cost_per_million
+            .partial_cmp(&b.input_cost_per_million)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    v.truncate(n);
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1944,6 +1982,22 @@ mod tests {
     fn test_catalog_not_empty() {
         let catalog = builtin_model_catalog();
         assert!(catalog.len() > 100);
+    }
+
+    #[test]
+    fn vision_lookup_and_suggestions() {
+        // A known vision model resolves to Some(true).
+        assert_eq!(model_supports_vision("openai", "gpt-4o"), Some(true));
+        // An unknown/custom model id resolves to None (fail-gracefully signal).
+        assert_eq!(
+            model_supports_vision("openai", "my-totally-custom-model-xyz"),
+            None
+        );
+        // Suggestions for a provider are all vision-capable and non-empty.
+        let sugg = suggest_vision_models("anthropic", 3);
+        assert!(!sugg.is_empty());
+        assert!(sugg.len() <= 3);
+        assert!(sugg.iter().all(|m| m.supports_vision));
     }
 
     #[test]

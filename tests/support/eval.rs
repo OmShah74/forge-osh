@@ -245,6 +245,7 @@ impl EvalHarness {
             permission_mode: Arc::new(parking_lot::RwLock::new(PermissionMode::Default)),
             thinking: Arc::new(parking_lot::RwLock::new(ThinkingConfig::Disabled)),
             skill_registry: skills::shared_registry(tempdir.path()),
+            output_chunk_tx: None,
         });
 
         Self {

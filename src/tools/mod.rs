@@ -9,6 +9,7 @@ pub mod search;
 pub mod shell;
 pub mod skills;
 pub mod tasks;
+pub mod team_tools;
 pub mod validate;
 pub mod web;
 pub mod worktree;
@@ -136,11 +137,16 @@ impl ToolRegistry {
         registry.register_enabled(config, Box::new(code::RunFormatterTool));
 
         // ── Task management ────────────────────────────────────────────────
+        registry.register_enabled(config, Box::new(tasks::UpdatePlanTool));
         registry.register_enabled(config, Box::new(tasks::TodoWriteTool));
         registry.register_enabled(config, Box::new(tasks::TaskCreateTool));
         registry.register_enabled(config, Box::new(tasks::TaskUpdateTool));
         registry.register_enabled(config, Box::new(tasks::TaskGetTool));
         registry.register_enabled(config, Box::new(tasks::TaskListTool));
+
+        // Live team coordination (shared blackboard).
+        registry.register_enabled(config, Box::new(team_tools::TeamPostTool));
+        registry.register_enabled(config, Box::new(team_tools::TeamReadTool));
 
         // ── Agent orchestration ────────────────────────────────────────────
         registry.register_enabled(config, Box::new(agent_tools::AskUserQuestionTool));

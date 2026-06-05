@@ -43,6 +43,13 @@ pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
 
+/// Get the persistent task-plan directory. Each session's live task plan is
+/// stored here as `<session_id>.json` so the planner survives app restarts,
+/// session switches, and mid-turn interruptions.
+pub fn tasks_dir() -> PathBuf {
+    data_dir().join("tasks")
+}
+
 // ---------------------------------------------------------------------------
 // Config structs
 // ---------------------------------------------------------------------------

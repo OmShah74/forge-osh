@@ -27,6 +27,12 @@ impl ConversationHistory {
         self.updated_at = Utc::now();
     }
 
+    /// Add a user message that may include images (multimodal content).
+    pub fn add_user_content(&mut self, content: UserContent) {
+        self.messages.push(Message::User(content));
+        self.updated_at = Utc::now();
+    }
+
     pub fn add_assistant(&mut self, content: AssistantContent) {
         self.messages.push(Message::Assistant(content));
         self.updated_at = Utc::now();

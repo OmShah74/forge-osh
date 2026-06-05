@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::Tool;
@@ -426,6 +426,16 @@ impl Tool for BashTool {
 
         let max_output_bytes = self.max_output_bytes;
 
+        // Stream stdout/stderr line-by-line.  Each chunk is forwarded through
+        // ctx.emit_output_chunk so the IDE webview can render live tail
+        // output, while we also accumulate the buffered tail for the final
+        // tool_call_end excerpt.  Reads from stdout and stderr happen in
+        // parallel tasks so a writer that floods one stream doesn't starve
+        // the other.  Sequential read_to_end (the old behaviour) blocked
+        // until each stream's EOF and is what made `cargo build` look frozen.
+        let chunk_tx = ctx.output_chunk_tx.clone();
+        let tool_call_id = ctx.tool_call_id.clone();
+
         let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
             let mut child = Command::new(shell)
                 .arg(flag)
@@ -436,36 +446,86 @@ impl Tool for BashTool {
                 .spawn()
                 .map_err(|e| format!("Failed to spawn process: {e}"))?;
 
-            let mut stdout_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
-            let mut stderr_acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
+            let stdout_pipe = child.stdout.take();
+            let stderr_pipe = child.stderr.take();
 
-            // Read stdout and stderr
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
-
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_end(&mut stdout_buf)
-                    .await
-                    .map_err(|e| format!("Failed to read stdout: {e}"))?;
-                stdout_acc.push(&stdout_buf);
-            }
-            if let Some(mut err) = child.stderr.take() {
-                err.read_to_end(&mut stderr_buf)
-                    .await
-                    .map_err(|e| format!("Failed to read stderr: {e}"))?;
-                stderr_acc.push(&stderr_buf);
-            }
+            let stdout_task = {
+                let tx = chunk_tx.clone();
+                let id = tool_call_id.clone();
+                tokio::spawn(async move {
+                    let mut acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
+                    if let Some(out) = stdout_pipe {
+                        let mut reader = BufReader::new(out);
+                        let mut buf = Vec::with_capacity(4096);
+                        loop {
+                            buf.clear();
+                            // read_until \n is well-defined for line-oriented
+                            // tools like `echo`, `cargo build`, etc. It also
+                            // returns whatever bytes are buffered on EOF, so
+                            // partial last lines still get emitted.
+                            match reader.read_until(b'\n', &mut buf).await {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    acc.push(&buf);
+                                    if let (Some(tx), Some(id)) = (tx.as_ref(), id.as_ref()) {
+                                        let text = String::from_utf8_lossy(&buf).to_string();
+                                        let _ = tx.send(crate::types::ToolOutputChunk {
+                                            tool_call_id: id.clone(),
+                                            stream: "stdout".into(),
+                                            text,
+                                        });
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    acc.finish()
+                })
+            };
+            let stderr_task = {
+                let tx = chunk_tx.clone();
+                let id = tool_call_id.clone();
+                tokio::spawn(async move {
+                    let mut acc = EndTruncatingAccumulator::new(max_output_bytes / 2);
+                    if let Some(err) = stderr_pipe {
+                        let mut reader = BufReader::new(err);
+                        let mut buf = Vec::with_capacity(4096);
+                        loop {
+                            buf.clear();
+                            match reader.read_until(b'\n', &mut buf).await {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    acc.push(&buf);
+                                    if let (Some(tx), Some(id)) = (tx.as_ref(), id.as_ref()) {
+                                        let text = String::from_utf8_lossy(&buf).to_string();
+                                        let _ = tx.send(crate::types::ToolOutputChunk {
+                                            tool_call_id: id.clone(),
+                                            stream: "stderr".into(),
+                                            text,
+                                        });
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    acc.finish()
+                })
+            };
 
             let status = child
                 .wait()
                 .await
                 .map_err(|e| format!("Failed to wait for process: {e}"))?;
+            let stdout = stdout_task
+                .await
+                .map_err(|e| format!("stdout reader task failed: {e}"))?;
+            let stderr = stderr_task
+                .await
+                .map_err(|e| format!("stderr reader task failed: {e}"))?;
 
-            Ok::<(String, String, i32), String>((
-                stdout_acc.finish(),
-                stderr_acc.finish(),
-                status.code().unwrap_or(-1),
-            ))
+            Ok::<(String, String, i32), String>((stdout, stderr, status.code().unwrap_or(-1)))
         })
         .await;
 
@@ -530,6 +590,9 @@ mod tests {
             file_cache: None,
             active_skill_scope: None,
             skill_registry: None,
+            output_chunk_tx: None,
+            tool_call_id: None,
+            team_blackboard: None,
         }
     }
 

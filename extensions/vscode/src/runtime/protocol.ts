@@ -6,7 +6,7 @@
  * below, so any breaking schema change MUST bump both.
  */
 
-export const EXPECTED_VERSION = 1;
+export const EXPECTED_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Outbound events (agent → extension)
@@ -53,6 +53,16 @@ export type ForgeEvent =
       id: string;
       output_excerpt: string;
       is_error: boolean;
+    }
+  | {
+      // Live incremental stdout/stderr from a long-running tool
+      // (currently bash/powershell). Emitted between tool_call_start and
+      // tool_call_end so the webview can tail output as it arrives instead
+      // of waiting for the buffered output_excerpt. Added in JSONRPC v2.
+      type: "tool_output_delta";
+      id: string;
+      stream: "stdout" | "stderr";
+      text: string;
     }
   | {
       type: "permission_request";

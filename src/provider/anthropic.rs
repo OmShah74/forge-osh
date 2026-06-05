@@ -78,6 +78,42 @@ impl AnthropicProvider {
                             json!({"role": "user", "content": text})
                         }
                     }
+                    Message::User(UserContent::Multimodal(parts)) => {
+                        // Anthropic content-block array: text + base64 image blocks,
+                        // in the exact order the user interleaved them.
+                        let mut blocks: Vec<serde_json::Value> = Vec::with_capacity(parts.len());
+                        for part in parts {
+                            match part {
+                                UserPart::Text(t) => {
+                                    if !t.is_empty() {
+                                        blocks.push(json!({"type": "text", "text": t}));
+                                    }
+                                }
+                                UserPart::Image(img) => {
+                                    blocks.push(json!({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": img.media_type,
+                                            "data": img.data
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                        // Attach cache_control to the last block when caching the tail.
+                        if mark_this {
+                            if let Some(last) = blocks.last_mut() {
+                                if let Some(obj) = last.as_object_mut() {
+                                    obj.insert(
+                                        "cache_control".to_string(),
+                                        json!({"type": "ephemeral"}),
+                                    );
+                                }
+                            }
+                        }
+                        json!({"role": "user", "content": blocks})
+                    }
                     Message::Assistant(content) => {
                         let mut blocks = Vec::new();
                         if let Some(text) = content.text() {
