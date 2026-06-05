@@ -1,9 +1,11 @@
 pub mod checkpoint;
 pub mod file_cache;
 pub mod history;
+pub mod task_plan;
 pub mod tokens;
 
 pub use file_cache::FileStateCache;
+pub use task_plan::{PlanStep, PlanTask, StepStatus, TaskPlan};
 
 use serde::{Deserialize, Serialize};
 

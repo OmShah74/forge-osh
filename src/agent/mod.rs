@@ -10,6 +10,8 @@ pub mod planner;
 pub mod skill_generation;
 pub mod system_prompt;
 pub mod team;
+pub mod team_bus;
+pub mod team_spawner;
 pub mod worker;
 
 pub use coordinator::Coordinator;

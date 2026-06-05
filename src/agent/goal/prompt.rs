@@ -77,9 +77,11 @@ pub fn build_goal_system_block(spec: &GoalSpec, last_ckpt: Option<&Checkpoint>) 
         }
     } else {
         out.push_str(
-            "- **VERIFIERS:** none configured — you must self-report progress \
-             carefully and only claim done when the stopping condition is \
-             empirically true.\n",
+            "- **VERIFIERS:** none configured. Because there is no automated check, you MUST \
+             self-verify empirically before claiming done: actually run the project's build \
+             and/or tests with your shell tools (e.g. `cargo build`/`cargo test`, `npm test`, \
+             `pytest`) and read the real output. Quote the command you ran and its result in \
+             your CLAIM_DONE. Do not claim done on the basis of having written code alone.\n",
         );
     }
 
@@ -112,7 +114,45 @@ pub fn build_goal_system_block(spec: &GoalSpec, last_ckpt: Option<&Checkpoint>) 
          - Do NOT spam PROGRESS for trivial internal thinking — one line per \
          externally-visible action is the right granularity.\n\
          - Do NOT emit a CLAIM_DONE just because you finished one step; only when \
-         the entire stopping condition is satisfied.\n",
+         the entire stopping condition is satisfied.\n\n",
+    );
+
+    // ── Execution strategy (single-thread vs sub-team) ───────────────────
+    out.push_str(
+        "### Choosing an execution strategy\n\
+         First decide HOW to execute, based on the objective's shape:\n\
+         - Default to working SEQUENTIALLY in this loop (use `update_plan` to track steps). This \
+         is correct for most goals and for tightly-coupled changes.\n\
+         - If the objective decomposes into genuinely INDEPENDENT, parallelizable pieces (e.g. \
+         investigate/modify several disjoint files or modules), call `spawn_team(strategy=\"swarm\", \
+         subtasks=[…])` to run them concurrently; sub-agents coordinate via the shared blackboard.\n\
+         - If the pieces are parallel but must be INTEGRATED coherently (a feature spanning shared \
+         code), use `spawn_team(strategy=\"orchestrator\", subtasks=[…])` so a review agent \
+         reconciles them.\n\
+         - Use `spawn_team(strategy=\"sequential\", …)` only when isolated ordered sub-agents help.\n\
+         `spawn_team` blocks and returns the merged results; fold them into your own verification \
+         before you CLAIM_DONE. Do NOT spawn a team for small or tightly-coupled work — the \
+         overhead and conflict risk are not worth it. You own the final result either way.\n\n",
+    );
+
+    // ── Anti-reward-hacking integrity contract ───────────────────────────
+    out.push_str(
+        "### INTEGRITY — do the real work, never game the check\n\
+         The verifiers and stopping condition exist to confirm the OBJECTIVE is genuinely \
+         met. They are a measurement, not the goal. The following are STRICTLY FORBIDDEN and \
+         count as failing the goal, even if they make a check pass:\n\
+         - Editing, deleting, disabling, skipping, `#[ignore]`-ing, commenting out, or \
+         weakening tests, assertions, or any verifier target so it passes.\n\
+         - Hardcoding expected outputs, stubbing functions to return the expected value, \
+         special-casing the test's inputs, or faking data instead of implementing the real \
+         behaviour.\n\
+         - Modifying the verifier commands, CI config, or the stopping condition itself; \
+         using `--no-verify`, `|| true`, forced exit codes, or env hacks to mask failures.\n\
+         - Claiming done on work you did not actually perform or verify, or reporting \
+         artifacts/results that do not reflect the real repository state.\n\
+         If the real objective cannot be achieved within the budget, emit `BLOCKED:` with an \
+         honest explanation — that is always preferable to a check that passes for the wrong \
+         reason. Make the implementation correct so the checks pass *as a consequence*.\n",
     );
 
     if let Some(c) = last_ckpt {

@@ -23,6 +23,7 @@ use crate::types::*;
 
 use super::system_prompt;
 use super::team::{extract_artifacts, TeamArtifact};
+use super::team_bus::SharedBlackboard;
 
 // ---------------------------------------------------------------------------
 // Worker identity & status
@@ -74,6 +75,8 @@ pub struct Worker {
     working_dir: String,
     team_task_id: Option<String>,
     team_context: Option<String>,
+    /// Live shared blackboard for peer coordination (team/swarm runs only).
+    team_blackboard: Option<SharedBlackboard>,
 }
 
 impl Worker {
@@ -98,7 +101,15 @@ impl Worker {
             working_dir,
             team_task_id: None,
             team_context: None,
+            team_blackboard: None,
         }
+    }
+
+    /// Attach a shared blackboard so this worker can coordinate live with peers
+    /// through the `team_post` / `team_read` tools.
+    pub fn with_blackboard(mut self, blackboard: SharedBlackboard) -> Self {
+        self.team_blackboard = Some(blackboard);
+        self
     }
 
     /// Create a worker that participates in a durable Agent Team board.
@@ -295,6 +306,7 @@ impl Worker {
                 skill_registry: None,
                 output_chunk_tx: None,
                 tool_call_id: None,
+                team_blackboard: self.team_blackboard.clone(),
             };
 
             for tc in &tool_calls {

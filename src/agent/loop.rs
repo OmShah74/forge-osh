@@ -140,6 +140,12 @@ pub enum AgentEvent {
     SkillScopeChanged {
         name: Option<String>,
     },
+    /// The persistent task plan was created or updated (via the `update_plan`
+    /// tool). The TUI uses this to render the live, ticking task checklist.
+    /// Carries the full current plan so the panel can be re-rendered wholesale.
+    PlanUpdated {
+        plan: crate::session::TaskPlan,
+    },
 }
 
 /// The core agentic loop
@@ -420,12 +426,22 @@ impl AgentLoop {
             // tagged with the matching `ToolCallStart` id.
             output_chunk_tx: self.output_chunk_tx.clone(),
             tool_call_id: None,
+            // The top-level loop is a single agent — no shared team blackboard.
+            // Sub-agents spawned via spawn_team / the coordinator get their own.
+            team_blackboard: None,
         }
     }
 
-    /// Run one turn of the agent loop: process user message until completion
-    #[instrument(skip_all, fields(user_msg_len = user_message.len()))]
+    /// Run one turn from a plain-text user message (back-compat entry point used
+    /// by workers, skills, and the goal loop).
     pub async fn run(&self, user_message: String) -> Result<()> {
+        self.run_user(crate::types::UserContent::Text(user_message)).await
+    }
+
+    /// Run one turn of the agent loop from (possibly multimodal) user content.
+    #[instrument(skip_all)]
+    pub async fn run_user(&self, user_content: crate::types::UserContent) -> Result<()> {
+        let user_message = user_content.to_text();
         let hooks_config = HooksConfig::load();
 
         // Refresh stored permission rules each turn so `/permissions` edits take effect.
@@ -461,10 +477,10 @@ impl AgentLoop {
             return Ok(());
         }
 
-        // 1. Add user message to history
+        // 1. Add user message to history (preserving any attached images)
         {
             let mut session = self.session.lock().await;
-            session.history.add_user(user_message.clone());
+            session.history.add_user_content(user_content);
         }
 
         let max_iterations = self.config.agent.max_tool_iterations;
@@ -723,6 +739,24 @@ impl AgentLoop {
                             system.push_str("All tools auto-approve. Proceed efficiently.")
                         }
                         _ => {}
+                    }
+                }
+
+                // ── Live task plan ───────────────────────────────────────
+                // Inject the persisted plan so the model always knows what is
+                // done / in progress / pending and can keep ticking steps off
+                // via `update_plan` instead of restarting the plan each turn.
+                {
+                    let plan = crate::session::TaskPlan::load(&session_id);
+                    if !plan.is_empty() {
+                        system.push_str("\n\n## Current Task Plan (persistent)\n");
+                        system.push_str(&plan.to_prompt_block());
+                        system.push_str(
+                            "\nKeep this plan current: call `update_plan` to mark the step you are \
+                             starting as `in_progress`, mark finished steps `completed`, and add or \
+                             revise steps as the work evolves. Do not leave a completed step marked \
+                             in_progress, and keep exactly one step in_progress at a time.",
+                        );
                     }
                 }
 
@@ -1269,6 +1303,23 @@ impl AgentLoop {
     }
 
     async fn apply_special_tool_effects(&self, tc: &ToolCall, output: &ToolOutput) {
+        // ── Live task planner ────────────────────────────────────────────
+        // `update_plan` persists the plan to disk and returns the full plan in
+        // its metadata. Re-emit it to the TUI so the checklist ticks off live.
+        if tc.name == "update_plan" && !output.is_error {
+            if let Some(plan_value) = output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("plan_update"))
+                .cloned()
+            {
+                if let Ok(plan) = serde_json::from_value::<crate::session::TaskPlan>(plan_value) {
+                    let _ = self.event_tx.send(AgentEvent::PlanUpdated { plan });
+                }
+            }
+            return;
+        }
+
         if tc.name != "invoke_skill" {
             return;
         }

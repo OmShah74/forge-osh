@@ -108,6 +108,24 @@ impl OllamaProvider {
                 Message::User(UserContent::Text(text)) => {
                     result.push(json!({"role": "user", "content": text}));
                 }
+                Message::User(UserContent::Multimodal(parts)) => {
+                    // Ollama's chat API takes a content string plus an `images`
+                    // array of raw base64 (no data: prefix). It does not support
+                    // interleaving, so text parts are concatenated in order.
+                    let mut text = String::new();
+                    let mut images: Vec<String> = Vec::new();
+                    for part in parts {
+                        match part {
+                            UserPart::Text(t) => text.push_str(t),
+                            UserPart::Image(img) => images.push(img.data.clone()),
+                        }
+                    }
+                    let mut m = json!({"role": "user", "content": text});
+                    if !images.is_empty() {
+                        m["images"] = json!(images);
+                    }
+                    result.push(m);
+                }
                 Message::Assistant(content) => {
                     let mut m = json!({"role": "assistant"});
                     if let Some(text) = content.text() {
@@ -149,7 +167,7 @@ impl OllamaProvider {
         let mut chars = request.system.as_deref().map(|s| s.len()).unwrap_or(0);
         for m in &request.messages {
             chars += match m {
-                Message::User(UserContent::Text(t)) => t.len(),
+                Message::User(uc) => uc.to_text().len(),
                 Message::Assistant(c) => {
                     let text_len = c.text().map(|t| t.len()).unwrap_or(0);
                     let tools_len: usize = c

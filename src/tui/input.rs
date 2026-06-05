@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::types::{ImageRef, UserContent, UserPart};
+
 /// Actions that can be triggered by keyboard input
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -67,6 +69,13 @@ pub enum Action {
 }
 
 /// Input state for the prompt line
+/// A submitted prompt plus any images attached to it (by display id).
+#[derive(Debug, Clone)]
+pub struct Submission {
+    pub text: String,
+    pub images: Vec<(u32, ImageRef)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub text: String,
@@ -75,6 +84,12 @@ pub struct InputState {
     pub history_index: Option<usize>,
     pub multiline: bool,
     pub scroll_top: usize,
+    /// Images attached to the current draft, keyed by their `[Image #id]`
+    /// display id. Ordering here is irrelevant — final order is taken from the
+    /// token positions in `text` at submit time.
+    pub images: Vec<(u32, ImageRef)>,
+    /// Monotonic counter for the next `[Image #id]` display id.
+    pub next_image_id: u32,
 }
 
 impl Default for InputState {
@@ -92,7 +107,23 @@ impl InputState {
             history_index: None,
             multiline: false,
             scroll_top: 0,
+            images: Vec::new(),
+            next_image_id: 1,
         }
+    }
+
+    /// Attach an image, insert its `[Image #id]` token at the cursor, and return
+    /// the assigned display id. The token's position in the text is what fixes
+    /// the image's order relative to surrounding words at submit time.
+    pub fn attach_image(&mut self, img: ImageRef) -> u32 {
+        let id = self.next_image_id;
+        self.next_image_id += 1;
+        self.images.push((id, img));
+        let token = format!("[Image #{id}]");
+        self.text.insert_str(self.cursor, &token);
+        self.cursor += token.len();
+        self.history_index = None;
+        id
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -177,15 +208,22 @@ impl InputState {
     }
 
     pub fn submit(&mut self) -> String {
+        self.take_submission().text
+    }
+
+    /// Take the current draft as text + attached images, clearing the input.
+    pub fn take_submission(&mut self) -> Submission {
         let text = self.text.clone();
         if !text.trim().is_empty() {
             self.history.push(text.clone());
         }
+        let images = std::mem::take(&mut self.images);
         self.text.clear();
         self.cursor = 0;
         self.history_index = None;
         self.scroll_top = 0;
-        text
+        self.next_image_id = 1;
+        Submission { text, images }
     }
 
     pub fn history_up(&mut self) {
@@ -398,10 +436,129 @@ pub fn map_key_picker(key: KeyEvent, filtering: bool) -> Action {
     }
 }
 
+/// Convert a submitted draft into a [`UserContent`], splitting the text at each
+/// `[Image #id]` token so each image lands in the exact order and position the
+/// user placed it (essential for multi-image prompts where position carries
+/// meaning). Tokens with no matching attachment are preserved as literal text.
+pub fn submission_to_content(sub: &Submission) -> UserContent {
+    if sub.images.is_empty() {
+        return UserContent::Text(sub.text.clone());
+    }
+    let map: std::collections::HashMap<u32, &ImageRef> =
+        sub.images.iter().map(|(id, img)| (*id, img)).collect();
+    let re = match regex::Regex::new(r"\[Image #(\d+)\]") {
+        Ok(r) => r,
+        Err(_) => return UserContent::Text(sub.text.clone()),
+    };
+
+    let mut parts: Vec<UserPart> = Vec::new();
+    let mut last = 0usize;
+    let mut substituted = false;
+    for caps in re.captures_iter(&sub.text) {
+        let whole = caps.get(0).unwrap();
+        let id: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
+        let Some(img) = map.get(&id) else {
+            // Unknown id — leave the token as literal text (don't advance `last`).
+            continue;
+        };
+        let before = &sub.text[last..whole.start()];
+        if !before.is_empty() {
+            parts.push(UserPart::Text(before.to_string()));
+        }
+        parts.push(UserPart::Image((*img).clone()));
+        last = whole.end();
+        substituted = true;
+    }
+    if !substituted {
+        return UserContent::Text(sub.text.clone());
+    }
+    let tail = &sub.text[last..];
+    if !tail.is_empty() {
+        parts.push(UserPart::Text(tail.to_string()));
+    }
+    UserContent::Multimodal(parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::KeyEventState;
+
+    fn img(tag: &str) -> ImageRef {
+        ImageRef {
+            media_type: "image/png".into(),
+            data: tag.into(),
+        }
+    }
+
+    #[test]
+    fn no_images_is_plain_text() {
+        let sub = Submission {
+            text: "hello world".into(),
+            images: vec![],
+        };
+        match submission_to_content(&sub) {
+            UserContent::Text(t) => assert_eq!(t, "hello world"),
+            _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn attach_inserts_token_at_cursor() {
+        let mut s = InputState::new();
+        s.insert_str("before after");
+        s.cursor = "before ".len();
+        let id = s.attach_image(img("A"));
+        assert_eq!(id, 1);
+        assert_eq!(s.text, "before [Image #1]after");
+        assert_eq!(s.images.len(), 1);
+    }
+
+    #[test]
+    fn multi_image_preserves_order_and_position() {
+        // "look [img1] vs [img2] done" with two attachments.
+        let sub = Submission {
+            text: "look [Image #1] vs [Image #2] done".into(),
+            images: vec![(1, img("FIRST")), (2, img("SECOND"))],
+        };
+        let content = submission_to_content(&sub);
+        let UserContent::Multimodal(parts) = content else {
+            panic!("expected multimodal");
+        };
+        // Expect: Text("look ") Image(FIRST) Text(" vs ") Image(SECOND) Text(" done")
+        assert_eq!(parts.len(), 5);
+        assert!(matches!(&parts[0], UserPart::Text(t) if t == "look "));
+        assert!(matches!(&parts[1], UserPart::Image(i) if i.data == "FIRST"));
+        assert!(matches!(&parts[2], UserPart::Text(t) if t == " vs "));
+        assert!(matches!(&parts[3], UserPart::Image(i) if i.data == "SECOND"));
+        assert!(matches!(&parts[4], UserPart::Text(t) if t == " done"));
+    }
+
+    #[test]
+    fn unknown_token_stays_literal() {
+        let sub = Submission {
+            text: "see [Image #9] here".into(),
+            images: vec![(1, img("A"))], // id 9 not attached
+        };
+        // No real substitution → falls back to plain text (token kept literal).
+        match submission_to_content(&sub) {
+            UserContent::Text(t) => assert_eq!(t, "see [Image #9] here"),
+            _ => panic!("expected literal text"),
+        }
+    }
+
+    #[test]
+    fn images_helper_lists_in_order() {
+        let sub = Submission {
+            text: "[Image #1][Image #2]".into(),
+            images: vec![(2, img("B")), (1, img("A"))], // attach order differs
+        };
+        let content = submission_to_content(&sub);
+        let imgs = content.images();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0].data, "A"); // order follows text position, not attach order
+        assert_eq!(imgs[1].data, "B");
+    }
 
     fn make_key(modifiers: KeyModifiers, code: KeyCode) -> KeyEvent {
         KeyEvent {

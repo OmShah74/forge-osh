@@ -210,6 +210,7 @@ fn tool_context_construction() {
         skill_registry: None,
         output_chunk_tx: None,
         tool_call_id: None,
+        team_blackboard: None,
     };
     assert_eq!(ctx.session_id, "sess-123");
     assert!(!ctx.trust_mode);

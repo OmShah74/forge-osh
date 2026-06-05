@@ -363,6 +363,27 @@ impl OpenAICompatProvider {
                             json!({"role": "user", "content": text})
                         }
                     }
+                    Message::User(UserContent::Multimodal(parts)) => {
+                        // OpenAI-compatible content-parts array: text parts +
+                        // image_url parts (data URIs), in interleaved order.
+                        let mut content: Vec<serde_json::Value> = Vec::with_capacity(parts.len());
+                        for part in parts {
+                            match part {
+                                UserPart::Text(t) => {
+                                    if !t.is_empty() {
+                                        content.push(json!({"type": "text", "text": t}));
+                                    }
+                                }
+                                UserPart::Image(img) => {
+                                    content.push(json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": img.data_url() }
+                                    }));
+                                }
+                            }
+                        }
+                        json!({"role": "user", "content": content})
+                    }
                     Message::Assistant(content) => {
                         let mut msg = json!({"role": "assistant"});
                         if let Some(text) = content.text() {

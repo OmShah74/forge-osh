@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod diff;
 pub mod help;
 pub mod input;
@@ -61,24 +62,83 @@ pub enum MessageRole {
     Splash,
 }
 
-/// OSH block-letter banner. Rendered line-by-line in render_conversation
-/// so the box and letters can be coloured differently.
-pub const OSH_SPLASH_LINES: &[&str] = &[
-    "  ╔══════════════════════════════════════════════════════════╗",
-    "  ║                                                          ║",
-    "  ║     ######    ########   ##      ##                      ║",
-    "  ║    ##    ##  ##      ##  ##      ##                      ║",
-    "  ║   ##      ##  ##         ##      ##                      ║",
-    "  ║   ##      ##   ########  ##########                      ║",
-    "  ║   ##      ##         ##  ##      ##                      ║",
-    "  ║    ##    ##  ##      ##  ##      ##                      ║",
-    "  ║     ######    ########   ##      ##                      ║",
-    "  ║                                                          ║",
-    "  ╠══════════════════════════════════════════════════════════╣",
-    "  ║   forge-osh  ─  universal ai coding agent                ║",
-    "  ║   provider-agnostic  ─  rust-powered  ─  open source     ║",
-    "  ╚══════════════════════════════════════════════════════════╝",
+/// forge-osh startup banner — a modern "ANSI Shadow" block wordmark (the
+/// style used by opencode / Claude Code / Deep Agents) instead of the old
+/// `#` box. Rendered in `render_conversation`'s `Splash` arm, which paints the
+/// block glyphs (`█`/`╗`…) in a vertical ember gradient and the tagline in
+/// muted ash. See [`splash_line_kind`].
+/// Wide banner: FORGE and OSH side-by-side (one row of block letters). Used
+/// when the conversation pane is wide enough (~78+ cols).
+pub const OSH_SPLASH_LINES_WIDE: &[&str] = &[
+    "",
+    "   ███████╗ ██████╗ ██████╗  ██████╗ ███████╗   ██████╗ ███████╗██╗  ██╗",
+    "   ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝  ██╔═══██╗██╔════╝██║  ██║",
+    "   █████╗  ██║   ██║██████╔╝██║  ███╗█████╗    ██║   ██║███████╗███████║",
+    "   ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝    ██║   ██║╚════██║██╔══██║",
+    "   ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗  ╚██████╔╝███████║██║  ██║",
+    "   ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝",
+    "",
+    "   ◆  forge-osh  ·  universal ai coding agent",
+    "      provider-agnostic · rust-powered · open source",
+    "",
 ];
+
+/// Stacked banner: OSH below FORGE (two rows of block letters). Used on
+/// narrower terminals so the wordmark never clips.
+pub const OSH_SPLASH_LINES: &[&str] = &[
+    "",
+    "   ███████╗ ██████╗ ██████╗  ██████╗ ███████╗",
+    "   ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝",
+    "   █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ",
+    "   ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ",
+    "   ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗",
+    "   ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
+    "          ██████╗ ███████╗██╗  ██╗",
+    "         ██╔═══██╗██╔════╝██║  ██║",
+    "         ██║   ██║███████╗███████║",
+    "         ██║   ██║╚════██║██╔══██║",
+    "         ╚██████╔╝███████║██║  ██║",
+    "          ╚═════╝ ╚══════╝╚═╝  ╚═╝",
+    "",
+    "   ◆  forge-osh  ·  universal ai coding agent",
+    "      provider-agnostic · rust-powered · open source",
+    "",
+];
+
+/// Pick the banner that fits the available width: side-by-side FORGE OSH when
+/// there's room (the wide wordmark is ~72 cols), otherwise the stacked form.
+pub fn splash_lines(width: u16) -> &'static [&'static str] {
+    if width >= 78 {
+        OSH_SPLASH_LINES_WIDE
+    } else {
+        OSH_SPLASH_LINES
+    }
+}
+
+/// What a splash line is, so the renderer can colour it appropriately.
+pub enum SplashKind {
+    /// A block-letter row → ember gradient.
+    Logo,
+    /// The brand line starting with `◆` → bright accent.
+    Brand,
+    /// Tagline / sub-text → muted.
+    Tagline,
+    /// Empty spacer.
+    Blank,
+}
+
+/// Classify a splash line for colouring.
+pub fn splash_line_kind(line: &str) -> SplashKind {
+    if line.trim().is_empty() {
+        SplashKind::Blank
+    } else if line.contains('█') || line.contains('╝') || line.contains('╔') {
+        SplashKind::Logo
+    } else if line.trim_start().starts_with('◆') {
+        SplashKind::Brand
+    } else {
+        SplashKind::Tagline
+    }
+}
 
 #[derive(Debug)]
 pub enum Modal {
@@ -114,6 +174,9 @@ pub enum Modal {
     PasteConfirm(PasteConfirmState),
     /// MCP server manager — list, toggle, set secrets, view status.
     McpManager(McpManagerState),
+    /// Goal manager — list live/finished goals, navigate with ↑↓, and
+    /// pause/resume/clear/complete the selected goal without typing hex ids.
+    GoalManager(GoalManagerState),
 }
 
 #[derive(Debug, Clone)]
@@ -467,6 +530,68 @@ pub enum McpAction {
     RemoveCustomServer(String),
 }
 
+// ───────────────────────────── Goal manager modal ───────────────────────────
+
+/// State for the `/goal` manager modal — a navigable list of goals with an
+/// optional detail panel. Replaces the old "dump every goal line into the
+/// transcript" behaviour so goals can be inspected and controlled (pause /
+/// resume / clear / complete) by selecting a row instead of typing hex ids.
+#[derive(Debug)]
+pub struct GoalManagerState {
+    pub goals: Vec<crate::agent::goal::GoalSummary>,
+    pub selected: usize,
+    pub list_scroll: u16,
+    /// Transient toast / error rendered at the bottom of the modal.
+    pub message: Option<String>,
+    /// When `Some(id)`, the user pressed clear and we want a confirm keypress.
+    pub confirm_clear: Option<crate::agent::goal::GoalId>,
+    /// When `Some`, the expanded detail/checkpoint panel for the selected goal.
+    pub detail: Option<crate::agent::goal::StatusSnapshot>,
+}
+
+impl GoalManagerState {
+    pub fn new(goals: Vec<crate::agent::goal::GoalSummary>) -> Self {
+        Self {
+            goals,
+            selected: 0,
+            list_scroll: 0,
+            message: None,
+            confirm_clear: None,
+            detail: None,
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.goals.len() {
+            self.selected += 1;
+        }
+    }
+
+    pub fn selected_goal(&self) -> Option<&crate::agent::goal::GoalSummary> {
+        self.goals.get(self.selected)
+    }
+}
+
+/// Action requested by the goal modal input handler — applied in the main loop
+/// where we have async access to the `GoalSupervisor`.
+#[derive(Debug, Clone)]
+pub enum GoalAction {
+    Pause(crate::agent::goal::GoalId),
+    Resume(crate::agent::goal::GoalId),
+    Clear(crate::agent::goal::GoalId),
+    Complete(crate::agent::goal::GoalId),
+    /// Load a status snapshot into the modal's detail panel.
+    Detail(crate::agent::goal::GoalId),
+    /// Re-pull the goal list (after any state change).
+    Refresh,
+}
+
 /// State for the session browser modal
 #[derive(Debug)]
 pub struct SessionBrowserState {
@@ -622,6 +747,34 @@ pub struct AppState {
     /// parking_lot mutex so the synchronous renderer can read it without
     /// blocking on an async runtime.
     pub goal_status_blurb: Arc<parking_lot::Mutex<String>>,
+    /// Pending goal actions queued by the modal handler — drained in the main
+    /// loop where we have async access to the supervisor.
+    pub goal_actions_pending: VecDeque<GoalAction>,
+    /// Set true by the modal handler when the user closes the goal modal.
+    pub goal_modal_closed_flag: bool,
+    /// Free-running frame counter for the in-chat "goal running" spinner. Ticks
+    /// every render while there are live goals; independent of `spinner` (which
+    /// belongs to the foreground agent turn).
+    pub goal_anim_frame: usize,
+
+    // ── Live task planner ────────────────────────────────────────────────
+    /// The current persistent task plan for this session, rendered as a live
+    /// ticking checklist above the input box. Loaded from disk on session
+    /// start/switch and refreshed on every `AgentEvent::PlanUpdated`.
+    pub current_plan: Option<crate::session::TaskPlan>,
+    /// Live, ephemeral extended-thinking / reasoning text for the current
+    /// turn. Shown dimmed beneath the transcript so the user can see the
+    /// model's intermediate thought process. Cleared when the turn produces
+    /// its visible answer, runs a tool, or finishes.
+    pub thinking_text: String,
+
+    // ── Image paste (Alt+N) ──────────────────────────────────────────────
+    /// Session clipboard-image history (newest first), filled by a background
+    /// watcher. Alt+N attaches `clipboard_images[N]` to the input.
+    pub clipboard_images: clipboard::SharedClipboardImages,
+    /// Transient one-line toast (message + when it was set). Shown in the status
+    /// bar for a short window, then cleared. Used for image-paste feedback.
+    pub toast: Option<(String, std::time::Instant)>,
 }
 
 impl AppState {
@@ -689,7 +842,28 @@ impl AppState {
                 crate::agent::goal::supervisor::GoalSupervisor::new(),
             ),
             goal_status_blurb: Arc::new(parking_lot::Mutex::new(String::new())),
+            goal_actions_pending: VecDeque::new(),
+            goal_modal_closed_flag: false,
+            goal_anim_frame: 0,
+            // Restore any persisted task plan for this session so the live
+            // checklist survives app restarts and session switches.
+            current_plan: {
+                let plan = crate::session::TaskPlan::load(&session.id);
+                if plan.is_empty() {
+                    None
+                } else {
+                    Some(plan)
+                }
+            },
+            thinking_text: String::new(),
+            clipboard_images: clipboard::new_shared(),
+            toast: None,
         }
+    }
+
+    /// Show a transient toast (auto-expires in the main loop).
+    pub fn set_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), std::time::Instant::now()));
     }
 
     pub fn scroll_up(&mut self, n: usize) {
@@ -1427,8 +1601,25 @@ async fn handle_slash_command(
                     }
                 }
             } else if subcmd == "start" || subcmd == "run" || subcmd == "spawn" {
-                if rest.is_empty() {
-                    state.push_system("Usage: /team start <goal or semicolon-separated subtasks>");
+                // Optional leading mode token: `/team start swarm <goal>` or
+                // `/team start orchestrator <goal>` (default: orchestrator).
+                let (mode, goal_text) = {
+                    let (first, tail) = match rest.find(' ') {
+                        Some(sp) => (&rest[..sp], rest[sp + 1..].trim()),
+                        None => (rest, ""),
+                    };
+                    match crate::agent::team::TeamMode::parse(first) {
+                        Some(m) if !tail.is_empty() => (m, tail.to_string()),
+                        _ => (
+                            crate::agent::team::TeamMode::Orchestrator,
+                            rest.to_string(),
+                        ),
+                    }
+                };
+                if goal_text.is_empty() {
+                    state.push_system(
+                        "Usage: /team start [swarm|orchestrator] <goal or semicolon-separated subtasks>",
+                    );
                 } else {
                     if state.coordinator.is_none() {
                         state.coordinator = Some(Coordinator::new(
@@ -1441,7 +1632,7 @@ async fn handle_slash_command(
                         ));
                     }
                     if let Some(coord) = state.coordinator.as_mut() {
-                        let board = coord.start_team(rest.to_string());
+                        let board = coord.start_team_with_mode(goal_text, mode);
                         state.multithread_mode = true;
                         state.modal = Some(Modal::DetailViewer(DetailViewerState::new(
                             "Agent Team Board".to_string(),
@@ -1509,6 +1700,11 @@ async fn handle_slash_command(
 
         // ── /goal family (experimental, see future_plan/05_goal_integration.md) ──
         "/goal" => {
+            cmd_goal(state, arg, config).await;
+        }
+        // `/goals` (no arg) is a friendly alias that always opens the manager
+        // modal; with an arg it behaves exactly like `/goal <arg>`.
+        "/goals" => {
             cmd_goal(state, arg, config).await;
         }
         "/goal-check" => {
@@ -3082,7 +3278,7 @@ fn cmd_config(state: &mut AppState, arg: &str) {
             ├─ context:      {}% used ({} limit)\n\
             └─ config file:  {}\n\n\
             To change: /config set <key> <value>\n\
-            Keys: theme (dark/light/dracula/nord/solarized), trust (on/off)",
+            Keys: theme (molten-rust/fluid-green/liquid-blue/glittery-gold/bright-neon/fluid-purple), trust (on/off)",
             state.theme_name,
             if state.trust_mode { "on" } else { "off" },
             if state.vim_normal_mode { "on" } else { "off" },
@@ -3117,7 +3313,7 @@ fn cmd_config(state: &mut AppState, arg: &str) {
         },
         _ => state.push_system(
             "Usage:\n  /config               — show all settings\n\
-            /config set theme <name>    — dark/light/dracula/nord/solarized\n\
+            /config set theme <name>    — molten-rust/fluid-green/liquid-blue/glittery-gold/bright-neon/fluid-purple\n\
             /config set trust on|off    — toggle trust mode\n\
             /config set vim on|off      — toggle vim normal mode",
         ),
@@ -3451,28 +3647,19 @@ async fn cmd_goal(state: &mut AppState, arg: &str, config: &Arc<Config>) {
     };
 
     match sub {
-        "" => {
-            // List goals
+        "" | "list" | "ls" => {
+            // Open the interactive goal manager modal instead of dumping the
+            // list into the transcript. Navigate with ↑↓ and control goals
+            // (pause/resume/clear/complete) without typing hex ids.
             let summaries = sup.list().await;
             if summaries.is_empty() {
                 state.push_system(
-                    "No active goals.\nStart one with: /goal <objective>\n\
+                    "No goals yet.\nStart one with: /goal <objective>\n\
                      (Requires [features] goals = true in ~/.forge-osh/config.toml.)",
                 );
                 return;
             }
-            let mut lines = vec![format!("Active goals ({}):", summaries.len())];
-            for s in &summaries {
-                lines.push(format!(
-                    "  {:<14} {:<10} turns={:<3}  ${:.4}  — {}",
-                    s.id.to_string(),
-                    s.state.label(),
-                    s.turns,
-                    s.cost_usd,
-                    truncate_objective(&s.objective, 70),
-                ));
-            }
-            state.push_system(lines.join("\n"));
+            state.modal = Some(Modal::GoalManager(GoalManagerState::new(summaries)));
         }
 
         "--from" => {
@@ -3822,7 +4009,17 @@ fn format_goal_event_line(id: &crate::agent::goal::GoalId, ev: &crate::agent::go
     use crate::agent::goal::GoalEvent;
     match ev {
         GoalEvent::Started { .. } => format!("[goal#{id}] started"),
-        GoalEvent::Progress { line } => format!("[goal#{id}] {line}"),
+        GoalEvent::Progress { line } => {
+            // Drop blank / whitespace-only progress lines — the worker emits
+            // these between checkpoints and they otherwise render as a wall of
+            // empty `[goal#…]` rows in the transcript.
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                format!("[goal#{id}] {trimmed}")
+            }
+        }
         GoalEvent::Blocked { reason } => format!("[goal#{id}] BLOCKED — {reason}"),
         GoalEvent::Completed { metrics } => format!(
             "[goal#{id}] COMPLETED — turns={} cost=${:.4} tokens={}↑{}↓",
@@ -5043,6 +5240,10 @@ pub async fn run_tui(
         AppState::new(&config, &sess, shared_graph.clone())
     };
 
+    // Start the background clipboard-image watcher so Alt+N can paste recent
+    // images. No-op if the platform clipboard is unavailable.
+    clipboard::spawn_watcher(state.clipboard_images.clone());
+
     // Resolve proper display names from provider router and model catalog
     {
         let router = provider_router.read().await;
@@ -5203,6 +5404,21 @@ pub async fn run_tui(
     state.lsp = Some(lsp.clone());
     state.mcp = Some(mcp.clone());
 
+    // ── spawn_team tool: register now that the provider router / tools exist ──
+    // This makes dynamic sub-team orchestration available to the main loop AND
+    // to /goal workers (they share this same tool registry via WorkerDeps).
+    {
+        let spawner = std::sync::Arc::new(crate::agent::team_spawner::TeamSpawner::new(
+            provider_router.clone(),
+            tools.clone(),
+            config.clone(),
+            shared_graph.clone(),
+        ));
+        tools.register(Box::new(crate::tools::team_tools::SpawnTeamTool::new(
+            spawner,
+        )));
+    }
+
     // ── /goal subsystem: inject worker deps and start the event drainer ───
     {
         let deps = crate::agent::goal::worker::WorkerDeps {
@@ -5281,9 +5497,27 @@ pub async fn run_tui(
             state.spinner.tick();
         }
 
-        // Poll interval: faster when agent is working (for smooth streaming)
+        // Expire the transient toast (image-paste feedback) after ~2s.
+        if let Some((_, set_at)) = &state.toast {
+            if set_at.elapsed() > Duration::from_secs(2) {
+                state.toast = None;
+            }
+        }
+
+        // Are there live (non-terminal) goals running in the background? The
+        // blurb is empty exactly when there are none, so it's a cheap proxy.
+        let goals_live = !state.goal_status_blurb.lock().is_empty();
+        if goals_live {
+            state.goal_anim_frame = state.goal_anim_frame.wrapping_add(1);
+        }
+
+        // Poll interval: faster when the agent is working (for smooth
+        // streaming); a slightly slower cadence still animates the goal
+        // spinner without spinning the CPU when only goals are live.
         let timeout = if state.spinner.active || state.agent_busy {
             Duration::from_millis(16)
+        } else if goals_live {
+            Duration::from_millis(120)
         } else {
             Duration::from_millis(50)
         };
@@ -5296,6 +5530,7 @@ pub async fn run_tui(
                         .spinner
                         .start(format!("{} is thinking...", state.model_name));
                     state.streaming_text.clear();
+                    state.thinking_text.clear();
                     // Reset dedup hash so the new turn can produce legitimate text
                     state.last_committed_hash = 0;
                     // Do NOT reset scroll here — the user may have scrolled up to read
@@ -5308,11 +5543,14 @@ pub async fn run_tui(
                     if state.spinner.active {
                         state.spinner.stop();
                     }
+                    // The visible answer supersedes the ephemeral reasoning.
+                    state.thinking_text.clear();
                     state.streaming_text.push_str(&t);
                     // Do NOT force auto_scroll here — user may have scrolled up
                 }
                 AgentEvent::ToolStart { name, input, .. } => {
                     state.spinner.stop();
+                    state.thinking_text.clear();
                     // Commit any streaming text before tool execution
                     commit_streaming_text(&mut state);
                     state.messages.push(RenderedMessage {
@@ -5439,9 +5677,15 @@ pub async fn run_tui(
                         None => state.push_system("Skill scope cleared."),
                     }
                 }
+                AgentEvent::PlanUpdated { plan } => {
+                    // Refresh the live checklist. The plan is already persisted
+                    // to disk by the tool; we just mirror it for rendering.
+                    state.current_plan = if plan.is_empty() { None } else { Some(plan) };
+                }
                 AgentEvent::Done => {
                     state.spinner.stop();
                     state.agent_busy = false;
+                    state.thinking_text.clear();
                     // Commit remaining streaming text (guarded against duplicates)
                     commit_streaming_text(&mut state);
                     let sess = session.lock().await;
@@ -5464,6 +5708,7 @@ pub async fn run_tui(
                 AgentEvent::Error(e) => {
                     state.spinner.stop();
                     state.agent_busy = false;
+                    state.thinking_text.clear();
                     // Commit any partial streaming text before showing error
                     commit_streaming_text(&mut state);
                     state.messages.push(RenderedMessage {
@@ -5537,12 +5782,21 @@ pub async fn run_tui(
                         });
                     }
                 }
-                // JSON-RPC-only events. The TUI already renders thinking
-                // via the spinner + cumulative cost via session.cost_tracker;
-                // these variants are forwarded to IDEs only.
-                AgentEvent::ThinkingDelta { .. }
-                | AgentEvent::ThinkingEnd
-                | AgentEvent::DiffPreview { .. }
+                // Stream the model's intermediate reasoning so the user can
+                // see the thought process behind tool calls (providers that
+                // don't stream thinking simply never emit these).
+                AgentEvent::ThinkingDelta { text } => {
+                    if state.spinner.active {
+                        state.spinner.stop();
+                    }
+                    state.thinking_text.push_str(&text);
+                }
+                AgentEvent::ThinkingEnd => {
+                    // Keep the reasoning visible until the visible answer or a
+                    // tool result supersedes it (handled in Token/ToolStart).
+                }
+                // JSON-RPC-only events forwarded to IDEs only.
+                AgentEvent::DiffPreview { .. }
                 | AgentEvent::TurnUsage { .. }
                 | AgentEvent::ToolOutputDelta { .. } => {}
             }
@@ -5802,6 +6056,105 @@ pub async fn run_tui(
             }
         }
 
+        // Periodically refresh the live goal modal list so state transitions
+        // (running → verifying → completed) and metrics appear without a
+        // keypress. The detail panel is left untouched (it's a snapshot the
+        // user explicitly opened).
+        if let Some(Modal::GoalManager(_)) = &state.modal {
+            let new_goals = state.goal_supervisor.list().await;
+            if let Some(Modal::GoalManager(gm)) = state.modal.as_mut() {
+                let prev_id = gm.selected_goal().map(|s| s.id.clone());
+                gm.goals = new_goals;
+                if let Some(pid) = prev_id {
+                    if let Some(idx) = gm.goals.iter().position(|s| s.id == pid) {
+                        gm.selected = idx;
+                    }
+                }
+                if gm.selected >= gm.goals.len() {
+                    gm.selected = gm.goals.len().saturating_sub(1);
+                }
+            }
+        }
+
+        // ---- Process pending goal actions (from the goal manager modal) ----
+        if !state.goal_actions_pending.is_empty() {
+            let sup = state.goal_supervisor.clone();
+            let actions: Vec<GoalAction> = state.goal_actions_pending.drain(..).collect();
+            let mut detail_to_set: Option<crate::agent::goal::StatusSnapshot> = None;
+            let mut toast: Option<String> = None;
+            let mut needs_refresh = false;
+
+            for action in actions {
+                match action {
+                    GoalAction::Pause(id) => {
+                        toast = Some(match sup.pause(&id).await {
+                            Ok(()) => format!("Goal {id} paused."),
+                            Err(e) => format!("pause failed: {e}"),
+                        });
+                        needs_refresh = true;
+                    }
+                    GoalAction::Resume(id) => {
+                        toast = Some(match sup.resume(&id).await {
+                            Ok(()) => format!("Goal {id} resumed."),
+                            Err(e) => format!("resume failed: {e}"),
+                        });
+                        needs_refresh = true;
+                    }
+                    GoalAction::Clear(id) => {
+                        toast = Some(match sup.clear(&id).await {
+                            Ok(()) => format!("Goal {id} cleared and archived."),
+                            Err(e) => format!("clear failed: {e}"),
+                        });
+                        needs_refresh = true;
+                    }
+                    GoalAction::Complete(id) => {
+                        toast = Some(match sup.force_complete(&id).await {
+                            Ok(()) => format!("Goal {id} force-completed."),
+                            Err(e) => format!("complete failed: {e}"),
+                        });
+                        needs_refresh = true;
+                    }
+                    GoalAction::Detail(id) => match sup.status(&id).await {
+                        Ok(snap) => detail_to_set = Some(snap),
+                        Err(e) => toast = Some(format!("detail failed: {e}")),
+                    },
+                    GoalAction::Refresh => {
+                        needs_refresh = true;
+                    }
+                }
+            }
+
+            // Refresh the goal status blurb so the status bar / spinner reflect
+            // any state change immediately.
+            let new_blurb = compute_goal_status_blurb(&sup).await;
+            *state.goal_status_blurb.lock() = new_blurb;
+
+            // Apply results back to the (possibly still-open) modal.
+            if let Some(Modal::GoalManager(gm)) = state.modal.as_mut() {
+                if needs_refresh {
+                    let prev_id = gm.selected_goal().map(|s| s.id.clone());
+                    gm.goals = sup.list().await;
+                    if let Some(pid) = prev_id {
+                        if let Some(idx) = gm.goals.iter().position(|s| s.id == pid) {
+                            gm.selected = idx;
+                        }
+                    }
+                    if gm.selected >= gm.goals.len() {
+                        gm.selected = gm.goals.len().saturating_sub(1);
+                    }
+                }
+                if let Some(snap) = detail_to_set {
+                    gm.detail = Some(snap);
+                }
+                if let Some(msg) = toast {
+                    gm.message = Some(msg);
+                }
+            } else if let Some(msg) = toast {
+                // Modal was closed in the meantime — surface as a system line.
+                state.push_system(msg);
+            }
+        }
+
         // ---- Process pending key operations ----
         if let Some((provider_id, api_key)) = state.key_save_pending.take() {
             let save_ok = {
@@ -6012,7 +6365,10 @@ pub async fn run_tui(
         // ---- Process pending session delete ----
         if let Some(id) = state.session_delete_pending.take() {
             match crate::session::checkpoint::Checkpoint::delete(&id) {
-                Ok(_) => state.push_system(format!("Session {} deleted.", &id[..8.min(id.len())])),
+                Ok(_) => {
+                    crate::session::TaskPlan::delete(&id);
+                    state.push_system(format!("Session {} deleted.", &id[..8.min(id.len())]))
+                }
                 Err(e) => state.push_system(format!("Failed to delete session: {e}")),
             }
         }
@@ -6053,10 +6409,16 @@ pub async fn run_tui(
                         .messages
                         .retain(|m| matches!(m.role, MessageRole::Splash));
                     state.streaming_text.clear();
+                    state.thinking_text.clear();
                     state.scroll_top = 0;
                     state.auto_scroll = true;
                     state.unread_count = 0;
                     state.tool_stats.clear();
+                    // Restore the persisted task plan for the loaded session.
+                    {
+                        let plan = crate::session::TaskPlan::load(&id);
+                        state.current_plan = if plan.is_empty() { None } else { Some(plan) };
+                    }
                     // Restore token/cost counters from the persisted
                     // cost_tracker so they do NOT reset on reload.
                     {
@@ -6287,6 +6649,44 @@ pub async fn run_tui(
                             continue;
                         }
 
+                        // ---- Alt+N: paste the Nth most-recent clipboard image ----
+                        // Alt+0 = latest, Alt+1 = previous, … into the input box
+                        // at the cursor as an [Image #id] token.
+                        if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                            if let KeyCode::Char(c) = key.code {
+                                if c.is_ascii_digit() {
+                                    if state.agent_busy {
+                                        state.set_toast(
+                                            "Agent is working — wait before attaching images.",
+                                        );
+                                    } else {
+                                        let idx = (c as u8 - b'0') as usize;
+                                        let (picked, total) = {
+                                            let g = state.clipboard_images.lock();
+                                            (g.get(idx), g.len())
+                                        };
+                                        match picked {
+                                            Some(image) => {
+                                                let id = state.input.attach_image(image);
+                                                state.set_toast(format!(
+                                                    "Pasted clipboard image #{idx} as [Image #{id}]"
+                                                ));
+                                            }
+                                            None => {
+                                                state.set_toast(format!(
+                                                    "No image at slot {idx} — only {total} image(s) captured. Copy an image, then Alt+0.",
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+
                         let action = input::map_key_normal(key);
                         match action {
                             // ---- Submit / slash commands ----
@@ -6334,7 +6734,63 @@ pub async fn run_tui(
                                         }
                                     }
 
-                                    let text = state.input.submit();
+                                    // ---- Vision gate: block image messages on
+                                    // models that can't see images. Done BEFORE
+                                    // consuming the draft so the user keeps their
+                                    // text + pasted images and can switch model. ----
+                                    if !state.input.images.is_empty()
+                                        && !pending_text.trim_start().starts_with('/')
+                                        && !(state.multithread_mode
+                                            && pending_text.starts_with("@worker "))
+                                    {
+                                        let supports = crate::config::models::model_supports_vision(
+                                            &state.provider_id,
+                                            &state.model_id,
+                                        );
+                                        if supports != Some(true) {
+                                            let suggestions =
+                                                crate::config::models::suggest_vision_models(
+                                                    &state.provider_id,
+                                                    3,
+                                                );
+                                            let mut msg = if supports == Some(false) {
+                                                format!(
+                                                    "🚫 The active model '{}' ({}) does not support image input.",
+                                                    state.model_id, state.provider_id
+                                                )
+                                            } else {
+                                                format!(
+                                                    "🚫 Couldn't confirm that '{}' ({}) supports image input (custom/unknown model).",
+                                                    state.model_id, state.provider_id
+                                                )
+                                            };
+                                            if suggestions.is_empty() {
+                                                msg.push_str(
+                                                    " Switch to a vision-capable model with Ctrl+O.",
+                                                );
+                                            } else {
+                                                let names: Vec<String> = suggestions
+                                                    .iter()
+                                                    .map(|m| m.id.clone())
+                                                    .collect();
+                                                msg.push_str(&format!(
+                                                    " Switch to a vision-capable model with Ctrl+O — e.g. {}.",
+                                                    names.join(", ")
+                                                ));
+                                            }
+                                            msg.push_str("\n(Your draft and pasted images are kept — switch the model, then press Enter again.)");
+                                            state.push_system(msg);
+                                            if deferred_events.is_empty()
+                                                && !event::poll(Duration::ZERO)?
+                                            {
+                                                break;
+                                            }
+                                            continue;
+                                        }
+                                    }
+
+                                    let submission = state.input.take_submission();
+                                    let text = submission.text.clone();
 
                                     if text.trim_start().starts_with('/') {
                                         // Slash command — handle locally, do NOT send to agent
@@ -6381,10 +6837,21 @@ pub async fn run_tui(
                                         state.scroll_top = 0;
                                         state.auto_scroll = true;
                                     } else {
-                                        // Normal user message — send to agent loop
+                                        // Normal user message — send to agent loop,
+                                        // preserving any interleaved pasted images.
+                                        let content = input::submission_to_content(&submission);
+                                        let display = if submission.images.is_empty() {
+                                            text.clone()
+                                        } else {
+                                            format!(
+                                                "{}\n  ({} image(s) attached)",
+                                                text.trim_end(),
+                                                submission.images.len()
+                                            )
+                                        };
                                         state.messages.push(RenderedMessage {
                                             role: MessageRole::User,
-                                            content: text.clone(),
+                                            content: display,
                                         });
                                         state.agent_busy = true;
                                         state.scroll_top = 0;
@@ -6392,7 +6859,7 @@ pub async fn run_tui(
 
                                         let loop_clone = agent_loop.clone();
                                         state.agent_task = Some(tokio::spawn(async move {
-                                            let _ = loop_clone.run(text).await;
+                                            let _ = loop_clone.run_user(content).await;
                                         }));
                                     }
                                 }
@@ -6631,10 +7098,10 @@ fn restore_history_to_display(state: &mut AppState, session: &Session) {
 
     for msg in session.history.messages() {
         match msg {
-            Message::User(crate::types::UserContent::Text(text)) => {
+            Message::User(uc) => {
                 state.messages.push(RenderedMessage {
                     role: MessageRole::User,
-                    content: text.clone(),
+                    content: uc.to_text(),
                 });
             }
             Message::Assistant(content) => {
@@ -7284,7 +7751,128 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
             }
         }
 
+        Some(Modal::GoalManager(mut g)) => {
+            handle_goal_modal_key(state, &mut g, key);
+            if !state.goal_modal_closed_flag {
+                state.modal = Some(Modal::GoalManager(g));
+            } else {
+                state.goal_modal_closed_flag = false;
+            }
+        }
+
         None => {}
+    }
+}
+
+/// Key handling for the goal manager modal. Mutations against the supervisor
+/// are async, so this only enqueues [`GoalAction`]s (drained in the main loop)
+/// and updates local navigation/detail state.
+fn handle_goal_modal_key(
+    state: &mut AppState,
+    g: &mut GoalManagerState,
+    key: crossterm::event::KeyEvent,
+) {
+    use crossterm::event::KeyCode;
+
+    // Any keypress dismisses a pending clear-confirmation unless it confirms it.
+    let confirming = g.confirm_clear.clone();
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            if g.detail.is_some() {
+                // First Esc closes the detail panel, second closes the modal.
+                g.detail = None;
+            } else if g.confirm_clear.is_some() {
+                g.confirm_clear = None;
+                g.message = None;
+            } else {
+                state.goal_modal_closed_flag = true;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            g.confirm_clear = None;
+            g.detail = None;
+            g.move_up();
+            if (g.selected as u16) < g.list_scroll {
+                g.list_scroll = g.selected as u16;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            g.confirm_clear = None;
+            g.detail = None;
+            g.move_down();
+            let bottom = g.list_scroll.saturating_add(12);
+            if (g.selected as u16) >= bottom {
+                g.list_scroll = g.list_scroll.saturating_add(1);
+            }
+        }
+        KeyCode::Home => {
+            g.selected = 0;
+            g.list_scroll = 0;
+            g.detail = None;
+            g.confirm_clear = None;
+        }
+        KeyCode::End => {
+            g.selected = g.goals.len().saturating_sub(1);
+            g.detail = None;
+            g.confirm_clear = None;
+        }
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            if let Some(s) = g.selected_goal() {
+                let id = s.id.clone();
+                g.confirm_clear = None;
+                state.goal_actions_pending.push_back(GoalAction::Detail(id));
+            }
+        }
+        KeyCode::Char('p') => {
+            if let Some(s) = g.selected_goal() {
+                let id = s.id.clone();
+                g.confirm_clear = None;
+                state.goal_actions_pending.push_back(GoalAction::Pause(id));
+            }
+        }
+        KeyCode::Char('r') => {
+            if let Some(s) = g.selected_goal() {
+                let id = s.id.clone();
+                g.confirm_clear = None;
+                state.goal_actions_pending.push_back(GoalAction::Resume(id));
+            }
+        }
+        KeyCode::Char('R') => {
+            state.goal_actions_pending.push_back(GoalAction::Refresh);
+        }
+        KeyCode::Char('f') => {
+            if let Some(s) = g.selected_goal() {
+                let id = s.id.clone();
+                g.confirm_clear = None;
+                state.goal_actions_pending.push_back(GoalAction::Complete(id));
+            }
+        }
+        // Clear is destructive → require a confirm keypress (c then c, or y).
+        KeyCode::Char('c') | KeyCode::Char('x') | KeyCode::Delete => {
+            if let Some(id) = confirming {
+                // Already armed: confirm the clear.
+                g.confirm_clear = None;
+                g.message = None;
+                state.goal_actions_pending.push_back(GoalAction::Clear(id));
+            } else if let Some(s) = g.selected_goal() {
+                let id = s.id.clone();
+                g.confirm_clear = Some(id);
+                g.message =
+                    Some("Press c (or y) again to clear & archive this goal, Esc to cancel.".into());
+            }
+        }
+        KeyCode::Char('y') => {
+            if let Some(id) = confirming {
+                g.confirm_clear = None;
+                g.message = None;
+                state.goal_actions_pending.push_back(GoalAction::Clear(id));
+            }
+        }
+        _ => {
+            // Unrelated key: drop any pending confirm so it can't linger.
+            g.confirm_clear = None;
+        }
     }
 }
 

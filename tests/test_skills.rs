@@ -21,6 +21,7 @@ fn make_ctx(dir: &std::path::Path) -> ToolContext {
         skill_registry: None,
         output_chunk_tx: None,
         tool_call_id: None,
+        team_blackboard: None,
     }
 }
 

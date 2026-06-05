@@ -1,6 +1,6 @@
 [package]
 name = "forge_agent"
-version = "1.0.21"
+version = "1.0.22"
 edition = "2021"
 authors = ["osh"]
 description = "A universal Rust-based CLI coding agent"
@@ -69,6 +69,10 @@ jsonschema = { version = "0.17", default-features = false }
 sha2 = "0.10"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+
+# Clipboard image capture + PNG encoding (image paste feature)
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Error handling & logging
 thiserror = "2"

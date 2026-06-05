@@ -1186,6 +1186,7 @@ mod tests {
             skill_registry: None,
             output_chunk_tx: None,
             tool_call_id: None,
+            team_blackboard: None,
         }
     }
 

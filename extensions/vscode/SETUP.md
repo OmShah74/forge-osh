@@ -73,7 +73,7 @@ The extension finds the agent binary in this order:
 3. Copy the result to the release dir **without overwriting existing
    files**:
    ```bash
-   cp target/release/forge-osh.exe "C:/forge-build/release/forge-osh_v1.0.21.exe"
+   cp target/release/forge-osh.exe "C:/forge-build/release/forge-osh_v1.0.22.exe"
    ```
 4. In VS Code, run **`OSH: Restart Agent Process`**. The extension
    picks the highest version automatically. Verify with

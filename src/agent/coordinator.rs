@@ -16,7 +16,8 @@ use crate::provider::router::ProviderRouter;
 use crate::session::Session;
 use crate::tools::ToolRegistry;
 
-use super::team::{TeamBoard, TeamPhase, TeamTaskKind};
+use super::team::{TeamBoard, TeamMode, TeamPhase, TeamTaskKind};
+use super::team_bus::{self, SharedBlackboard};
 use super::worker::{Worker, WorkerId, WorkerNotification, WorkerStatus};
 use super::AgentEvent;
 
@@ -32,6 +33,9 @@ pub struct Coordinator {
     notify_rx: Arc<Mutex<mpsc::UnboundedReceiver<WorkerNotification>>>,
     active_workers: HashMap<WorkerId, WorkerHandle>,
     team_board: Option<TeamBoard>,
+    /// Live shared blackboard for the currently-active team. Recreated on each
+    /// `start_team*` so peers coordinate through `team_post` / `team_read`.
+    team_blackboard: Option<SharedBlackboard>,
 }
 
 #[derive(Debug)]
@@ -76,6 +80,7 @@ impl Coordinator {
             notify_rx: Arc::new(Mutex::new(notify_rx)),
             active_workers: HashMap::new(),
             team_board,
+            team_blackboard: None,
         }
     }
 
@@ -87,6 +92,11 @@ impl Coordinator {
 
     /// Start a durable team board and spawn the initial worker wave.
     pub fn start_team(&mut self, goal: String) -> String {
+        self.start_team_with_mode(goal, TeamMode::Orchestrator)
+    }
+
+    /// Start a durable team board in a specific orchestration mode.
+    pub fn start_team_with_mode(&mut self, goal: String, mode: TeamMode) -> String {
         if self.team_board.as_ref().is_some_and(|board| {
             matches!(
                 board.phase,
@@ -103,9 +113,11 @@ impl Coordinator {
             .map(|sess| std::path::PathBuf::from(&sess.working_dir))
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-        let mut board = TeamBoard::from_goal(goal, working_dir);
+        let mut board = TeamBoard::from_goal_with_mode(goal, working_dir, mode);
         board.phase = TeamPhase::Running;
         self.team_board = Some(board);
+        // Fresh live blackboard for this team run.
+        self.team_blackboard = Some(team_bus::new_blackboard());
         self.spawn_queued_team_tasks();
         self.save_team_board();
         self.team_status()
@@ -273,16 +285,23 @@ impl Coordinator {
             .unwrap_or_else(|_| ".".to_string());
 
         let worker = match (team_task_id.clone(), team_context) {
-            (Some(task_id), Some(context)) => Worker::new_with_team(
-                description.clone(),
-                self.provider_router.clone(),
-                self.tools.clone(),
-                self.config.clone(),
-                self.graph.clone(),
-                working_dir,
-                task_id,
-                context,
-            ),
+            (Some(task_id), Some(context)) => {
+                let mut w = Worker::new_with_team(
+                    description.clone(),
+                    self.provider_router.clone(),
+                    self.tools.clone(),
+                    self.config.clone(),
+                    self.graph.clone(),
+                    working_dir,
+                    task_id,
+                    context,
+                );
+                // Team workers share the live blackboard for peer coordination.
+                if let Some(bb) = &self.team_blackboard {
+                    w = w.with_blackboard(bb.clone());
+                }
+                w
+            }
             _ => Worker::new(
                 description.clone(),
                 self.provider_router.clone(),

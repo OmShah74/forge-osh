@@ -3,7 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Wrap,
     },
     Frame,
@@ -13,7 +13,7 @@ use super::themes::Theme;
 use super::{
     AppState, DetailViewerState, GeneratedSkillPreviewState, HelpState, KeyManagerState,
     McpCustomForm, McpManagerState, McpView, MessageRole, Modal, SessionBrowserState,
-    SkillBrowserState, MCP_CUSTOM_FIELD_COUNT, OSH_SPLASH_LINES,
+    SkillBrowserState, MCP_CUSTOM_FIELD_COUNT,
 };
 
 /// Render the entire TUI
@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     }
 
     // Compute input area height based on content (min 3, max 8 rows)
-    let input_lines = count_input_lines(&state.input.text, area.width.saturating_sub(4) as usize);
+    let input_lines = count_input_lines(&state.input.text, area.width.saturating_sub(2) as usize);
     let input_height = (input_lines + 2).max(3).min(8) as u16; // +2 for borders/padding
 
     // Main layout: header | conversation | input | status
@@ -116,8 +116,246 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Modal::McpManager(m) => {
                 render_mcp_manager(frame, m, &theme);
             }
+            Modal::GoalManager(g) => {
+                render_goal_manager(frame, g, &theme);
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Goal manager modal
+// ---------------------------------------------------------------------------
+
+fn goal_state_icon(state: &crate::agent::goal::GoalState) -> &'static str {
+    use crate::agent::goal::GoalState;
+    match state {
+        GoalState::Running => "●",
+        GoalState::Verifying => "◐",
+        GoalState::Paused => "⏸",
+        GoalState::Blocked(_) => "⚠",
+        GoalState::Completed => "✓",
+        GoalState::Cleared => "✗",
+        GoalState::Failed(_) => "✖",
+        GoalState::Idle => "·",
+    }
+}
+
+fn render_goal_manager(frame: &mut Frame, g: &super::GoalManagerState, theme: &Theme) {
+    let area = centered_rect(84, 78, frame.area());
+    frame.render_widget(Clear, area);
+
+    let title =
+        " Goals   ↑↓ nav   Enter detail   p pause   r resume   f finish   c clear   R refresh   q close ";
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+        .title(title);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    // Reserve one row at the bottom for the toast / confirm message.
+    let (body_area, footer_area) = {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(inner);
+        (rows[0], rows[1])
+    };
+
+    if g.goals.is_empty() {
+        let p = Paragraph::new("No goals. Start one with /goal <objective>.")
+            .style(Style::default().fg(theme.muted_fg));
+        frame.render_widget(p, body_area);
+        return;
+    }
+
+    // Detail panel takes over the body when a snapshot is loaded.
+    if let Some(snap) = &g.detail {
+        render_goal_detail(frame, body_area, snap, theme);
+    } else {
+        render_goal_list(frame, body_area, g, theme);
+    }
+
+    // Footer: confirm prompt / toast.
+    if let Some(msg) = &g.message {
+        let style = if g.confirm_clear.is_some() {
+            Style::default()
+                .fg(theme.warning_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted_fg)
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {}", truncate_to(msg, footer_area.width as usize)))
+                .style(style),
+            footer_area,
+        );
+    }
+}
+
+fn render_goal_list(frame: &mut Frame, area: Rect, g: &super::GoalManagerState, theme: &Theme) {
+    let items: Vec<ListItem> = g
+        .goals
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let selected = i == g.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(theme.fg)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            // Short id: drop the timestamp prefix so the row isn't dominated by
+            // the hex blob. Keep the full id reachable in the detail panel.
+            let id_str = s.id.to_string();
+            let line = format!(
+                " {} {:<20} {:<10} turns={:<4} ${:<8.4} {}",
+                goal_state_icon(&s.state),
+                truncate_to(&id_str, 20),
+                truncate_to(s.state.label(), 10),
+                s.turns,
+                s.cost_usd,
+                truncate_to(&s.objective, 80),
+            );
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let scroll = g.list_scroll as usize;
+    let visible = area.height as usize;
+    let end = (scroll + visible).min(items.len());
+    let slice: Vec<ListItem> = items[scroll.min(items.len())..end].to_vec();
+    frame.render_widget(List::new(slice), area);
+}
+
+fn render_goal_detail(
+    frame: &mut Frame,
+    area: Rect,
+    snap: &crate::agent::goal::StatusSnapshot,
+    theme: &Theme,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    fn kv(lines: &mut Vec<Line>, theme: &Theme, label: &str, val: String) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{label:<12}"),
+                Style::default().fg(theme.muted_fg),
+            ),
+            Span::styled(val, Style::default().fg(theme.fg)),
+        ]));
+    }
+
+    kv(&mut lines, theme, "Goal", snap.id.to_string());
+    kv(&mut lines, theme, "State", snap.state.label().to_string());
+    kv(
+        &mut lines,
+        theme,
+        "Objective",
+        truncate_to(&snap.spec_objective, 110),
+    );
+    if !snap.spec_stopping.is_empty() && snap.spec_stopping != snap.spec_objective {
+        kv(
+            &mut lines,
+            theme,
+            "Stopping",
+            truncate_to(&snap.spec_stopping, 110),
+        );
+    }
+    let m = &snap.metrics;
+    kv(&mut lines, theme, "Turns", m.turns.to_string());
+    kv(
+        &mut lines,
+        theme,
+        "Tokens",
+        format!("in {} / out {}", m.input_tokens, m.output_tokens),
+    );
+    kv(&mut lines, theme, "Cost", format!("${:.4}", m.cost_usd));
+    kv(
+        &mut lines,
+        theme,
+        "Verifiers",
+        format!("{}✓ / {}✗", m.verifiers_passed, m.verifiers_failed),
+    );
+
+    if let Some(c) = &snap.last_checkpoint {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Last checkpoint",
+            Style::default()
+                .fg(theme.assistant_msg_fg)
+                .add_modifier(Modifier::BOLD),
+        )));
+        kv(
+            &mut lines,
+            theme,
+            "  At",
+            format!("{} · phase {}", c.at.format("%H:%M:%S"), c.phase),
+        );
+        kv(
+            &mut lines,
+            theme,
+            "  Action",
+            truncate_to(&c.last_action, 100),
+        );
+        if !c.files_touched.is_empty() {
+            let show: Vec<String> = c
+                .files_touched
+                .iter()
+                .take(8)
+                .map(|p| p.display().to_string())
+                .collect();
+            let extra = if c.files_touched.len() > 8 {
+                format!(" (+{} more)", c.files_touched.len() - 8)
+            } else {
+                String::new()
+            };
+            kv(
+                &mut lines,
+                theme,
+                "  Files",
+                format!("{} — {}{}", c.files_touched.len(), show.join(", "), extra),
+            );
+        }
+    }
+
+    if !snap.tail_progress.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Recent progress",
+            Style::default()
+                .fg(theme.assistant_msg_fg)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for l in snap.tail_progress.iter().rev().take(8) {
+            let trimmed = l.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  • {}", truncate_to(trimmed, 110)),
+                Style::default().fg(theme.fg),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Esc / ← back to list",
+        Style::default().fg(theme.muted_fg),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +377,10 @@ fn render_mcp_manager(frame: &mut Frame, m: &McpManagerState, theme: &Theme) {
 fn render_mcp_custom_form(frame: &mut Frame, area: Rect, f: &McpCustomForm, theme: &Theme) {
     let outer = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.warning_fg))
+        .style(Style::default().bg(theme.modal_bg))
+        .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
         .title(" Add Custom MCP Server   Tab/↑↓ next field   Ctrl+S save   Esc cancel ");
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
@@ -265,7 +506,10 @@ fn render_mcp_list(frame: &mut Frame, area: Rect, m: &McpManagerState, theme: &T
     let title = " MCP Servers   ↑↓ nav   Space toggle   Enter detail   c connect   x disconnect   n new   D delete-custom   r refresh   q close ";
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border_fg))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
         .title(title);
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
@@ -341,6 +585,37 @@ fn secret_summary(secs: &[crate::mcp::SecretStatus]) -> String {
 /// line is longer than `pad_width`, it is returned as-is (ratatui's wrap will
 /// handle the overflow per-row; the wrapped continuation rows won't be padded
 /// but the leading row — which is what dominates the visual band — will be).
+/// Make a string safe to render in the TUI.
+///
+/// Tool output and diffs frequently contain control characters that corrupt
+/// terminal rendering and desync ratatui's width accounting from what the
+/// terminal actually draws:
+///   - `\r` (carriage return) moves the cursor back to column 0 mid-line, so
+///     later text overwrites earlier text (this is why CRLF diffs lost their
+///     `-` prefix and indentation).
+///   - `\t` (tab) is counted as width 0/1 by `unicode_width` but rendered as
+///     several columns by the terminal, so manually padded background bands
+///     (diff highlight rows) overflow and wrap into a jagged staircase.
+///   - other C0/C1 control bytes (including stray ANSI ESC) can do anything.
+///
+/// We drop carriage returns and other control characters and expand tabs to a
+/// fixed number of spaces, so the rendered width always matches what we
+/// measured. `\n` is never expected here (callers split on it first) but is
+/// preserved defensively.
+pub fn sanitize_for_tui(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\t' => out.push_str("    "),
+            '\r' => {}
+            '\n' => out.push('\n'),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn pad_diff_line(text_line: &str, pad_width: usize) -> String {
     let prefixed = format!("    {text_line}");
     let cur = unicode_width::UnicodeWidthStr::width(prefixed.as_str());
@@ -384,7 +659,10 @@ fn render_mcp_detail(frame: &mut Frame, area: Rect, m: &McpManagerState, theme: 
     );
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border_fg))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
         .title(title);
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
@@ -551,7 +829,10 @@ fn render_mcp_secret_input(frame: &mut Frame, area: Rect, m: &McpManagerState, t
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.warning_fg))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(" Set MCP Secret "),
         )
         .wrap(Wrap { trim: false });
@@ -562,42 +843,87 @@ fn render_mcp_secret_input(frame: &mut Frame, area: Rect, m: &McpManagerState, t
 // Header
 // ---------------------------------------------------------------------------
 
-fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let trust_indicator = if state.trust_mode { " [TRUST]" } else { "" };
-    let busy_indicator = if state.agent_busy { " ●" } else { "" };
+/// Linearly interpolate between two `Color::Rgb` values (falls back to `a` if
+/// either side isn't an RGB colour).
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    if let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) {
+        let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+        Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+    } else {
+        a
+    }
+}
 
-    // Context window progress bar: [████░░░░░░] 40%
-    let ctx_bar = if state.context_pct > 0 {
+/// Three-stop gradient `hi → mid → lo` sampled at `t` in `[0,1]`.
+fn gradient3(hi: Color, mid: Color, lo: Color, t: f32) -> Color {
+    if t < 0.5 {
+        lerp_color(hi, mid, t * 2.0)
+    } else {
+        lerp_color(mid, lo, (t - 0.5) * 2.0)
+    }
+}
+
+fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let bg = theme.header_bg;
+    let base = Style::default().bg(bg);
+    let dim = base.fg(theme.faint_fg);
+    let label = base.fg(theme.muted_fg);
+    let value = base.fg(theme.header_fg);
+
+    // Warm divider drawn between header segments.
+    let sep = || Span::styled(" · ", dim);
+
+    let mut spans: Vec<Span> = Vec::new();
+    // Brand mark — the molten accent, bold.
+    spans.push(Span::styled(
+        " ◆ forge-osh ",
+        base.fg(theme.accent).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(sep());
+    spans.push(Span::styled(state.model_name.clone(), value));
+    spans.push(sep());
+    spans.push(Span::styled(state.provider_name.clone(), base.fg(theme.accent_bright)));
+    spans.push(sep());
+    spans.push(Span::styled(state.session_name.clone(), label));
+    spans.push(sep());
+    spans.push(Span::styled(state.format_tokens.clone(), label));
+    spans.push(sep());
+    spans.push(Span::styled(state.format_cost.clone(), base.fg(theme.user_msg_fg)));
+
+    // Context window meter: ▰▰▰▱▱▱▱ 42%
+    if state.context_pct > 0 {
         let filled = (state.context_pct as usize * 10 / 100).min(10);
         let empty = 10 - filled;
-        let bar: String = "█".repeat(filled) + &"░".repeat(empty);
-        let color_hint = if state.context_pct >= 90 {
-            "!"
+        let meter_color = if state.context_pct >= 90 {
+            theme.error_fg
         } else if state.context_pct >= 70 {
-            "~"
+            theme.warning_fg
         } else {
-            ""
+            theme.accent
         };
-        format!("  [{}]{} {}%", bar, color_hint, state.context_pct)
-    } else {
-        String::new()
-    };
+        spans.push(Span::styled("  ", base));
+        spans.push(Span::styled("▰".repeat(filled), base.fg(meter_color)));
+        spans.push(Span::styled("▱".repeat(empty), dim));
+        spans.push(Span::styled(format!(" {}%", state.context_pct), base.fg(meter_color)));
+    }
 
-    let header_text = format!(
-        " forge-osh  {}  {}  {}  {}  {}{}{}{}",
-        state.model_name,
-        state.provider_name,
-        state.session_name,
-        state.format_tokens,
-        state.format_cost,
-        ctx_bar,
-        trust_indicator,
-        busy_indicator,
-    );
+    // Trust + busy indicators.
+    if state.trust_mode {
+        spans.push(sep());
+        spans.push(Span::styled(
+            "TRUST",
+            base.fg(theme.ok_fg).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if state.agent_busy {
+        spans.push(Span::styled("  ● ", base.fg(theme.accent_bright)));
+    }
 
-    let header =
-        Paragraph::new(header_text).style(Style::default().fg(theme.header_fg).bg(theme.header_bg));
-
+    // Fill the rest of the header row with the chrome background so the bar
+    // reads as a solid band rather than text on the canvas.
+    let header = Paragraph::new(Line::from(spans)).style(base);
+    frame.render_widget(Block::default().style(base), area);
     frame.render_widget(header, area);
 }
 
@@ -612,57 +938,74 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
     for msg in &state.messages {
         match &msg.role {
             // ------------------------------------------------------------------
-            // OSH ASCII-art splash banner shown once at startup.
-            // Box/frame characters are rendered in border_fg; the block-letter
-            // '#' characters are highlighted in the theme's prompt colour so
-            // they stand out against the frame.
+            // Startup banner — modern "ANSI Shadow" block wordmark. The block
+            // letters are painted in a vertical ember gradient (bright → deep),
+            // the `◆ forge-osh` brand line in bright accent, and the tagline in
+            // muted ash. See `OSH_SPLASH_LINES` / `splash_line_kind`.
             // ------------------------------------------------------------------
             MessageRole::Splash => {
+                use crate::tui::{splash_line_kind, splash_lines, SplashKind};
+                // Choose the banner that fits the pane, then paint the block
+                // letters in a smooth ember gradient (bright → accent → deep).
+                let banner = splash_lines(area.width);
+                let total_logo = banner
+                    .iter()
+                    .filter(|l| matches!(splash_line_kind(l), SplashKind::Logo))
+                    .count()
+                    .max(1);
+                let mut logo_row = 0usize;
                 lines.push(Line::from(""));
-                for splash_line in OSH_SPLASH_LINES {
-                    let mut spans: Vec<Span> = Vec::new();
-                    let mut segment = String::new();
-                    let mut in_hash = false;
-
-                    for ch in splash_line.chars() {
-                        let ch_is_hash = ch == '#';
-                        if ch_is_hash != in_hash {
-                            if !segment.is_empty() {
-                                let color = if in_hash {
-                                    theme.prompt_fg
-                                } else {
-                                    theme.border_fg
-                                };
-                                spans.push(Span::styled(
-                                    segment.clone(),
-                                    Style::default().fg(color).add_modifier(if in_hash {
-                                        Modifier::BOLD
-                                    } else {
-                                        Modifier::empty()
-                                    }),
-                                ));
-                                segment.clear();
-                            }
-                            in_hash = ch_is_hash;
+                for splash_line in banner {
+                    match splash_line_kind(splash_line) {
+                        SplashKind::Blank => lines.push(Line::from("")),
+                        SplashKind::Logo => {
+                            let t = logo_row as f32 / (total_logo.saturating_sub(1).max(1)) as f32;
+                            let color = gradient3(
+                                theme.accent_bright,
+                                theme.accent,
+                                theme.accent_dim,
+                                t,
+                            );
+                            logo_row += 1;
+                            lines.push(Line::from(Span::styled(
+                                splash_line.to_string(),
+                                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                            )));
                         }
-                        segment.push(ch);
-                    }
-                    if !segment.is_empty() {
-                        let color = if in_hash {
-                            theme.prompt_fg
-                        } else {
-                            theme.border_fg
-                        };
-                        spans.push(Span::styled(
-                            segment,
-                            Style::default().fg(color).add_modifier(if in_hash {
-                                Modifier::BOLD
+                        SplashKind::Brand => {
+                            // Split into "◆  forge-osh" (bright) + remainder (muted).
+                            let trimmed = splash_line.trim_end();
+                            let mut spans: Vec<Span> = Vec::new();
+                            if let Some(idx) = trimmed.find("forge-osh") {
+                                let head = &trimmed[..idx + "forge-osh".len()];
+                                let tail = &trimmed[idx + "forge-osh".len()..];
+                                spans.push(Span::styled(
+                                    head.to_string(),
+                                    Style::default()
+                                        .fg(theme.accent_bright)
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                                spans.push(Span::styled(
+                                    tail.to_string(),
+                                    Style::default().fg(theme.muted_fg),
+                                ));
                             } else {
-                                Modifier::empty()
-                            }),
-                        ));
+                                spans.push(Span::styled(
+                                    trimmed.to_string(),
+                                    Style::default()
+                                        .fg(theme.accent_bright)
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                            lines.push(Line::from(spans));
+                        }
+                        SplashKind::Tagline => {
+                            lines.push(Line::from(Span::styled(
+                                splash_line.to_string(),
+                                Style::default().fg(theme.faint_fg),
+                            )));
+                        }
                     }
-                    lines.push(Line::from(spans));
                 }
                 lines.push(Line::from(""));
             }
@@ -671,13 +1014,13 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 lines.push(Line::from(vec![Span::styled(
                     " You ",
                     Style::default()
-                        .fg(theme.header_bg)
+                        .fg(theme.badge_fg)
                         .bg(theme.user_msg_fg)
                         .add_modifier(Modifier::BOLD),
                 )]));
                 for text_line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        format!("  {text_line}"),
+                        format!("  {}", sanitize_for_tui(text_line)),
                         Style::default().fg(theme.user_msg_fg),
                     )));
                 }
@@ -688,7 +1031,7 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 lines.push(Line::from(vec![Span::styled(
                     " forge ",
                     Style::default()
-                        .fg(theme.header_bg)
+                        .fg(theme.badge_fg)
                         .bg(theme.assistant_msg_fg)
                         .add_modifier(Modifier::BOLD),
                 )]));
@@ -702,7 +1045,7 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                     Span::styled(
                         format!(" {} ", name),
                         Style::default()
-                            .fg(theme.header_bg)
+                            .fg(theme.badge_fg)
                             .bg(theme.tool_name_fg)
                             .add_modifier(Modifier::BOLD),
                     ),
@@ -754,7 +1097,12 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
                 // background fills the row (avoids jagged right edges and
                 // makes the buffer-diff between frames unambiguous).
                 let pad_width = (area.width as usize).saturating_sub(5);
-                for text_line in preview.iter().take(max_lines) {
+                for raw_line in preview.iter().take(max_lines) {
+                    // Strip control characters (\r, \t, etc.) before rendering so
+                    // the colored diff bands and width math stay in sync with the
+                    // terminal. Prefix detection uses the same cleaned text.
+                    let text_line = sanitize_for_tui(raw_line);
+                    let text_line = text_line.as_str();
                     if is_diff {
                         if text_line.starts_with('+') && !text_line.starts_with("+++") {
                             // Addition — bright green text on dark green background
@@ -802,10 +1150,12 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
             }
 
             MessageRole::System => {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", msg.content),
-                    Style::default().fg(theme.warning_fg),
-                )));
+                for text_line in sanitize_for_tui(&msg.content).lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {text_line}"),
+                        Style::default().fg(theme.warning_fg),
+                    )));
+                }
                 lines.push(Line::from(""));
             }
         }
@@ -816,11 +1166,23 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
         lines.push(Line::from(vec![Span::styled(
             " forge ",
             Style::default()
-                .fg(theme.header_bg)
+                .fg(theme.badge_fg)
                 .bg(theme.assistant_msg_fg)
                 .add_modifier(Modifier::BOLD),
         )]));
         render_assistant_content(&mut lines, &state.streaming_text, theme);
+    }
+
+    // Live reasoning (intermediate thought process) — dimmed, ephemeral.
+    if !state.thinking_text.is_empty() {
+        render_thinking(&mut lines, &state.thinking_text, theme);
+    }
+
+    // Live task plan — the ticking checklist, rendered just above the spinner.
+    if let Some(plan) = &state.current_plan {
+        if !plan.is_empty() {
+            render_plan_panel(&mut lines, plan, theme);
+        }
     }
 
     // Spinner (thinking indicator)
@@ -829,6 +1191,23 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
             format!("  {}", state.spinner.display()),
             Style::default().fg(theme.spinner_fg),
         )));
+    }
+
+    // Background-goal activity indicator. Goals run independently of the
+    // foreground turn, so the normal spinner above is silent while a goal
+    // churns. Show an animated line here whenever there are live goals so the
+    // user can see work is happening before the final checkpoint lands. The
+    // detailed progress remains available via `/goal` / `/goal-check`.
+    {
+        let blurb = state.goal_status_blurb.lock().clone();
+        if !blurb.is_empty() {
+            let frame = super::spinner::SPINNER_FRAMES
+                [state.goal_anim_frame % super::spinner::SPINNER_FRAMES.len()];
+            lines.push(Line::from(Span::styled(
+                format!("  {frame} {blurb}  (/goal to manage)"),
+                Style::default().fg(theme.spinner_fg),
+            )));
+        }
     }
 
     // Estimate total visual lines after word-wrapping. Without this, the raw
@@ -916,13 +1295,139 @@ fn render_conversation(frame: &mut Frame, area: Rect, state: &mut AppState, them
         let mut scrollbar_state = ScrollbarState::new(content_size).position(scroll_start);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+            .end_symbol(Some("▼"))
+            .thumb_style(Style::default().fg(theme.accent))
+            .track_style(Style::default().fg(theme.scrollbar_fg));
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
 
+/// Render the model's live, intermediate reasoning as dimmed italic lines so
+/// the user can follow the thought process behind tool calls. Ephemeral —
+/// cleared once the visible answer or a tool result supersedes it.
+fn render_thinking(lines: &mut Vec<Line>, text: &str, theme: &Theme) {
+    lines.push(Line::from(Span::styled(
+        "  💭 thinking",
+        Style::default()
+            .fg(theme.muted_fg)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+    )));
+    // Only show the tail so a long reasoning trace never floods the viewport.
+    let collected: Vec<&str> = text.lines().collect();
+    let start = collected.len().saturating_sub(12);
+    for line in &collected[start..] {
+        lines.push(Line::from(Span::styled(
+            format!("    {}", sanitize_for_tui(line)),
+            Style::default()
+                .fg(theme.muted_fg)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+}
+
+/// Render the persistent task plan as a live checklist whose steps tick off in
+/// real time (the equivalent of Claude Code / Codex's task manager panel).
+fn render_plan_panel(lines: &mut Vec<Line>, plan: &crate::session::TaskPlan, theme: &Theme) {
+    use crate::session::StepStatus;
+
+    let (done, total) = plan.progress();
+    let title = if plan.title.is_empty() {
+        "Plan"
+    } else {
+        &plan.title
+    };
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "● ",
+            Style::default()
+                .fg(theme.prompt_fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme.fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  ({done}/{total})"),
+            Style::default().fg(theme.muted_fg),
+        ),
+    ]));
+
+    let multi_task = plan.tasks.len() > 1;
+    let max_step_lines: usize = 24;
+    let mut emitted = 0usize;
+
+    for task in &plan.tasks {
+        if multi_task {
+            let (td, tn) = task.step_progress();
+            lines.push(Line::from(vec![
+                Span::styled("  └ ", Style::default().fg(theme.border_fg)),
+                Span::styled(
+                    sanitize_for_tui(&task.subject),
+                    Style::default()
+                        .fg(theme.assistant_msg_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  ({td}/{tn})"),
+                    Style::default().fg(theme.muted_fg),
+                ),
+            ]));
+        }
+        for step in &task.steps {
+            if emitted >= max_step_lines {
+                lines.push(Line::from(Span::styled(
+                    "    …".to_string(),
+                    Style::default().fg(theme.muted_fg),
+                )));
+                break;
+            }
+            emitted += 1;
+            let (fg, modifier) = match step.status {
+                StepStatus::InProgress => (theme.tool_name_fg, Modifier::BOLD),
+                StepStatus::Completed => (theme.added_fg, Modifier::empty()),
+                StepStatus::Blocked => (theme.error_fg, Modifier::BOLD),
+                StepStatus::Pending => (theme.muted_fg, Modifier::empty()),
+            };
+            let indent = if multi_task { "      " } else { "    " };
+            let mut spans = vec![
+                Span::styled(
+                    format!("{indent}{} ", step.status.checkbox()),
+                    Style::default().fg(fg),
+                ),
+                Span::styled(
+                    sanitize_for_tui(&step.content),
+                    Style::default().fg(fg).add_modifier(modifier),
+                ),
+            ];
+            if let Some(note) = &step.note {
+                spans.push(Span::styled(
+                    format!("  — {}", sanitize_for_tui(note)),
+                    Style::default()
+                        .fg(theme.muted_fg)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        if emitted >= max_step_lines {
+            break;
+        }
+    }
+    lines.push(Line::from(""));
+}
+
 /// Render assistant message content with basic markdown support.
 fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme) {
+    // Strip control characters (\r, \t, …) up front so pasted code or
+    // tool-echoed text can never corrupt terminal rendering or width math.
+    let content = sanitize_for_tui(content);
+    let content = content.as_str();
+
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut in_math_block = false;
@@ -1021,8 +1526,10 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    heading.to_string(),
-                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                    strip_inline_markers(heading),
+                    Style::default()
+                        .fg(theme.accent_bright)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
             continue;
@@ -1031,7 +1538,7 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    heading.to_string(),
+                    strip_inline_markers(heading),
                     Style::default()
                         .fg(theme.tool_name_fg)
                         .add_modifier(Modifier::BOLD),
@@ -1043,7 +1550,7 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    heading.to_string(),
+                    strip_inline_markers(heading),
                     Style::default()
                         .fg(theme.warning_fg)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -1102,17 +1609,26 @@ fn render_assistant_content(lines: &mut Vec<Line>, content: &str, theme: &Theme)
     }
 }
 
-/// Parse a line with inline markdown: **bold**, `code`, *italic*.
-/// Returns a Vec of Spans with appropriate styles.
+/// Parse a line with inline markdown: `**bold**`, `__bold__`, `*italic*`,
+/// `_italic_`, `` `code` ``, and inline math (`\( … \)`, `$ … $`).
+///
+/// Emphasis is only applied when a **matching closing marker exists on the
+/// line**; an unmatched marker (e.g. a stray `**`) is emitted as literal text
+/// rather than greedily swallowing the rest of the line or being dropped. This
+/// is the fix for `**bold**` rendering literally / inconsistently in list items
+/// and headings: the previous scanner advanced past the opening marker
+/// unconditionally and used an off-by-one (`i + 1 < len`) closing test that
+/// mishandled markers landing at the end of the string.
 fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
     let mut i = 0;
     let mut current = String::new();
 
-    while i < chars.len() {
+    while i < n {
         // Inline math: \( ... \)
-        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '(' {
+        if chars[i] == '\\' && i + 1 < n && chars[i + 1] == '(' {
             if let Some(end) = find_latex_inline_end(&chars, i + 2) {
                 push_plain_span(&mut spans, &mut current, theme);
                 let expr: String = chars[i + 2..end].iter().collect();
@@ -1123,7 +1639,7 @@ fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         }
 
         // Inline math: $ ... $. Avoid treating $$ display delimiters as inline.
-        if chars[i] == '$' && (i + 1 >= chars.len() || chars[i + 1] != '$') {
+        if chars[i] == '$' && (i + 1 >= n || chars[i + 1] != '$') {
             if let Some(end) = find_dollar_inline_end(&chars, i + 1) {
                 let expr: String = chars[i + 1..end].iter().collect();
                 if !expr.trim().is_empty() {
@@ -1135,89 +1651,65 @@ fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
             }
         }
 
-        // **bold** or __bold__
-        if i + 1 < chars.len()
+        // **bold** or __bold__ — only when a matching closing pair exists.
+        if i + 1 < n
             && ((chars[i] == '*' && chars[i + 1] == '*')
                 || (chars[i] == '_' && chars[i + 1] == '_'))
         {
             let marker = chars[i];
-            if !current.is_empty() {
+            if let Some(close) = find_double_marker(&chars, i + 2, marker) {
+                push_plain_span(&mut spans, &mut current, theme);
+                let inner: String = chars[i + 2..close].iter().collect();
                 spans.push(Span::styled(
-                    current.clone(),
-                    Style::default().fg(theme.assistant_msg_fg),
+                    inner,
+                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 ));
-                current.clear();
+                i = close + 2; // skip past the closing marker pair
+                continue;
             }
+            // Unmatched — render the two marker chars literally.
+            current.push(chars[i]);
+            current.push(chars[i + 1]);
             i += 2;
-            while i + 1 < chars.len() && !(chars[i] == marker && chars[i + 1] == marker) {
-                current.push(chars[i]);
-                i += 1;
-            }
-            spans.push(Span::styled(
-                current.clone(),
-                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-            ));
-            current.clear();
-            if i + 1 < chars.len() {
-                i += 2; // skip closing ** or __
-            }
             continue;
         }
 
-        // *italic* or _italic_ (single)
+        // *italic* or _italic_ — single marker, needs a non-space start and a
+        // matching closing marker on the line.
         if (chars[i] == '*' || chars[i] == '_')
-            && (i == 0 || chars[i - 1] != chars[i])
-            && i + 1 < chars.len()
+            && i + 1 < n
             && chars[i + 1] != ' '
+            && (i == 0 || chars[i - 1] != chars[i])
         {
             let marker = chars[i];
-            if !current.is_empty() {
+            if let Some(close) = find_single_marker(&chars, i + 1, marker) {
+                push_plain_span(&mut spans, &mut current, theme);
+                let inner: String = chars[i + 1..close].iter().collect();
                 spans.push(Span::styled(
-                    current.clone(),
-                    Style::default().fg(theme.assistant_msg_fg),
+                    inner,
+                    Style::default()
+                        .fg(theme.assistant_msg_fg)
+                        .add_modifier(Modifier::ITALIC),
                 ));
-                current.clear();
+                i = close + 1;
+                continue;
             }
+            current.push(chars[i]);
             i += 1;
-            while i < chars.len() && chars[i] != marker {
-                current.push(chars[i]);
-                i += 1;
-            }
-            spans.push(Span::styled(
-                current.clone(),
-                Style::default()
-                    .fg(theme.assistant_msg_fg)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-            current.clear();
-            if i < chars.len() {
-                i += 1;
-            }
             continue;
         }
 
         // `inline code`
         if chars[i] == '`' {
-            if !current.is_empty() {
-                spans.push(Span::styled(
-                    current.clone(),
-                    Style::default().fg(theme.assistant_msg_fg),
-                ));
-                current.clear();
+            if let Some(close) = find_single_marker(&chars, i + 1, '`') {
+                push_plain_span(&mut spans, &mut current, theme);
+                let inner: String = chars[i + 1..close].iter().collect();
+                spans.push(Span::styled(inner, Style::default().fg(theme.added_fg)));
+                i = close + 1;
+                continue;
             }
+            current.push('`');
             i += 1;
-            while i < chars.len() && chars[i] != '`' {
-                current.push(chars[i]);
-                i += 1;
-            }
-            spans.push(Span::styled(
-                current.clone(),
-                Style::default().fg(theme.added_fg),
-            ));
-            current.clear();
-            if i < chars.len() {
-                i += 1;
-            }
             continue;
         }
 
@@ -1225,14 +1717,38 @@ fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         i += 1;
     }
 
-    if !current.is_empty() {
-        spans.push(Span::styled(
-            current,
-            Style::default().fg(theme.assistant_msg_fg),
-        ));
-    }
-
+    push_plain_span(&mut spans, &mut current, theme);
     spans
+}
+
+/// Index of the next `marker marker` pair at or after `from`, or None.
+fn find_double_marker(chars: &[char], from: usize, marker: char) -> Option<usize> {
+    let mut j = from;
+    while j + 1 < chars.len() {
+        if chars[j] == marker && chars[j + 1] == marker {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Index of the next single `marker` at or after `from`, or None.
+fn find_single_marker(chars: &[char], from: usize, marker: char) -> Option<usize> {
+    let mut j = from;
+    while j < chars.len() {
+        if chars[j] == marker {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Strip paired emphasis/code markers from a heading line so `## **Title**`
+/// renders as a bold heading without literal `**`/`` ` `` showing through.
+fn strip_inline_markers(s: &str) -> String {
+    s.replace("**", "").replace("__", "").replace('`', "")
 }
 
 fn push_plain_span(spans: &mut Vec<Span<'static>>, current: &mut String, theme: &Theme) {
@@ -1765,7 +2281,7 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
                         let max_preview = 25;
                         for content_line in content_lines.iter().take(max_preview) {
                             lines.push(Line::from(Span::styled(
-                                format!("      {content_line}"),
+                                format!("      {}", sanitize_for_tui(content_line)),
                                 Style::default().fg(theme.added_fg),
                             )));
                         }
@@ -1785,7 +2301,7 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
                                 format!("    {key}: "),
                                 Style::default().fg(theme.tool_name_fg),
                             ),
-                            Span::styled(s.clone(), Style::default().fg(theme.fg)),
+                            Span::styled(sanitize_for_tui(s), Style::default().fg(theme.fg)),
                         ]));
                     }
                     _ => {
@@ -1794,7 +2310,10 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
                                 format!("    {key}: "),
                                 Style::default().fg(theme.tool_name_fg),
                             ),
-                            Span::styled(value.to_string(), Style::default().fg(theme.fg)),
+                            Span::styled(
+                                sanitize_for_tui(&value.to_string()),
+                                Style::default().fg(theme.fg),
+                            ),
                         ]));
                     }
                 }
@@ -1804,7 +2323,7 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
         // Not JSON, show as-is (truncated)
         for line in json_str.lines().take(10) {
             lines.push(Line::from(Span::styled(
-                format!("    {line}"),
+                format!("    {}", sanitize_for_tui(line)),
                 Style::default().fg(theme.muted_fg),
             )));
         }
@@ -1816,38 +2335,7 @@ fn render_tool_input(lines: &mut Vec<Line>, json_str: &str, theme: &Theme) {
 // ---------------------------------------------------------------------------
 
 fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let inner_width = area.width.saturating_sub(4) as usize;
-    let inner_height = area.height.saturating_sub(1) as usize;
-
-    let (display_text, text_style, cursor) = if state.input.text.is_empty() {
-        if state.agent_busy {
-            (
-                "Agent is working... (Ctrl+C to cancel)".to_string(),
-                Style::default().fg(theme.muted_fg),
-                None,
-            )
-        } else {
-            (
-                "Type a message or /help for commands...".to_string(),
-                Style::default().fg(theme.muted_fg),
-                None,
-            )
-        }
-    } else {
-        let viewport = input_viewport(
-            &state.input.text,
-            state.input.cursor,
-            state.input.scroll_top,
-            inner_height.max(1),
-            inner_width.max(1),
-        );
-        (
-            viewport.text,
-            Style::default().fg(theme.fg),
-            Some((viewport.cursor_x, viewport.cursor_y)),
-        )
-    };
-
+    // Draw the top rule + prompt first, then the text into a padded inner area.
     let title = if state.agent_busy {
         Span::styled(
             " ⏳ ",
@@ -1858,30 +2346,66 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) 
     } else {
         Span::styled(
             " ❯ ",
-            Style::default()
-                .fg(theme.prompt_fg)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )
+    };
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme.accent_dim))
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // One column of breathing room on each side; the text origin and the
+    // cursor share this exact rect so the caret always sits on its character.
+    let text_area = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height,
+    };
+    let cols = text_area.width as usize;
+    let rows = text_area.height as usize;
+
+    let (display_text, text_style, cursor) = if state.input.text.is_empty() {
+        let placeholder = if state.agent_busy {
+            "Agent is working... (Ctrl+C to cancel)"
+        } else {
+            "Type a message or /help for commands..."
+        };
+        (
+            placeholder.to_string(),
+            Style::default().fg(theme.faint_fg),
+            None,
+        )
+    } else {
+        let viewport = input_viewport(
+            &state.input.text,
+            state.input.cursor,
+            state.input.scroll_top,
+            rows.max(1),
+            cols.max(1),
+        );
+        (
+            viewport.text,
+            Style::default().fg(theme.fg),
+            Some((viewport.cursor_x, viewport.cursor_y)),
         )
     };
 
-    let input = Paragraph::new(display_text)
+    let para = Paragraph::new(display_text)
         .style(text_style)
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border_fg))
-                .title(title),
-        )
         .wrap(Wrap { trim: false });
-
-    frame.render_widget(input, area);
+    frame.render_widget(para, text_area);
 
     if let Some((x, y)) = cursor {
-        let cursor_x = (area.x + 1 + x as u16).min(area.x + area.width.saturating_sub(2));
-        let cursor_y = (area.y + 1 + y as u16).min(area.y + area.height.saturating_sub(1));
+        let max_x = text_area.x + text_area.width.saturating_sub(1);
+        let max_y = text_area.y + text_area.height.saturating_sub(1);
+        let cursor_x = (text_area.x + x as u16).min(max_x);
+        let cursor_y = (text_area.y + y as u16).min(max_y);
         frame.set_cursor_position((cursor_x, cursor_y));
     } else {
-        frame.set_cursor_position((area.x + 1, area.y + 1));
+        frame.set_cursor_position((text_area.x, text_area.y));
     }
 }
 
@@ -1891,6 +2415,13 @@ struct InputViewport {
     cursor_y: usize,
 }
 
+/// Lay the input text out into visual rows that **soft-wrap** at
+/// `visible_cols`, then vertically scroll so the cursor row stays in view.
+///
+/// Each explicit `\n` is a hard break (so multi-line / clipboard paste keeps
+/// its line structure); any logical line longer than the box width flows onto
+/// the next visual row instead of scrolling horizontally and hiding the start
+/// of the prompt. `cursor` is a **byte** offset into `text`.
 fn input_viewport(
     text: &str,
     cursor: usize,
@@ -1898,83 +2429,80 @@ fn input_viewport(
     visible_rows: usize,
     visible_cols: usize,
 ) -> InputViewport {
-    let (cursor_line, cursor_col) = cursor_line_col(text, cursor);
-    let total_lines = text.split('\n').count().max(1);
-    let max_scroll = total_lines.saturating_sub(visible_rows);
-    let mut start_line = scroll_top.min(max_scroll);
-    if cursor_line < start_line {
-        start_line = cursor_line;
-    } else if cursor_line >= start_line.saturating_add(visible_rows) {
-        start_line = cursor_line.saturating_add(1).saturating_sub(visible_rows);
+    let cols = visible_cols.max(1);
+    let rows_visible = visible_rows.max(1);
+
+    // Clamp the cursor to a char boundary (defensive against mid-UTF-8 indices).
+    let mut cur = cursor.min(text.len());
+    while cur > 0 && !text.is_char_boundary(cur) {
+        cur -= 1;
     }
 
-    let horizontal_offset = if visible_cols > 0 && cursor_col >= visible_cols {
-        cursor_col.saturating_sub(visible_cols).saturating_add(1)
-    } else {
-        0
-    };
+    // Single pass: build wrapped visual rows AND locate the cursor's
+    // (visual_row, visual_col). The cursor is recorded *after* any soft-wrap
+    // decision for the current char, so a cursor sitting exactly on a wrap
+    // boundary lands at column 0 of the next row (standard editor behaviour).
+    let mut rows: Vec<String> = Vec::new();
+    let mut cur_row = String::new();
+    let mut cur_w = 0usize;
+    let mut byte = 0usize;
+    let mut cursor_vr = 0usize;
+    let mut cursor_vc = 0usize;
+    let mut cursor_set = false;
 
-    let mut rendered = Vec::new();
-    for (line_idx, line) in text
-        .split('\n')
-        .enumerate()
-        .skip(start_line)
-        .take(visible_rows)
-    {
-        if line_idx == cursor_line {
-            rendered.push(slice_by_display_width(
-                line,
-                horizontal_offset,
-                visible_cols,
-            ));
-        } else {
-            rendered.push(slice_by_display_width(line, 0, visible_cols));
+    for ch in text.chars() {
+        if ch == '\n' {
+            if !cursor_set && byte == cur {
+                cursor_vr = rows.len();
+                cursor_vc = cur_w;
+                cursor_set = true;
+            }
+            rows.push(std::mem::take(&mut cur_row));
+            cur_w = 0;
+            byte += 1;
+            continue;
         }
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_w + w > cols && cur_w > 0 {
+            rows.push(std::mem::take(&mut cur_row));
+            cur_w = 0;
+        }
+        if !cursor_set && byte == cur {
+            cursor_vr = rows.len();
+            cursor_vc = cur_w;
+            cursor_set = true;
+        }
+        cur_row.push(ch);
+        cur_w += w;
+        byte += ch.len_utf8();
     }
+    if !cursor_set {
+        // Cursor at end of text.
+        cursor_vr = rows.len();
+        cursor_vc = cur_w;
+    }
+    rows.push(cur_row);
+
+    // Vertical scroll so the cursor row is visible.
+    let max_scroll = rows.len().saturating_sub(rows_visible);
+    let mut start = scroll_top.min(max_scroll);
+    if cursor_vr < start {
+        start = cursor_vr;
+    } else if cursor_vr >= start + rows_visible {
+        start = cursor_vr + 1 - rows_visible;
+    }
+
+    let rendered: Vec<String> = rows
+        .into_iter()
+        .skip(start)
+        .take(rows_visible)
+        .collect();
 
     InputViewport {
         text: rendered.join("\n"),
-        cursor_x: cursor_col
-            .saturating_sub(horizontal_offset)
-            .min(visible_cols),
-        cursor_y: cursor_line
-            .saturating_sub(start_line)
-            .min(visible_rows.saturating_sub(1)),
+        cursor_x: cursor_vc.min(cols),
+        cursor_y: cursor_vr.saturating_sub(start).min(rows_visible - 1),
     }
-}
-
-fn cursor_line_col(text: &str, cursor: usize) -> (usize, usize) {
-    let mut safe_cursor = cursor.min(text.len());
-    while safe_cursor > 0 && !text.is_char_boundary(safe_cursor) {
-        safe_cursor -= 1;
-    }
-    let before = &text[..safe_cursor];
-    let line = before.chars().filter(|&c| c == '\n').count();
-    let last_line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let col = unicode_width::UnicodeWidthStr::width(&before[last_line_start..]);
-    (line, col)
-}
-
-fn slice_by_display_width(line: &str, start_col: usize, max_cols: usize) -> String {
-    if max_cols == 0 {
-        return String::new();
-    }
-
-    let mut out = String::new();
-    let mut col = 0usize;
-    for ch in line.chars() {
-        let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col.saturating_add(width) <= start_col {
-            col = col.saturating_add(width);
-            continue;
-        }
-        if unicode_width::UnicodeWidthStr::width(out.as_str()).saturating_add(width) > max_cols {
-            break;
-        }
-        out.push(ch);
-        col = col.saturating_add(width);
-    }
-    out
 }
 
 /// Count the number of rendered lines the input text will take.
@@ -2003,6 +2531,21 @@ fn count_input_lines(text: &str, wrap_width: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    // Transient toast (e.g. image-paste feedback) takes over the bar briefly.
+    if let Some((msg, _)) = &state.toast {
+        let base = Style::default().bg(theme.status_bg);
+        frame.render_widget(Block::default().style(base), area);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {msg}"),
+                base.fg(theme.accent_bright).add_modifier(Modifier::BOLD),
+            )))
+            .style(base),
+            area,
+        );
+        return;
+    }
+
     let trust = if state.trust_mode { "ON" } else { "OFF" };
 
     let scroll_info = if state.total_lines > state.visible_height {
@@ -2040,19 +2583,71 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         }
     };
 
-    let status = format!(
-        " ^C Cancel  ^O Model  ^P Provider  ^K Keys  ^B Cost  ^R Theme  ^T Trust[{trust}]  /help Cmds{skill_indicator}{goal_indicator}{scroll_info}{unread_indicator}"
-    );
+    let bg = theme.status_bg;
+    let base = Style::default().bg(bg);
+    let keycap = base.fg(theme.accent).add_modifier(Modifier::BOLD);
+    let lbl = base.fg(theme.status_fg);
 
-    let bar =
-        Paragraph::new(status).style(Style::default().fg(theme.status_fg).bg(theme.status_bg));
+    // Build the `^`-key legend as alternating accent-keycap / dim-label spans.
+    let mut spans: Vec<Span> = Vec::new();
+    let mut shortcut = |spans: &mut Vec<Span>, k: &'static str, name: &'static str| {
+        spans.push(Span::styled(format!(" {k} "), keycap));
+        spans.push(Span::styled(name, lbl));
+    };
+    shortcut(&mut spans, "^C", "Cancel");
+    shortcut(&mut spans, "^O", "Model");
+    shortcut(&mut spans, "^P", "Provider");
+    shortcut(&mut spans, "^K", "Keys");
+    shortcut(&mut spans, "^B", "Cost");
+    shortcut(&mut spans, "^R", "Theme");
+    // Trust toggle with on/off colouring.
+    spans.push(Span::styled(" ^T ", keycap));
+    spans.push(Span::styled("Trust[", lbl));
+    spans.push(Span::styled(
+        trust,
+        if state.trust_mode {
+            base.fg(theme.ok_fg).add_modifier(Modifier::BOLD)
+        } else {
+            base.fg(theme.faint_fg)
+        },
+    ));
+    spans.push(Span::styled("]", lbl));
+    spans.push(Span::styled("  /help ", base.fg(theme.accent_bright)));
+    spans.push(Span::styled("Cmds", lbl));
 
-    frame.render_widget(bar, area);
+    if !skill_indicator.is_empty() {
+        spans.push(Span::styled(skill_indicator, base.fg(theme.user_msg_fg)));
+    }
+    if !goal_indicator.is_empty() {
+        spans.push(Span::styled(goal_indicator, base.fg(theme.accent_bright)));
+    }
+    if !scroll_info.is_empty() {
+        spans.push(Span::styled(scroll_info, base.fg(theme.faint_fg)));
+    }
+    if !unread_indicator.is_empty() {
+        spans.push(Span::styled(
+            unread_indicator,
+            base.fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    frame.render_widget(Block::default().style(base), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(base), area);
 }
 
 // ---------------------------------------------------------------------------
 // Modals
 // ---------------------------------------------------------------------------
+
+/// Shared rounded modal frame: warm accent-dim border + filled overlay body.
+/// Callers add their own `.title(...)` (an accent-styled `Line`).
+fn themed_modal_block<'a>(theme: &Theme) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_dim))
+        .style(Style::default().bg(theme.modal_bg))
+}
 
 fn render_confirmation(
     frame: &mut Frame,
@@ -2064,17 +2659,66 @@ fn render_confirmation(
     let area = centered_rect(78, 72, frame.area());
     frame.render_widget(Clear, area);
 
-    let text = format!(
-        "Permission Required\n\nTool: {tool_name}\n\n{description}\n\n[Y/Enter] Allow  [N/Esc] Deny  [A] Always Allow  [T] Trust Mode\n[↑/↓ PgUp/PgDn] Scroll"
-    );
+    let muted = Style::default().fg(theme.muted_fg);
+    let mut body: Vec<Line> = Vec::new();
+    body.push(Line::from(Span::styled(
+        "⚠ Permission Required",
+        Style::default()
+            .fg(theme.warning_fg)
+            .add_modifier(Modifier::BOLD),
+    )));
+    body.push(Line::from(""));
+    body.push(Line::from(vec![
+        Span::styled("Tool  ", muted),
+        Span::styled(
+            tool_name.to_string(),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    body.push(Line::from(""));
+    for l in description.lines() {
+        body.push(Line::from(Span::styled(
+            sanitize_for_tui(l),
+            Style::default().fg(theme.fg),
+        )));
+    }
+    body.push(Line::from(""));
+    // Action key legend with accent keycaps.
+    let kc = |k: &'static str, name: &'static str| {
+        vec![
+            Span::styled(
+                format!(" {k} "),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{name}   "), muted),
+        ]
+    };
+    let mut keys: Vec<Span> = Vec::new();
+    keys.extend(kc("Y", "Allow"));
+    keys.extend(kc("N", "Deny"));
+    keys.extend(kc("A", "Always"));
+    keys.extend(kc("T", "Trust"));
+    body.push(Line::from(keys));
+    body.push(Line::from(Span::styled(
+        "↑↓ / PgUp PgDn  scroll",
+        Style::default().fg(theme.faint_fg),
+    )));
 
-    let dialog = Paragraph::new(text)
-        .style(Style::default().fg(theme.warning_fg))
+    let title = Line::from(Span::styled(
+        " Confirm Action ",
+        Style::default()
+            .fg(theme.warning_fg)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let dialog = Paragraph::new(body)
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.warning_fg))
-                .title(" Confirm Action "),
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+                .title(title),
         )
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
@@ -2118,7 +2762,10 @@ fn render_paste_confirm(frame: &mut Frame, paste: &super::PasteConfirmState, the
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.warning_fg))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.warning_fg).add_modifier(Modifier::BOLD))
                 .title(" Large Clipboard Paste "),
         )
         .wrap(Wrap { trim: false });
@@ -2143,7 +2790,10 @@ fn render_help(frame: &mut Frame, theme: &Theme, h: &HelpState) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(" Help  ↑↓/jk scroll · PgUp/PgDn page · g/G top/bottom · Esc close "),
         )
         .wrap(Wrap { trim: false })
@@ -2156,7 +2806,9 @@ fn render_help(frame: &mut Frame, theme: &Theme, h: &HelpState) {
         let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+            .end_symbol(Some("▼"))
+            .thumb_style(Style::default().fg(theme.accent))
+            .track_style(Style::default().fg(theme.scrollbar_fg));
         frame.render_stateful_widget(sb, area, &mut sb_state);
     }
 }
@@ -2176,7 +2828,10 @@ fn render_detail_viewer(frame: &mut Frame, dv: &DetailViewerState, theme: &Theme
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(title),
         )
         .wrap(Wrap { trim: false })
@@ -2187,7 +2842,9 @@ fn render_detail_viewer(frame: &mut Frame, dv: &DetailViewerState, theme: &Theme
         let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
+            .end_symbol(Some("▼"))
+            .thumb_style(Style::default().fg(theme.accent))
+            .track_style(Style::default().fg(theme.scrollbar_fg));
         frame.render_stateful_widget(sb, area, &mut sb_state);
     }
 }
@@ -2220,7 +2877,10 @@ fn render_generated_skill_preview(
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.spinner_fg))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(title),
         )
         .wrap(Wrap { trim: false })
@@ -2255,7 +2915,10 @@ fn render_rename_session(frame: &mut Frame, input: &str, theme: &Theme) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.spinner_fg))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(" Rename session  (Esc to cancel) "),
         )
         .wrap(Wrap { trim: false });
@@ -2286,7 +2949,10 @@ fn render_skill_browser(frame: &mut Frame, browser: &SkillBrowserState, theme: &
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                     .title(title),
             )
             .wrap(Wrap { trim: false });
@@ -2328,7 +2994,10 @@ fn render_skill_browser(frame: &mut Frame, browser: &SkillBrowserState, theme: &
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
             .title(title),
     );
 
@@ -2377,32 +3046,53 @@ fn render_picker(frame: &mut Frame, picker: &super::picker::PickerState, theme: 
     let items: Vec<ListItem> = filtered
         .iter()
         .map(|item| {
-            let active_mark = if item.connected { "●" } else { "○" };
-            let text = format!(
-                " {active_mark} {:<20} {:<30} {}",
-                item.provider_name, item.model_name, item.cost_display
-            );
-            ListItem::new(text).style(Style::default().fg(theme.fg))
+            let (mark, mark_style) = if item.connected {
+                ("●", Style::default().fg(theme.ok_fg))
+            } else {
+                ("○", Style::default().fg(theme.faint_fg))
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {mark} "), mark_style),
+                Span::styled(
+                    format!("{:<20}", item.provider_name),
+                    Style::default().fg(theme.accent_bright),
+                ),
+                Span::styled(
+                    format!("{:<30}", item.model_name),
+                    Style::default().fg(theme.fg),
+                ),
+                Span::styled(
+                    item.cost_display.clone(),
+                    Style::default().fg(theme.user_msg_fg),
+                ),
+            ]);
+            ListItem::new(line)
         })
         .collect();
 
     let title = if picker.filtering {
-        format!(" Models  filter: {} ", picker.filter)
+        Line::from(vec![
+            Span::styled(" Models ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" filter: ", Style::default().fg(theme.muted_fg)),
+            Span::styled(format!("{} ", picker.filter), Style::default().fg(theme.accent_bright)),
+        ])
     } else {
-        " Models  / filter   ↑↓ navigate   Enter select   Esc close ".to_string()
+        Line::from(vec![
+            Span::styled(" Models ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " / filter   ↑↓ navigate   Enter select   Esc close ",
+                Style::default().fg(theme.faint_fg),
+            ),
+        ])
     };
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border_fg))
-                .title(title),
-        )
+        .block(themed_modal_block(theme).title(title))
+        .highlight_symbol("▎")
         .highlight_style(
             Style::default()
-                .fg(theme.fg)
-                .bg(theme.highlight_bg)
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -2453,7 +3143,10 @@ fn render_token_info(frame: &mut Frame, state: &AppState, theme: &Theme) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(" Token Info "),
         )
         .wrap(Wrap { trim: false });
@@ -2494,7 +3187,10 @@ fn render_key_manager(frame: &mut Frame, km: &KeyManagerState, theme: &Theme) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(theme.warning_fg))
+                    .style(Style::default().bg(theme.modal_bg))
+                    .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                     .title(" Set API Key "),
             )
             .wrap(Wrap { trim: false });
@@ -2530,7 +3226,10 @@ fn render_key_manager(frame: &mut Frame, km: &KeyManagerState, theme: &Theme) {
         let list = List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(" API Keys   Enter/e Set   d/Del Remove   Esc/q Close "),
         );
 
@@ -2566,7 +3265,10 @@ fn render_custom_model_input(
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.spinner_fg))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 .title(" Add Custom Model "),
         )
         .wrap(Wrap { trim: false });
@@ -2598,7 +3300,10 @@ fn render_session_browser(frame: &mut Frame, browser: &SessionBrowserState, them
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                     .title(title),
             )
             .wrap(Wrap { trim: false });
@@ -2642,7 +3347,10 @@ fn render_session_browser(frame: &mut Frame, browser: &SessionBrowserState, them
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border_fg))
+                .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
             .title(title),
     );
 
@@ -2682,6 +3390,70 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Concatenate the textual content of all spans (ignoring styling).
+    fn spans_text(spans: &[Span<'static>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// True if the span carrying `needle` is bold.
+    fn needle_is_bold(spans: &[Span<'static>], needle: &str) -> bool {
+        spans
+            .iter()
+            .any(|s| s.content.contains(needle) && s.style.add_modifier.contains(Modifier::BOLD))
+    }
+
+    #[test]
+    fn bold_at_end_of_line_has_no_literal_stars() {
+        let theme = Theme::molten_rust();
+        // Numbered-heading style content: the whole line is one bold run ending
+        // exactly at the string boundary.
+        let spans = parse_inline_markdown(
+            "**Comprehensive Feature Ideation (Strictly Planning Mode)**",
+            &theme,
+        );
+        let text = spans_text(&spans);
+        assert!(!text.contains("**"), "literal ** leaked: {text:?}");
+        assert_eq!(text, "Comprehensive Feature Ideation (Strictly Planning Mode)");
+        assert!(needle_is_bold(&spans, "Comprehensive"));
+    }
+
+    #[test]
+    fn bold_then_trailing_text_renders_clean() {
+        let theme = Theme::molten_rust();
+        let spans = parse_inline_markdown("**Entered Planning Mode**: Activated read-only", &theme);
+        let text = spans_text(&spans);
+        assert!(!text.contains("**"), "literal ** leaked: {text:?}");
+        assert!(text.starts_with("Entered Planning Mode"));
+        assert!(text.ends_with(": Activated read-only"));
+        assert!(needle_is_bold(&spans, "Entered Planning Mode"));
+    }
+
+    #[test]
+    fn unmatched_double_star_is_literal_not_swallowed() {
+        let theme = Theme::molten_rust();
+        let spans = parse_inline_markdown("a ** b without close", &theme);
+        let text = spans_text(&spans);
+        assert_eq!(text, "a ** b without close");
+        // Nothing should have been bolded.
+        assert!(!spans
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+    }
+
+    #[test]
+    fn inline_code_and_italic_render() {
+        let theme = Theme::molten_rust();
+        let spans = parse_inline_markdown("use `cargo build` and *care*", &theme);
+        let text = spans_text(&spans);
+        assert_eq!(text, "use cargo build and care");
+    }
+
+    #[test]
+    fn heading_markers_are_stripped() {
+        assert_eq!(strip_inline_markers("**Multi-Agent Architecture**"), "Multi-Agent Architecture");
+        assert_eq!(strip_inline_markers("plain heading"), "plain heading");
+    }
 
     #[test]
     fn normalizes_johnson_lindenstrauss_math() {

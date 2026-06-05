@@ -190,6 +190,9 @@ fn translate(ev: AgentEvent) -> Vec<OutboundEvent> {
             },
             kind: "info".into(),
         }],
+        AgentEvent::PlanUpdated { plan } => vec![OutboundEvent::PlanUpdated {
+            plan: serde_json::to_value(&plan).unwrap_or(serde_json::Value::Null),
+        }],
     }
 }
 

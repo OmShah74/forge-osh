@@ -25,6 +25,7 @@ fn test_ctx(dir: &Path) -> ToolContext {
         skill_registry: None,
         output_chunk_tx: None,
         tool_call_id: None,
+        team_blackboard: None,
     }
 }
 

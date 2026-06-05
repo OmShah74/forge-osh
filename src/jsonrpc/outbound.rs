@@ -82,6 +82,11 @@ pub enum OutboundEvent {
         id: String,
         message_count: u32,
     },
+    /// The persistent task plan was created or updated. `plan` is the full
+    /// serialized `TaskPlan` so IDEs can render/refresh a live checklist.
+    PlanUpdated {
+        plan: serde_json::Value,
+    },
     SystemMessage {
         text: String,
         kind: String, // "info" | "warn" | "error"

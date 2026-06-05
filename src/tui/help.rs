@@ -1,6 +1,6 @@
 /// Help overlay content
 pub fn help_text() -> &'static str {
-    r#"forge-osh Help  (v1.0.21)
+    r#"forge-osh Help  (v1.0.22)
 
 SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen (scroll: ↑↓/jk, PgUp/PgDn, g/G)
@@ -11,7 +11,8 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /model <id>        Switch to model directly by ID or name
   /provider          Open provider selector
   /keys              Open API key manager
-  /theme [name]      Cycle theme or set by name (dark/light/dracula/nord/solarized)
+  /theme [name]      Cycle theme or set by name
+                       (molten-rust/fluid-green/liquid-blue/glittery-gold/bright-neon/fluid-purple)
   /trust             Toggle trust mode (skip permission prompts)
   /vim               Toggle vim normal mode (j/k scroll, g/G top/bottom, i/a insert)
   /fast              Toggle fast mode (optimized output display)
@@ -74,9 +75,15 @@ AGENT BEHAVIOUR
                        /permissions remove <index>
   /effort <1-5>      Set response effort level (1=minimal, 5=maximum)
   /copy              Copy last assistant response to clipboard
-  /team start <goal> Start an Agent Team board with parallel subtasks + review
+  /team start [swarm|orchestrator] <goal>
+                     Start an Agent Team. orchestrator (default) = bounded waves
+                     + central review; swarm = all peers at once, share via board
   /team status       Open the scrollable Agent Team task board
   /team stop         Stop team workers and save the board state
+
+  /goals             Open the goal manager (↑↓ nav, p pause, r resume, c clear, f finish)
+  /goal <objective>  Start a durable autonomous goal (needs [features] goals = true)
+  /goal-check [id]   Show a goal's latest checkpoint / metrics
 
   /forge-graph       Build semantic code graph for current project (enables graph_query tool)
   /forge-graph status     Show graph info (nodes, edges, age)
@@ -124,6 +131,13 @@ QUICK ACTIONS
   Ctrl+R    Cycle color theme           Ctrl+T    Toggle trust mode
   Ctrl+S    Save session                Ctrl+N    New session
   Ctrl+X    Export session to Markdown
+
+IMAGE PASTE  (vision models)
+  Alt+0     Paste latest clipboard image as [Image #id] at the cursor
+  Alt+1..9  Paste the 2nd..10th most-recent clipboard image
+            Images are sent in the order they appear in your text. On a model
+            without vision, sending is blocked and vision-capable models are
+            suggested (switch with Ctrl+O, your draft is kept).
 
 CONFIRMATION DIALOGS  (when agent requests permission)
   Y / Enter   Allow once                N / Esc   Deny

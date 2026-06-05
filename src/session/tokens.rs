@@ -39,8 +39,8 @@ impl TokenCounter {
         for m in messages {
             total = total.saturating_add(ROLE_OVERHEAD);
             match m {
-                Message::User(UserContent::Text(t)) => {
-                    total = total.saturating_add(Self::count_text(t));
+                Message::User(uc) => {
+                    total = total.saturating_add(Self::count_text(&uc.to_text()));
                 }
                 Message::Assistant(content) => {
                     if let Some(text) = content.text() {
