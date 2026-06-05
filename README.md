@@ -1,6 +1,7 @@
-# 🛠️ forge-osh (Open Source Harness)
-
 <div align="center">
+
+<img src="assets/forge-osh-logo.svg" alt="forge-osh" width="760"/>
+
   <h3>The Universal, Provider-Agnostic Coding Agent for the Terminal</h3>
   <p>An autonomous AI coding assistant that works with <strong>any LLM provider</strong> — cloud or local.<br/>
   Built in Rust for speed. Designed for developers who live in the terminal.</p>
@@ -163,9 +164,11 @@
 |---|---|
 | **Providers** | 12+ cloud providers, 6 local providers, auto-detection of local models |
 | **Tools** | 40+ tools: file I/O, shell, Git (14 ops), search, web, code quality, tasks, notebooks, worktrees |
-| **Agent** | Autonomous plan-execute-observe loop with `enter_plan_mode` / `exit_plan_mode` |
-| **TUI** | 5 color themes, Vim normal mode, mouse scroll, conversation history, modal pickers |
-| **Input** | Bracketed paste, multiline prompts, long-paste context preflight, overflow warnings |
+| **Agent** | Autonomous plan-execute-observe loop with a live `update_plan` task checklist + `enter_plan_mode` / `exit_plan_mode` |
+| **Multi-agent** | Agent Teams (orchestrator/swarm), live peer `team_post`/`team_read` blackboard, model-callable `spawn_team`, durable `/goal` autonomy |
+| **Vision** | Paste clipboard images with `Alt+N` (`[Image #id]` tokens, position-preserving); graceful model gating with vision-model suggestions |
+| **TUI** | 6 Molten-Rust "fluid" themes, Vim normal mode, mouse scroll, conversation history, modal pickers |
+| **Input** | Bracketed paste, multiline prompts, soft-wrap, long-paste context preflight, image paste |
 | **Safety** | Per-tool permission rules with glob patterns, blocked-command lists, trust mode |
 | **Sessions** | Auto-save, named sessions, resume, export to Markdown |
 | **Context** | LLM-based context compaction, token counting, cost tracking in real-time |
@@ -496,17 +499,18 @@ The TUI is a full-screen terminal application with four panes:
 - **Input Box**: Multi-line text input with history support
 - **Status Bar**: Displays all available keyboard shortcuts and scroll position
 
-### Color Themes (5 built-in)
+### Color Themes (6 "fluid" built-in)
 
-Cycle themes live with `Ctrl+R` or `/theme [name]`:
+Cycle themes live with `Ctrl+R` or `/theme [name]` — all in the Molten Rust design language:
 
 | Theme | Description |
 |---|---|
-| `dark` | Default dark theme |
-| `light` | Light background for bright environments |
-| `dracula` | Purple-accented Dracula palette |
-| `nord` | Cool blue-grey Nord palette |
-| `solarized` | Warm Solarized palette |
+| `molten-rust` | Default — ember orange/red over warm near-black ash |
+| `fluid-green` | Emerald accent over green-tinted ash |
+| `liquid-blue` | Electric cyan-blue over deep-sea ash |
+| `glittery-gold` | Molten gold over bronze ash |
+| `bright-neon` | Cyber cyan/magenta over cold slate |
+| `fluid-purple` | Neon violet over plum ash |
 
 ### Vim Normal Mode
 
@@ -1283,27 +1287,83 @@ max_conversation_lines = 1000
 
 ---
 
-## 🎨 v1.0.22 — Molten Rust UI Overhaul
+## 🎨 v1.0.22 — Molten Rust UI, Image Paste & Multi-Agent
 
-Version 1.0.22 is a complete visual reforge of the TUI in the **Molten Rust**
-design language — warm, near-black ash backgrounds with a saturated ember
-accent ramp, replacing the old gray-on-dark look. Highlights:
+Version 1.0.22 reforges the TUI in the **Molten Rust** design language and adds
+**image input with vision analysis**, a real **multi-agent message bus**, and
+dynamic **sub-team orchestration**.
+
+### 🖼️ Image paste & vision analysis (new)
+
+You can now paste images straight from your clipboard and have a vision-capable
+model analyze them — the same `Alt+N` paste UX as Claude Code / Codex, done from
+scratch in Rust.
+
+- **`Alt+N` clipboard image stack.** A background watcher captures images you
+  copy during the session into a newest-first stack. `Alt+0` pastes the latest,
+  `Alt+1` the second-latest, and so on, inserting an `[Image #id]` token **at the
+  cursor** — exactly where it sits in your sentence.
+- **Position & order preserved.** On send, the input is split at each `[Image
+  #id]` token into an ordered sequence of text + image parts, so for multi-image
+  prompts each image reaches the model in the precise position (and order) you
+  placed it — crucial when images label distinct entities in your prompt.
+- **Multimodal across every provider.** Images are encoded natively per backend:
+  Anthropic `image` blocks, OpenAI-compatible `image_url` data URIs, Gemini
+  `inlineData`, and Ollama `images[]` — interleaved with text where the API
+  supports it.
+- **Foolproof model gating.** If the active model can't see images, the message
+  is **not** sent — instead you get a clear notice and **2–3 suggested
+  vision-capable models from your current provider** (switch with `Ctrl+O`).
+  Your draft and pasted images are kept, so you just switch the model and press
+  Enter again.
+- **Custom-model edge case handled.** If you're on a custom/unknown model id that
+  isn't in the catalog, vision support can't be confirmed, so forge-osh fails
+  gracefully (blocks + suggests) rather than sending images that would error.
+- **Transient feedback.** Pasting shows a brief toast (`Pasted clipboard image #N
+  as [Image #id]`); asking for a slot deeper than the captured stack shows a
+  short "not enough images" toast that auto-clears.
+
+> Note: the `Alt+N` stack is forge-osh's own session history of images copied to
+> the live clipboard while it's running — it is not the Windows `Win+V` history.
+
+### 🤝 Multi-agent & orchestration
+
+- **Live team blackboard** — `team_post` / `team_read` let team/swarm agents share
+  findings and coordinate **peer-to-peer**, without routing through the orchestrator.
+- **`spawn_team` tool** — an agent (notably a `/goal` worker) can dynamically fan
+  work out across sub-agents and pick the architecture: **swarm** (parallel +
+  blackboard), **orchestrator** (parallel + integration review), or **sequential**.
+- **Team modes** — `/team start [swarm|orchestrator] <goal>`; orchestrator runs
+  bounded waves with cross-pollinated findings + central review, swarm runs the
+  roster concurrently.
+- **`/goal` hardening** — an anti-reward-hacking integrity contract, no-verifier
+  runs complete as explicitly **UNVERIFIED**, and the worker now chooses its own
+  execution strategy.
+
+### 🎨 Molten Rust UI
 
 - **Six "fluid" themes** (cycle with `^R`): `molten-rust` (default), `fluid-green`,
-  `liquid-blue`, `glittery-gold`, `bright-neon`, `fluid-purple` — each a full
-  recolor, not just an accent swap.
+  `liquid-blue`, `glittery-gold`, `bright-neon`, `fluid-purple` — each a full recolor.
 - **Every modal reforged** — rounded borders, filled bodies, accent titles, and
   accent selection bars across the picker, confirmation, help, key manager,
-  session/skill browsers, MCP manager, and the new goal manager.
+  session/skill browsers, MCP manager, and the goal manager.
 - **Modern startup banner** — an "ANSI Shadow" `FORGE OSH` wordmark painted in a
   vertical ember gradient, responsive (side-by-side when wide, stacked when narrow).
 - **Restyled chrome** — header brand mark + colored context meter, accent keycap
   status bar, ember scrollbars, and a redesigned prompt.
-- **Input soft-wrap fix** — long prompts now wrap onto the next line instead of
-  scrolling horizontally and hiding the start; multi-line/clipboard paste is
-  preserved and the caret stays aligned with the text.
+- **Input soft-wrap fix** — long prompts wrap onto the next line instead of
+  scrolling horizontally; multi-line/clipboard paste preserved and the caret stays
+  aligned with the text.
 - **Goal UX** — interactive `/goals` manager modal (navigate + pause/resume/clear)
   and a live in-chat "goal running" spinner.
+
+### 🧹 Fixes
+
+- **Dynamic task plan** — the system prompt now steers the model to the live
+  `update_plan` checklist (which ticks off in real time) instead of blurting a
+  static plan; plan-mode (`enter_plan_mode`) is preserved as the approval gate.
+- **Markdown** — `**bold**` / `` `code` `` / `*italic*` now render correctly inside
+  list items and headings (no more literal `**`).
 
 The CLI surface — every slash command, keybinding, and label — is unchanged.
 
