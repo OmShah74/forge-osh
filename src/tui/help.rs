@@ -6,6 +6,7 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /help              Show this help screen (scroll: ↑↓/jk, PgUp/PgDn, g/G)
   /clear             Clear the conversation display
   /cost              Show token usage and cost
+  /context           Visual context breakdown (coin grid + per-category tokens, MCP/skills/memory)
   /model             Open model selector
   /model list        List available models for current provider
   /model <id>        Switch to model directly by ID or name

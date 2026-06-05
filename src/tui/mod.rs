@@ -177,6 +177,43 @@ pub enum Modal {
     /// Goal manager — list live/finished goals, navigate with ↑↓, and
     /// pause/resume/clear/complete the selected goal without typing hex ids.
     GoalManager(GoalManagerState),
+    /// Context usage breakdown (`/context`) — coin-grid visual + per-category
+    /// token accounting + MCP/skills/memory sections. Scrollable.
+    ContextInfo(ContextReport),
+}
+
+/// A precomputed snapshot of where the active session's context budget is
+/// going, rendered by `render_context_info`. Computed once in `cmd_context`
+/// (which has async access to the session, tools, MCP, and skills) so the
+/// renderer stays pure.
+#[derive(Debug, Clone, Default)]
+pub struct ContextReport {
+    pub model_name: String,
+    pub provider_name: String,
+    pub context_limit: u32,
+    /// System prompt (incl. project context, memory, and the skill listing).
+    pub system_tokens: u32,
+    /// JSON tool schemas sent with every request.
+    pub tools_tokens: u32,
+    /// The conversation transcript.
+    pub messages_tokens: u32,
+    pub mcp_servers_active: usize,
+    pub mcp_tools: usize,
+    pub skills: usize,
+    pub memory_files: usize,
+    pub scroll: u16,
+}
+
+impl ContextReport {
+    pub fn used(&self) -> u32 {
+        self.system_tokens
+            .saturating_add(self.tools_tokens)
+            .saturating_add(self.messages_tokens)
+    }
+
+    pub fn free(&self) -> u32 {
+        self.context_limit.saturating_sub(self.used())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -965,6 +1002,10 @@ async fn handle_slash_command(
 
         "/cost" | "/tokens" => {
             state.modal = Some(Modal::TokenInfo);
+        }
+
+        "/context" | "/ctx" => {
+            cmd_context(state, session, config, agent_loop).await;
         }
 
         "/model" => {
@@ -2977,6 +3018,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/quit",
         "/exit",
         "/cost",
+        "/context",
         "/model",
         "/provider",
         "/keys",
@@ -3633,6 +3675,106 @@ async fn cmd_mcp(state: &mut AppState, arg: &str) {
 // Phase 1: workers are placeholders. They emit Started + an initial
 // checkpoint, then idle on control messages. Full LLM loop arrives in
 // phase 2.
+/// Build the `/context` report and open the breakdown modal.
+async fn cmd_context(
+    state: &mut AppState,
+    session: &Arc<tokio::sync::Mutex<crate::session::Session>>,
+    config: &Arc<Config>,
+    agent_loop: &Arc<crate::agent::AgentLoop>,
+) {
+    use crate::session::tokens::TokenCounter;
+
+    // Messages + working dir from the live session.
+    let (working_dir, messages_tokens) = {
+        let s = session.lock().await;
+        (
+            std::path::PathBuf::from(&s.working_dir),
+            TokenCounter::count_messages(s.history.messages()),
+        )
+    };
+
+    // System prompt (includes project context, memory, and the skill listing).
+    let system_tokens = {
+        let reg = agent_loop.skill_registry.read();
+        let system = crate::agent::system_prompt::build_system_prompt(
+            &working_dir,
+            &config.general.system_prompt_extra,
+            None,
+            Some(&reg),
+            config.agent.max_skill_listed_in_prompt,
+            config.agent.skills_enabled,
+        );
+        TokenCounter::count_text(&system)
+    };
+
+    // Tool schemas sent every request.
+    let tools_tokens = {
+        let defs = agent_loop.tools.all_definitions();
+        TokenCounter::count_request(None, &[], Some(&defs))
+    };
+
+    let skills = agent_loop
+        .skill_registry
+        .read()
+        .list_for_prompt(usize::MAX)
+        .len();
+
+    let (mcp_servers_active, mcp_tools) = if let Some(mcp) = &state.mcp {
+        let snap = mcp.snapshot().await;
+        let active = snap.iter().filter(|s| s.status.is_active()).count();
+        let tools: usize = snap
+            .iter()
+            .filter(|s| s.status.is_active())
+            .map(|s| s.tool_count)
+            .sum();
+        (active, tools)
+    } else {
+        (0, 0)
+    };
+
+    let memory_files = count_memory_files(&working_dir);
+
+    let report = ContextReport {
+        model_name: state.model_name.clone(),
+        provider_name: state.provider_name.clone(),
+        context_limit: state.context_limit.max(1),
+        system_tokens,
+        tools_tokens,
+        messages_tokens,
+        mcp_servers_active,
+        mcp_tools,
+        skills,
+        memory_files,
+        scroll: 0,
+    };
+    state.modal = Some(Modal::ContextInfo(report));
+}
+
+/// Count the CLAUDE.md / memory files that feed the system prompt.
+fn count_memory_files(working_dir: &std::path::Path) -> usize {
+    let mut n = 0usize;
+    let home = dirs::home_dir().unwrap_or_default();
+    for p in [
+        home.join(".forge-osh").join("CLAUDE.md"),
+        home.join(".claude").join("CLAUDE.md"),
+    ] {
+        if p.is_file() {
+            n += 1;
+        }
+    }
+    // Walk working dir up to home for project CLAUDE.md files.
+    let mut cur = working_dir.to_path_buf();
+    loop {
+        if cur.join("CLAUDE.md").is_file() {
+            n += 1;
+        }
+        if cur == home || !cur.pop() {
+            break;
+        }
+    }
+    n
+}
+
 async fn cmd_goal(state: &mut AppState, arg: &str, config: &Arc<Config>) {
     use crate::agent::goal::supervisor::GoalSupervisor;
     use crate::agent::goal::{GoalId, GoalSpec};
@@ -7483,6 +7625,37 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 state.modal = Some(Modal::TokenInfo);
             }
         }
+
+        Some(Modal::ContextInfo(mut report)) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {} // close
+            KeyCode::Down | KeyCode::Char('j') => {
+                report.scroll = report.scroll.saturating_add(1);
+                state.modal = Some(Modal::ContextInfo(report));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                report.scroll = report.scroll.saturating_sub(1);
+                state.modal = Some(Modal::ContextInfo(report));
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                report.scroll = report.scroll.saturating_add(10);
+                state.modal = Some(Modal::ContextInfo(report));
+            }
+            KeyCode::PageUp => {
+                report.scroll = report.scroll.saturating_sub(10);
+                state.modal = Some(Modal::ContextInfo(report));
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                report.scroll = 0;
+                state.modal = Some(Modal::ContextInfo(report));
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                report.scroll = u16::MAX / 2;
+                state.modal = Some(Modal::ContextInfo(report));
+            }
+            _ => {
+                state.modal = Some(Modal::ContextInfo(report));
+            }
+        },
 
         Some(Modal::Picker(mut picker)) => {
             let action = input::map_key_picker(key, picker.filtering);
