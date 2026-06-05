@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 360" role="img" aria-label="forge-osh">
+  <defs>
+    <!-- Molten Rust ember gradient: bright orange (top) -> rust red (bottom) -->
+    <linearGradient id="ember" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#FF8A4C"/>
+      <stop offset="45%" stop-color="#FF5A1F"/>
+      <stop offset="100%" stop-color="#B5301A"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Warm near-black canvas (matches the app background) -->
+  <rect x="1" y="1" width="1138" height="358" rx="16" fill="#120D0B" stroke="#3A2C24" stroke-width="2"/>
+
+  <!-- FORGE OSH — "ANSI Shadow" block wordmark, in the ember gradient -->
+  <text x="44" y="70" xml:space="preserve"
+        font-family="'JetBrains Mono','Cascadia Code','Consolas',ui-monospace,monospace"
+        font-size="26" font-weight="700" fill="url(#ember)">
+    <tspan x="44" dy="0">███████╗ ██████╗ ██████╗  ██████╗ ███████╗   ██████╗ ███████╗██╗  ██╗</tspan>
+    <tspan x="44" dy="1.18em">██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝  ██╔═══██╗██╔════╝██║  ██║</tspan>
+    <tspan x="44" dy="1.18em">█████╗  ██║   ██║██████╔╝██║  ███╗█████╗    ██║   ██║███████╗███████║</tspan>
+    <tspan x="44" dy="1.18em">██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝    ██║   ██║╚════██║██╔══██║</tspan>
+    <tspan x="44" dy="1.18em">██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗  ╚██████╔╝███████║██║  ██║</tspan>
+    <tspan x="44" dy="1.18em">╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝</tspan>
+  </text>
+
+  <!-- Brand line + tagline -->
+  <text x="46" y="300"
+        font-family="'JetBrains Mono','Cascadia Code','Consolas',ui-monospace,monospace"
+        font-size="22" font-weight="700" fill="#FF7A33">◆&#160;&#160;forge-osh<tspan fill="#A88B7B" font-weight="400">&#160;&#160;·&#160;&#160;universal ai coding agent</tspan></text>
+  <text x="46" y="332"
+        font-family="'JetBrains Mono','Cascadia Code','Consolas',ui-monospace,monospace"
+        font-size="18" font-weight="400" fill="#7A6154">provider-agnostic · rust-powered · open source</text>
+</svg>
