@@ -119,8 +119,192 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Modal::GoalManager(g) => {
                 render_goal_manager(frame, g, &theme);
             }
+            Modal::ContextInfo(report) => {
+                render_context_info(frame, report, &theme);
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Context usage modal (/context)
+// ---------------------------------------------------------------------------
+
+fn render_context_info(frame: &mut Frame, r: &super::ContextReport, theme: &Theme) {
+    let area = centered_rect(74, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let used = r.used();
+    let free = r.free();
+    let limit = r.context_limit.max(1);
+    let pct = |t: u32| (t as f64 * 100.0 / limit as f64);
+    let fmt = |t: u32| -> String {
+        if t >= 1000 {
+            format!("{:.1}k", t as f64 / 1000.0)
+        } else {
+            t.to_string()
+        }
+    };
+
+    // Category colours (also used by the coin grid).
+    let c_system = theme.accent_bright;
+    let c_tools = theme.warning_fg;
+    let c_messages = theme.accent;
+    let c_free = theme.ghost_fg;
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header.
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{}  ", r.model_name),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("· {} ", r.provider_name), Style::default().fg(theme.muted_fg)),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} / {} tokens ({:.0}%)",
+            fmt(used),
+            fmt(limit),
+            pct(used)
+        ),
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // ── Coin grid: 10 rows × 20 = 200 coins, each ≈ limit/200 tokens. ──
+    const COLS: usize = 20;
+    const ROWS: usize = 10;
+    const CELLS: usize = COLS * ROWS;
+    let cells_for = |t: u32| ((t as f64 / limit as f64) * CELLS as f64).round() as usize;
+    let sys_cells = cells_for(r.system_tokens);
+    let tool_cells = cells_for(r.tools_tokens);
+    let msg_cells = cells_for(r.messages_tokens);
+    // Build the colour for each cell, clamping to the grid size.
+    let mut colors: Vec<Color> = Vec::with_capacity(CELLS);
+    for _ in 0..sys_cells.min(CELLS) {
+        colors.push(c_system);
+    }
+    for _ in 0..tool_cells.min(CELLS.saturating_sub(colors.len())) {
+        colors.push(c_tools);
+    }
+    for _ in 0..msg_cells.min(CELLS.saturating_sub(colors.len())) {
+        colors.push(c_messages);
+    }
+    while colors.len() < CELLS {
+        colors.push(c_free);
+    }
+    for row in 0..ROWS {
+        let mut spans: Vec<Span> = Vec::with_capacity(COLS + 1);
+        spans.push(Span::raw(" "));
+        for col in 0..COLS {
+            let idx = row * COLS + col;
+            let filled = idx < used_cells(sys_cells, tool_cells, msg_cells);
+            let glyph = if filled { "⛁ " } else { "⛶ " };
+            spans.push(Span::styled(glyph, Style::default().fg(colors[idx])));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+
+    // ── Estimated usage by category. ──
+    lines.push(Line::from(Span::styled(
+        "Estimated usage by category",
+        Style::default().fg(theme.muted_fg).add_modifier(Modifier::ITALIC),
+    )));
+    let cat = |label: &str, tokens: u32, color: Color| -> Line {
+        Line::from(vec![
+            Span::styled(" ⛁ ", Style::default().fg(color)),
+            Span::styled(format!("{label}: "), Style::default().fg(theme.fg)),
+            Span::styled(
+                format!("{} tokens ({:.1}%)", fmt(tokens), pct(tokens)),
+                Style::default().fg(theme.muted_fg),
+            ),
+        ])
+    };
+    lines.push(cat("System prompt (+ memory, skills list)", r.system_tokens, c_system));
+    lines.push(cat("Tools", r.tools_tokens, c_tools));
+    lines.push(cat("Messages", r.messages_tokens, c_messages));
+    lines.push(Line::from(vec![
+        Span::styled(" ⛶ ", Style::default().fg(c_free)),
+        Span::styled("Free space: ", Style::default().fg(theme.fg)),
+        Span::styled(
+            format!("{} tokens ({:.1}%)", fmt(free), pct(free)),
+            Style::default().fg(theme.muted_fg),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // ── Breakdown sections. ──
+    let section = |title: &str, hint: &str, detail: String| -> Vec<Line> {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    title.to_string(),
+                    Style::default().fg(theme.accent_bright).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  · {hint}"), Style::default().fg(theme.faint_fg)),
+            ]),
+            Line::from(Span::styled(
+                format!("  └ {detail}"),
+                Style::default().fg(theme.muted_fg),
+            )),
+        ]
+    };
+    for l in section(
+        "MCP tools",
+        "/mcp",
+        format!("{} active server(s) · {} tool(s)", r.mcp_servers_active, r.mcp_tools),
+    ) {
+        lines.push(l);
+    }
+    for l in section("Skills", "/skills", format!("{} skill(s) available", r.skills)) {
+        lines.push(l);
+    }
+    for l in section(
+        "Memory files",
+        "/memory (CLAUDE.md)",
+        format!("{} file(s) loaded", r.memory_files),
+    ) {
+        lines.push(l);
+    }
+    lines.push(Line::from(""));
+
+    // ── Suggestion when messages dominate. ──
+    if pct(r.messages_tokens) > 50.0 {
+        lines.push(Line::from(Span::styled(
+            "ⓘ Messages use over half the window — /compact [keep] to free space with an AI summary.",
+            Style::default().fg(theme.warning_fg),
+        )));
+    } else if pct(used) > 85.0 {
+        lines.push(Line::from(Span::styled(
+            "ⓘ Context is nearly full — consider /compact or starting a /new session.",
+            Style::default().fg(theme.warning_fg),
+        )));
+    }
+
+    let title = Line::from(Span::styled(
+        " Context Usage   ↑↓ scroll · Esc close ",
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+    ));
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.accent_dim))
+                .style(Style::default().bg(theme.modal_bg))
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((r.scroll, 0));
+    frame.render_widget(para, area);
+}
+
+/// Total filled cells across the three categories, clamped to the grid.
+fn used_cells(sys: usize, tools: usize, msgs: usize) -> usize {
+    (sys + tools + msgs).min(200)
 }
 
 // ---------------------------------------------------------------------------
