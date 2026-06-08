@@ -202,6 +202,26 @@ pub struct ContextReport {
     pub skills: usize,
     pub memory_files: usize,
     pub scroll: u16,
+    // ── Session usage totals (cumulative across the whole session) ───────
+    /// Tokens currently filling the model's prompt window (last reported).
+    pub current_context_tokens: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cache_read_tokens: u64,
+    pub total_cache_write_tokens: u64,
+    pub total_cost_usd: f64,
+    pub cache_hit_rate: f64,
+    pub cache_savings_usd: f64,
+    pub api_calls: u64,
+    /// Message counts in the live history.
+    pub message_count: usize,
+    pub user_msgs: usize,
+    pub assistant_msgs: usize,
+    pub tool_msgs: usize,
+    pub working_dir: String,
+    pub session_name: String,
+    pub model_id: String,
+    pub provider_id: String,
 }
 
 impl ContextReport {
@@ -244,6 +264,115 @@ pub enum PasteRecommendation {
 #[derive(Debug, Default)]
 pub struct HelpState {
     pub scroll: u16,
+    /// Live search query typed in the help search box.
+    pub query: String,
+    /// Whether the search box is focused (keystrokes edit the query) vs. the
+    /// help body is focused (keystrokes scroll / navigate matches).
+    pub search_active: bool,
+    /// Logical line indices (0-based into `help_text()`) that contain the query.
+    pub matches: Vec<u16>,
+    /// Index into `matches` of the currently-highlighted occurrence.
+    pub current_match: usize,
+}
+
+impl HelpState {
+    /// Recompute the set of matching help lines for the current query
+    /// (case-insensitive). Keeps `current_match` in range.
+    pub fn recompute_matches(&mut self) {
+        self.matches.clear();
+        let q = self.query.trim().to_lowercase();
+        if q.is_empty() {
+            self.current_match = 0;
+            return;
+        }
+        for (i, line) in crate::tui::help::help_text().lines().enumerate() {
+            if line.to_lowercase().contains(&q) {
+                self.matches.push(i as u16);
+            }
+        }
+        if self.current_match >= self.matches.len() {
+            self.current_match = 0;
+        }
+    }
+
+    /// Scroll so the current match sits a couple of lines below the top edge.
+    pub fn jump_to_current(&mut self) {
+        if let Some(&line) = self.matches.get(self.current_match) {
+            self.scroll = line.saturating_sub(2);
+        }
+    }
+
+    pub fn next_match(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        self.current_match = (self.current_match + 1) % self.matches.len();
+        self.jump_to_current();
+    }
+
+    pub fn prev_match(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        self.current_match = if self.current_match == 0 {
+            self.matches.len() - 1
+        } else {
+            self.current_match - 1
+        };
+        self.jump_to_current();
+    }
+}
+
+/// What an `@`-mention candidate refers to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MentionKind {
+    File,
+    Dir,
+    Symbol,
+    /// `@diff`, `@url`, …
+    Special,
+}
+
+/// One row in the inline `@`-mention picker.
+#[derive(Debug, Clone)]
+pub struct MentionCandidate {
+    /// Canonical reference text inserted after the `@` when selected.
+    pub insert: String,
+    /// Display label in the popup.
+    pub label: String,
+    /// Secondary hint (kind / location).
+    pub hint: String,
+    pub kind: MentionKind,
+}
+
+/// Live state for the inline `@`-mention autocomplete popup (P0.2).
+#[derive(Debug, Clone)]
+pub struct MentionState {
+    /// Byte index in `input.text` of the `@` that opened this mention.
+    pub at: usize,
+    /// Query typed after the `@` (up to the cursor).
+    pub query: String,
+    pub candidates: Vec<MentionCandidate>,
+    pub selected: usize,
+}
+
+impl MentionState {
+    pub fn move_up(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = if self.selected == 0 {
+            self.candidates.len() - 1
+        } else {
+            self.selected - 1
+        };
+    }
+    pub fn move_down(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.candidates.len();
+    }
 }
 
 #[derive(Debug)]
@@ -692,10 +821,32 @@ pub struct AppState {
     /// One-line cache summary shown in the /cost modal. Populated from
     /// `CostTracker::format_cache_summary` after every session refresh.
     pub format_cache_summary: String,
+    // ── Live (in-flight) token/cost counters ─────────────────────────────
+    // The header normally shows committed session totals, refreshed at end of
+    // turn. To make the counter tick UP live during streaming (like Claude
+    // Code), we cache the session base at each step boundary and add an
+    // in-flight estimate of the current step's input + streamed output.
+    pub live_base_tokens: u64,
+    pub live_base_cost: f64,
+    pub live_turn_input: u32,
+    pub live_turn_output: u32,
+    pub live_in_cost_per_m: f64,
+    pub live_out_cost_per_m: f64,
     pub trust_mode: bool,
     pub theme: Theme,
     pub theme_name: String,
     pub running: bool,
+    /// Whether the TUI is currently capturing the mouse (wheel-scroll on, native
+    /// text selection off). Toggled live via `/mouse`; the main loop applies the
+    /// change to the terminal when `mouse_capture_dirty` is set.
+    pub mouse_capture: bool,
+    pub mouse_capture_dirty: bool,
+    /// Live `@`-mention autocomplete popup (files / symbols). `None` when not
+    /// in a mention. See P0.2.
+    pub mention: Option<MentionState>,
+    /// File paths (and the `@diff` sentinel) the user referenced via `@`-mentions
+    /// in the current draft, to be pre-loaded into the next message's context.
+    pub mention_refs: Vec<String>,
     pub agent_busy: bool,
     pub agent_task: Option<tokio::task::JoinHandle<()>>,
     pub key_save_pending: Option<(String, String)>,
@@ -835,10 +986,20 @@ impl AppState {
             format_tokens: "0 tokens".to_string(),
             format_cost: "$0.00".to_string(),
             format_cache_summary: String::new(),
+            live_base_tokens: 0,
+            live_base_cost: 0.0,
+            live_turn_input: 0,
+            live_turn_output: 0,
+            live_in_cost_per_m: 0.0,
+            live_out_cost_per_m: 0.0,
             trust_mode: config.general.trust_mode,
             theme: Theme::from_name(&config.general.theme),
             theme_name: config.general.theme.clone(),
             running: true,
+            mouse_capture: config.ui.mouse_capture,
+            mouse_capture_dirty: false,
+            mention: None,
+            mention_refs: Vec::new(),
             agent_busy: false,
             agent_task: None,
             key_save_pending: None,
@@ -1150,6 +1311,19 @@ async fn handle_slash_command(
                     "OFF  (tool permissions will be prompted)"
                 }
             ));
+        }
+
+        "/mouse" => {
+            state.mouse_capture = !state.mouse_capture;
+            state.mouse_capture_dirty = true;
+            state.push_system(if state.mouse_capture {
+                "Mouse capture: ON  (mouse wheel scrolls the chat; native click-drag \
+                 text selection is disabled). Run /mouse again to turn it off."
+            } else {
+                "Mouse capture: OFF  (you can now click-drag to select chat and input \
+                 text like in Claude Code; use ↑/↓/PgUp/PgDn to scroll). Run /mouse to \
+                 re-enable wheel scrolling."
+            });
         }
 
         "/compact" => {
@@ -3024,6 +3198,7 @@ fn tab_complete_slash(state: &mut AppState) {
         "/keys",
         "/theme",
         "/trust",
+        "/mouse",
         "/vim",
         "/fast",
         "/compact",
@@ -3105,6 +3280,275 @@ fn common_prefix(strings: &[&str]) -> String {
 
 fn first_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
+}
+
+// ---------------------------------------------------------------------------
+// @-mention autocomplete (P0.2): inline fuzzy file/symbol picker
+// ---------------------------------------------------------------------------
+
+/// If the cursor sits inside an `@token` — i.e. the nearest `@` before the
+/// cursor is at the start of the text or preceded by whitespace, and there is
+/// no whitespace between that `@` and the cursor — return `(byte index of '@',
+/// query)`. Otherwise `None` (no active mention).
+fn detect_mention(text: &str, cursor: usize) -> Option<(usize, String)> {
+    let cursor = cursor.min(text.len());
+    let before = &text[..cursor];
+    let at = before.rfind('@')?;
+    if at > 0 {
+        let prev = before[..at].chars().last();
+        if let Some(p) = prev {
+            if !p.is_whitespace() {
+                return None;
+            }
+        }
+    }
+    let query = &before[at + 1..];
+    if query.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    Some((at, query.to_string()))
+}
+
+/// Sort key for a file/dir mention candidate: lower sorts first. Prefers
+/// name-prefix matches, then shallower paths.
+fn mention_rank(cand: &MentionCandidate, q_lower: &str) -> f64 {
+    let name = std::path::Path::new(&cand.insert)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let base = if q_lower.is_empty() {
+        1.0
+    } else if name == *q_lower {
+        0.0
+    } else if name.starts_with(q_lower) {
+        0.3
+    } else if name.contains(q_lower) {
+        0.6
+    } else {
+        1.0
+    };
+    let depth = cand.insert.matches('/').count() as f64;
+    base * 100.0 + depth
+}
+
+/// Build the candidate list for an `@`-mention query: special tokens (`@diff`),
+/// fuzzy file/dir matches (via the ignore walker), and code-graph symbols.
+fn compute_mention_candidates(
+    working_dir: &str,
+    graph: &SharedGraph,
+    query: &str,
+) -> Vec<MentionCandidate> {
+    let q = query.to_lowercase();
+    let mut out: Vec<MentionCandidate> = Vec::new();
+
+    // Special tokens.
+    if q.is_empty() || "diff".starts_with(&q) {
+        out.push(MentionCandidate {
+            insert: "diff".into(),
+            label: "@diff".into(),
+            hint: "include current git diff".into(),
+            kind: MentionKind::Special,
+        });
+    }
+
+    // Files & directories. Show dotfiles (e.g. .env) like a normal file picker.
+    // Empty query → top-level entries; otherwise fuzzy across the tree.
+    let root = std::path::Path::new(working_dir);
+    let mut files: Vec<MentionCandidate> = Vec::new();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder.hidden(false).git_ignore(true).git_global(true);
+    if q.is_empty() {
+        builder.max_depth(Some(1));
+    }
+    let mut scanned = 0usize;
+    for entry in builder.build().flatten() {
+        if scanned > 8000 || files.len() > 250 {
+            break;
+        }
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
+        scanned += 1;
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.is_empty() || rel.starts_with(".git/") || rel == ".git" {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !q.is_empty() && !rel.to_lowercase().contains(&q) && !name.contains(&q) {
+            continue;
+        }
+        let is_dir = path.is_dir();
+        files.push(MentionCandidate {
+            insert: rel.clone(),
+            label: if is_dir { format!("{rel}/") } else { rel },
+            hint: if is_dir { "dir".into() } else { "file".into() },
+            kind: if is_dir {
+                MentionKind::Dir
+            } else {
+                MentionKind::File
+            },
+        });
+    }
+    files.sort_by(|a, b| {
+        mention_rank(a, &q)
+            .partial_cmp(&mention_rank(b, &q))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    files.truncate(30);
+    out.extend(files);
+
+    // Code-graph symbols (when a graph is loaded and the query is specific).
+    if q.len() >= 2 {
+        if let Ok(g) = graph.read() {
+            if let Some(cg) = g.as_ref() {
+                let gq = crate::graph::query::GraphQuery::new(cg);
+                for (node, _) in gq.fuzzy_search(query, 8) {
+                    let file = node.file_path.replace('\\', "/");
+                    out.push(MentionCandidate {
+                        insert: file.clone(),
+                        label: format!("{} · {}", node.name, node.kind.label()),
+                        hint: format!("{}:{}", file, node.span.start_line + 1),
+                        kind: MentionKind::Symbol,
+                    });
+                }
+            }
+        }
+    }
+
+    out.truncate(40);
+    out
+}
+
+/// Recompute the mention popup from the current input + cursor.
+async fn update_mention(state: &mut AppState, session: &Arc<Mutex<Session>>) {
+    match detect_mention(&state.input.text, state.input.cursor) {
+        Some((at, query)) => {
+            let working_dir = { session.lock().await.working_dir.clone() };
+            let candidates = compute_mention_candidates(&working_dir, &state.shared_graph, &query);
+            // Preserve selection sanity across refinements.
+            let selected = state
+                .mention
+                .as_ref()
+                .map(|m| m.selected.min(candidates.len().saturating_sub(1)))
+                .unwrap_or(0);
+            state.mention = Some(MentionState {
+                at,
+                query,
+                candidates,
+                selected,
+            });
+        }
+        None => state.mention = None,
+    }
+}
+
+/// Apply the selected mention candidate: replace `@query` with `@<ref> ` and
+/// record file references for context pre-loading at submit time.
+fn accept_mention(state: &mut AppState) {
+    let Some(m) = state.mention.take() else {
+        return;
+    };
+    let Some(cand) = m.candidates.get(m.selected).cloned() else {
+        return;
+    };
+    let len = state.input.text.len();
+    let at = m.at.min(len);
+    let cursor = state.input.cursor.min(len);
+    if at > cursor {
+        return;
+    }
+    let replacement = format!("@{} ", cand.insert);
+    let mut new_text = String::with_capacity(len + replacement.len());
+    new_text.push_str(&state.input.text[..at]);
+    new_text.push_str(&replacement);
+    new_text.push_str(&state.input.text[cursor..]);
+    state.input.cursor = at + replacement.len();
+    state.input.text = new_text;
+
+    match cand.kind {
+        MentionKind::File | MentionKind::Symbol => {
+            if !state.mention_refs.contains(&cand.insert) {
+                state.mention_refs.push(cand.insert.clone());
+            }
+        }
+        MentionKind::Special if cand.insert == "diff" => {
+            let sentinel = "@diff".to_string();
+            if !state.mention_refs.contains(&sentinel) {
+                state.mention_refs.push(sentinel);
+            }
+        }
+        _ => {} // dirs: referenced textually, not pre-loaded
+    }
+}
+
+/// Read the contents of every referenced file (and `@diff`) into a context
+/// block appended to the user's message, so the model has them without a manual
+/// `read_file`. Each entry is size-capped.
+fn expand_mention_refs(refs: &[String], working_dir: &str) -> String {
+    if refs.is_empty() {
+        return String::new();
+    }
+    const PER_ENTRY_CAP: usize = 64 * 1024;
+    let root = std::path::Path::new(working_dir);
+    let mut body = String::new();
+    for r in refs {
+        if r == "@diff" {
+            if let Ok(o) = std::process::Command::new("git")
+                .arg("diff")
+                .current_dir(root)
+                .output()
+            {
+                let d = String::from_utf8_lossy(&o.stdout);
+                if !d.trim().is_empty() {
+                    body.push_str(&format!(
+                        "\n\n[Referenced git diff]\n```diff\n{}\n```",
+                        first_chars(&d, PER_ENTRY_CAP)
+                    ));
+                }
+            }
+            continue;
+        }
+        let path = root.join(r);
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                body.push_str(&format!(
+                    "\n\n[Referenced file: {}]\n```\n{}\n```",
+                    r,
+                    first_chars(&content, PER_ENTRY_CAP)
+                ));
+            }
+        }
+    }
+    if body.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n---\n(The user referenced the following via @-mentions; their current contents are included so you do not need to read them again.){body}"
+    )
+}
+
+/// Append a trailing text block to a [`UserContent`] (used for @-mention context).
+fn append_text_to_content(
+    content: crate::types::UserContent,
+    extra: &str,
+) -> crate::types::UserContent {
+    use crate::types::{UserContent, UserPart};
+    match content {
+        UserContent::Text(t) => UserContent::Text(format!("{t}{extra}")),
+        UserContent::Multimodal(mut parts) => {
+            parts.push(UserPart::Text(extra.to_string()));
+            UserContent::Multimodal(parts)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3684,12 +4128,55 @@ async fn cmd_context(
 ) {
     use crate::session::tokens::TokenCounter;
 
-    // Messages + working dir from the live session.
-    let (working_dir, messages_tokens) = {
+    // Messages + working dir + cumulative session usage from the live session.
+    let (
+        working_dir,
+        messages_tokens,
+        session_name,
+        msg_count,
+        user_msgs,
+        assistant_msgs,
+        tool_msgs,
+        ct_current,
+        ct_in,
+        ct_out,
+        ct_cr,
+        ct_cw,
+        ct_cost,
+        ct_hit,
+        ct_saved,
+        ct_calls,
+    ) = {
         let s = session.lock().await;
+        let msgs = s.history.messages();
+        let mut u = 0usize;
+        let mut a = 0usize;
+        let mut t = 0usize;
+        for m in msgs {
+            match m {
+                crate::types::Message::User(_) => u += 1,
+                crate::types::Message::Assistant(_) => a += 1,
+                crate::types::Message::Tool(_) => t += 1,
+            }
+        }
+        let ct = &s.cost_tracker;
         (
             std::path::PathBuf::from(&s.working_dir),
-            TokenCounter::count_messages(s.history.messages()),
+            TokenCounter::count_messages(msgs),
+            s.name.clone(),
+            msgs.len(),
+            u,
+            a,
+            t,
+            ct.context_tokens_estimate(),
+            ct.total_input_tokens,
+            ct.total_output_tokens,
+            ct.total_cache_read_tokens,
+            ct.total_cache_write_tokens,
+            ct.total_cost_usd,
+            ct.cache_hit_rate(),
+            ct.cache_savings_usd(),
+            ct.call_count(),
         )
     };
 
@@ -3746,6 +4233,23 @@ async fn cmd_context(
         skills,
         memory_files,
         scroll: 0,
+        current_context_tokens: ct_current,
+        total_input_tokens: ct_in,
+        total_output_tokens: ct_out,
+        total_cache_read_tokens: ct_cr,
+        total_cache_write_tokens: ct_cw,
+        total_cost_usd: ct_cost,
+        cache_hit_rate: ct_hit,
+        cache_savings_usd: ct_saved,
+        api_calls: ct_calls as u64,
+        message_count: msg_count,
+        user_msgs,
+        assistant_msgs,
+        tool_msgs,
+        working_dir: working_dir.to_string_lossy().to_string(),
+        session_name,
+        model_id: state.model_id.clone(),
+        provider_id: state.provider_id.clone(),
     };
     state.modal = Some(Modal::ContextInfo(report));
 }
@@ -5281,6 +5785,28 @@ async fn compact_history_llm(
     }
 }
 
+/// Recompute the header token/cost strings (and the context bar) from the
+/// cached session base plus the in-flight estimate of the current step. Cheap
+/// and lock-free — called on every streamed token so the counter ticks up live
+/// during a turn instead of only at the end.
+fn apply_live_counter(state: &mut AppState) {
+    let live_tokens = state.live_base_tokens
+        + state.live_turn_input as u64
+        + state.live_turn_output as u64;
+    let live_cost = state.live_base_cost
+        + (state.live_turn_input as f64 / 1_000_000.0) * state.live_in_cost_per_m
+        + (state.live_turn_output as f64 / 1_000_000.0) * state.live_out_cost_per_m;
+    state.format_tokens = crate::session::tokens::CostTracker::format_tokens_total(live_tokens);
+    state.format_cost = crate::session::tokens::CostTracker::format_cost_total(live_cost);
+    if state.context_limit > 0 {
+        let in_context = state.live_turn_input as u64 + state.live_turn_output as u64;
+        if in_context > 0 {
+            state.context_pct =
+                ((in_context as f64 / state.context_limit as f64) * 100.0).min(100.0) as u8;
+        }
+    }
+}
+
 /// Recompute the context-window usage % from the CURRENT active provider's
 /// ctx_window and the CURRENT session cost tracker. Used right after a
 /// compaction so the TUI's header reflects the freed budget immediately
@@ -5359,15 +5885,21 @@ pub async fn run_tui(
     skill_registry: crate::skills::SharedSkillRegistry,
     mcp: Arc<crate::mcp::McpManager>,
 ) -> anyhow::Result<()> {
-    // Set up terminal
+    // Set up terminal.
+    //
+    // Mouse capture is OFF by default so the terminal's native click-drag text
+    // selection works on both the chat transcript and the input box (like Claude
+    // Code). With capture ON, the app receives mouse events and the terminal can
+    // no longer select text. Users who prefer wheel-scroll can set
+    // `ui.mouse_capture = true` or toggle it live with `/mouse`. Keyboard scroll
+    // (↑/↓/PgUp/PgDn) always works regardless.
+    let mouse_capture_enabled = config.ui.mouse_capture;
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    if mouse_capture_enabled {
+        execute!(stdout, EnableMouseCapture)?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -5631,6 +6163,16 @@ pub async fn run_tui(
     // -----------------------------------------------------------------------
     let mut deferred_events: VecDeque<Event> = VecDeque::new();
     while state.running {
+        // Apply a pending /mouse toggle to the live terminal before drawing.
+        if state.mouse_capture_dirty {
+            if state.mouse_capture {
+                let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
+            } else {
+                let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+            }
+            state.mouse_capture_dirty = false;
+        }
+
         // Draw frame
         terminal.draw(|frame| renderer::render(frame, &mut state))?;
 
@@ -5656,12 +6198,17 @@ pub async fn run_tui(
         // Poll interval: faster when the agent is working (for smooth
         // streaming); a slightly slower cadence still animates the goal
         // spinner without spinning the CPU when only goals are live.
+        // Poll cadence governs the idle redraw rate (the loop redraws each
+        // iteration). Fast while streaming for smoothness; much slower when
+        // fully idle so a static screen isn't rebuilt ~20×/s. Keystrokes and
+        // agent events still wake the poll immediately, so responsiveness is
+        // unaffected — only wasted idle redraws are cut.
         let timeout = if state.spinner.active || state.agent_busy {
             Duration::from_millis(16)
-        } else if goals_live {
+        } else if goals_live || state.mention.is_some() || state.toast.is_some() {
             Duration::from_millis(120)
         } else {
-            Duration::from_millis(50)
+            Duration::from_millis(200)
         };
 
         // ---- Drain agent events (non-blocking) ----
@@ -5678,6 +6225,28 @@ pub async fn run_tui(
                     // Do NOT reset scroll here — the user may have scrolled up to read
                     // earlier content while the agent is working. Scroll is only reset
                     // on explicit user Submit (see Action::Submit handler).
+
+                    // ── Live counter: snapshot the committed base + estimate
+                    // this step's input so the header ticks from the right
+                    // starting point as output streams in. ──
+                    {
+                        let sess = session.lock().await;
+                        state.live_base_tokens = sess.cost_tracker.total_tokens_all();
+                        state.live_base_cost = sess.cost_tracker.total_cost_usd;
+                        state.live_turn_input =
+                            crate::session::tokens::TokenCounter::count_messages(
+                                sess.history.messages(),
+                            );
+                        state.live_turn_output = 0;
+                    }
+                    {
+                        let router = provider_router.read().await;
+                        let (ic, oc) = router.active_costs();
+                        state.live_in_cost_per_m = ic;
+                        state.live_out_cost_per_m = oc;
+                        state.context_limit = router.active_context_window();
+                    }
+                    apply_live_counter(&mut state);
                 }
                 AgentEvent::Token(t) => {
                     // Stop the "thinking" spinner on first token so the streaming
@@ -5688,6 +6257,11 @@ pub async fn run_tui(
                     // The visible answer supersedes the ephemeral reasoning.
                     state.thinking_text.clear();
                     state.streaming_text.push_str(&t);
+                    // Live-tick the header token/cost counter as output streams.
+                    state.live_turn_output = state.live_turn_output.saturating_add(
+                        crate::session::tokens::TokenCounter::count_text(&t),
+                    );
+                    apply_live_counter(&mut state);
                     // Do NOT force auto_scroll here — user may have scrolled up
                 }
                 AgentEvent::ToolStart { name, input, .. } => {
@@ -5828,6 +6402,9 @@ pub async fn run_tui(
                     state.spinner.stop();
                     state.agent_busy = false;
                     state.thinking_text.clear();
+                    // Clear in-flight live estimate; committed totals are authoritative now.
+                    state.live_turn_input = 0;
+                    state.live_turn_output = 0;
                     // Commit remaining streaming text (guarded against duplicates)
                     commit_streaming_text(&mut state);
                     let sess = session.lock().await;
@@ -5937,10 +6514,34 @@ pub async fn run_tui(
                     // Keep the reasoning visible until the visible answer or a
                     // tool result supersedes it (handled in Token/ToolStart).
                 }
+                AgentEvent::TurnUsage { .. } => {
+                    // A provider call finished; record_usage already applied the
+                    // REAL numbers to the session. Re-snapshot the committed base
+                    // and clear the in-flight estimate so the header shows exact
+                    // totals between steps (and stays correct through tool loops).
+                    let (base_tokens, base_cost, used) = {
+                        let sess = session.lock().await;
+                        (
+                            sess.cost_tracker.total_tokens_all(),
+                            sess.cost_tracker.total_cost_usd,
+                            sess.cost_tracker.context_tokens_estimate(),
+                        )
+                    };
+                    state.live_base_tokens = base_tokens;
+                    state.live_base_cost = base_cost;
+                    state.live_turn_input = 0;
+                    state.live_turn_output = 0;
+                    state.format_tokens =
+                        crate::session::tokens::CostTracker::format_tokens_total(base_tokens);
+                    state.format_cost =
+                        crate::session::tokens::CostTracker::format_cost_total(base_cost);
+                    if state.context_limit > 0 {
+                        state.context_pct =
+                            ((used as f64 / state.context_limit as f64 * 100.0) as u8).min(100);
+                    }
+                }
                 // JSON-RPC-only events forwarded to IDEs only.
-                AgentEvent::DiffPreview { .. }
-                | AgentEvent::TurnUsage { .. }
-                | AgentEvent::ToolOutputDelta { .. } => {}
+                AgentEvent::DiffPreview { .. } | AgentEvent::ToolOutputDelta { .. } => {}
             }
         }
 
@@ -6829,6 +7430,41 @@ pub async fn run_tui(
                             }
                         }
 
+                        // ---- @-mention popup: intercept navigation keys ----
+                        // Typing / backspace fall through to normal editing (and
+                        // re-trigger update_mention below); only the popup-control
+                        // keys are consumed here so they don't submit/scroll.
+                        if state.mention.is_some() {
+                            let mut consumed = true;
+                            match (key.modifiers, key.code) {
+                                (KeyModifiers::NONE, KeyCode::Up) => {
+                                    if let Some(m) = state.mention.as_mut() {
+                                        m.move_up();
+                                    }
+                                }
+                                (KeyModifiers::NONE, KeyCode::Down) => {
+                                    if let Some(m) = state.mention.as_mut() {
+                                        m.move_down();
+                                    }
+                                }
+                                (KeyModifiers::NONE, KeyCode::Enter)
+                                | (KeyModifiers::CONTROL, KeyCode::Char('m'))
+                                | (KeyModifiers::NONE, KeyCode::Tab) => {
+                                    accept_mention(&mut state);
+                                }
+                                (KeyModifiers::NONE, KeyCode::Esc) => {
+                                    state.mention = None;
+                                }
+                                _ => consumed = false,
+                            }
+                            if consumed {
+                                if deferred_events.is_empty() && !event::poll(Duration::ZERO)? {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+
                         let action = input::map_key_normal(key);
                         match action {
                             // ---- Submit / slash commands ----
@@ -6934,6 +7570,22 @@ pub async fn run_tui(
                                     let submission = state.input.take_submission();
                                     let text = submission.text.clone();
 
+                                    // Close any open @-mention popup and pre-load
+                                    // referenced files into the next message's
+                                    // context (P0.2). Refs only apply to real
+                                    // messages, not slash commands.
+                                    state.mention = None;
+                                    let mention_preamble = {
+                                        let refs = std::mem::take(&mut state.mention_refs);
+                                        if refs.is_empty() || text.trim_start().starts_with('/') {
+                                            String::new()
+                                        } else {
+                                            let working_dir =
+                                                { session.lock().await.working_dir.clone() };
+                                            expand_mention_refs(&refs, &working_dir)
+                                        }
+                                    };
+
                                     if text.trim_start().starts_with('/') {
                                         // Slash command — handle locally, do NOT send to agent
                                         handle_slash_command(
@@ -6981,7 +7633,10 @@ pub async fn run_tui(
                                     } else {
                                         // Normal user message — send to agent loop,
                                         // preserving any interleaved pasted images.
-                                        let content = input::submission_to_content(&submission);
+                                        let mut content = input::submission_to_content(&submission);
+                                        if !mention_preamble.is_empty() {
+                                            content = append_text_to_content(content, &mention_preamble);
+                                        }
                                         let display = if submission.images.is_empty() {
                                             text.clone()
                                         } else {
@@ -7008,15 +7663,45 @@ pub async fn run_tui(
                             }
 
                             // ---- Text editing ----
-                            Action::InsertChar(c) => state.input.insert_char(c),
-                            Action::Backspace => state.input.backspace(),
-                            Action::Delete => state.input.delete(),
-                            Action::CursorLeft => state.input.cursor_left(),
-                            Action::CursorRight => state.input.cursor_right(),
-                            Action::CursorHome => state.input.cursor_home(),
-                            Action::CursorEnd => state.input.cursor_end(),
-                            Action::DeleteToStart => state.input.delete_to_start(),
-                            Action::DeleteWord => state.input.delete_word(),
+                            // After each edit, refresh the @-mention popup so it
+                            // opens on `@`, refines as you type, and closes when
+                            // the cursor leaves the token.
+                            Action::InsertChar(c) => {
+                                state.input.insert_char(c);
+                                update_mention(&mut state, &session).await;
+                            }
+                            Action::Backspace => {
+                                state.input.backspace();
+                                update_mention(&mut state, &session).await;
+                            }
+                            Action::Delete => {
+                                state.input.delete();
+                                update_mention(&mut state, &session).await;
+                            }
+                            Action::CursorLeft => {
+                                state.input.cursor_left();
+                                update_mention(&mut state, &session).await;
+                            }
+                            Action::CursorRight => {
+                                state.input.cursor_right();
+                                update_mention(&mut state, &session).await;
+                            }
+                            Action::CursorHome => {
+                                state.input.cursor_home();
+                                state.mention = None;
+                            }
+                            Action::CursorEnd => {
+                                state.input.cursor_end();
+                                update_mention(&mut state, &session).await;
+                            }
+                            Action::DeleteToStart => {
+                                state.input.delete_to_start();
+                                state.mention = None;
+                            }
+                            Action::DeleteWord => {
+                                state.input.delete_word();
+                                update_mention(&mut state, &session).await;
+                            }
                             Action::HistoryUp => state.input.history_up(),
                             Action::HistoryDown => state.input.history_down(),
                             Action::NewLine => state.input.insert_char('\n'),
@@ -7216,6 +7901,10 @@ pub async fn run_tui(
         state.input.save_history(&history_path);
     }
 
+    // Terminate any background processes the agent started so none outlive the
+    // session as orphaned children (P1.4 lifecycle).
+    crate::tools::process::shutdown_all();
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -7350,35 +8039,66 @@ fn handle_modal_input(state: &mut AppState, key: crossterm::event::KeyEvent) {
         }
 
         Some(Modal::Help(mut h)) => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {} // close
-                KeyCode::Down | KeyCode::Char('j') => {
-                    h.scroll = h.scroll.saturating_add(1);
-                    state.modal = Some(Modal::Help(h));
+            let mut close = false;
+            if h.search_active {
+                // Search box focused: keystrokes edit the query; Up/Down and
+                // Enter cycle matches; Esc returns focus to the body.
+                match key.code {
+                    KeyCode::Esc => {
+                        h.search_active = false;
+                    }
+                    KeyCode::Enter | KeyCode::Down => {
+                        h.next_match();
+                    }
+                    KeyCode::Up => {
+                        h.prev_match();
+                    }
+                    KeyCode::PageDown => {
+                        h.scroll = h.scroll.saturating_add(10);
+                    }
+                    KeyCode::PageUp => {
+                        h.scroll = h.scroll.saturating_sub(10);
+                    }
+                    KeyCode::Backspace => {
+                        h.query.pop();
+                        h.current_match = 0;
+                        h.recompute_matches();
+                        h.jump_to_current();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        h.query.push(c);
+                        h.current_match = 0;
+                        h.recompute_matches();
+                        h.jump_to_current();
+                    }
+                    _ => {}
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    h.scroll = h.scroll.saturating_sub(1);
-                    state.modal = Some(Modal::Help(h));
+            } else {
+                // Body focused: scroll / navigate matches.
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => close = true,
+                    KeyCode::Char('/') => {
+                        h.search_active = true;
+                    }
+                    KeyCode::Char('n') => h.next_match(),
+                    KeyCode::Char('N') => h.prev_match(),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        h.scroll = h.scroll.saturating_add(1)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        h.scroll = h.scroll.saturating_sub(1)
+                    }
+                    KeyCode::PageDown | KeyCode::Char(' ') => {
+                        h.scroll = h.scroll.saturating_add(10)
+                    }
+                    KeyCode::PageUp => h.scroll = h.scroll.saturating_sub(10),
+                    KeyCode::Home | KeyCode::Char('g') => h.scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => h.scroll = u16::MAX / 2,
+                    _ => {}
                 }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    h.scroll = h.scroll.saturating_add(10);
-                    state.modal = Some(Modal::Help(h));
-                }
-                KeyCode::PageUp => {
-                    h.scroll = h.scroll.saturating_sub(10);
-                    state.modal = Some(Modal::Help(h));
-                }
-                KeyCode::Home | KeyCode::Char('g') => {
-                    h.scroll = 0;
-                    state.modal = Some(Modal::Help(h));
-                }
-                KeyCode::End | KeyCode::Char('G') => {
-                    h.scroll = u16::MAX / 2;
-                    state.modal = Some(Modal::Help(h));
-                }
-                _ => {
-                    state.modal = Some(Modal::Help(h));
-                }
+            }
+            if !close {
+                state.modal = Some(Modal::Help(h));
             }
         }
 

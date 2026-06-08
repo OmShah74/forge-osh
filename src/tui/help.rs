@@ -15,6 +15,7 @@ SLASH COMMANDS  (type at the prompt and press Enter)
   /theme [name]      Cycle theme or set by name
                        (molten-rust/fluid-green/liquid-blue/glittery-gold/bright-neon/fluid-purple)
   /trust             Toggle trust mode (skip permission prompts)
+  /mouse             Toggle mouse capture (off = click-drag to select text; on = wheel scroll)
   /vim               Toggle vim normal mode (j/k scroll, g/G top/bottom, i/a insert)
   /fast              Toggle fast mode (optimized output display)
   /compact           Compact conversation history with AI summary (LLM-based)

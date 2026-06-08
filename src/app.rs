@@ -110,6 +110,12 @@ impl App {
                     lsp.clone(),
                 )),
             );
+            // `locate` orchestrates the graph + ranked text search into one
+            // localization step; like graph_query it needs the shared graph.
+            registry.register_enabled(
+                &config,
+                Box::new(crate::tools::locate::LocateTool::new(shared_graph.clone())),
+            );
             registry.register_enabled(
                 &config,
                 Box::new(crate::lsp::tools::LspDiagnosticsTool::new(lsp.clone())),

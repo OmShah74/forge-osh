@@ -135,7 +135,10 @@ impl Tool for PowerShellTool {
         "Execute a PowerShell command (Windows). Returns combined stdout and stderr. \
         Use this for Windows-specific operations like registry access, WMI queries, \
         .NET operations, or when PowerShell syntax is preferred over bash. \
-        Read-only Get-* cmdlets do not require permission prompts."
+        Read-only Get-* cmdlets do not require permission prompts. \
+        Set background: true for long-running processes (dev servers, watchers) that \
+        should keep running across turns — the call returns immediately with a process \
+        id you can poll with process_status / process_logs and stop with process_stop."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -149,6 +152,10 @@ impl Tool for PowerShellTool {
                 "timeout_seconds": {
                     "type": "integer",
                     "description": "Per-command timeout in seconds (default: 30, max: 300)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run detached as a long-running background process and return immediately with a process id (default: false)."
                 }
             },
             "required": ["command"]
@@ -180,6 +187,33 @@ impl Tool for PowerShellTool {
             return ToolOutput::error(format!(
                 "PowerShell command blocked for safety (matches pattern '{blocked}'): {command}"
             ));
+        }
+
+        // Background mode: hand off to the session process registry and return
+        // immediately. Runs under the same PowerShell host as foreground calls.
+        if input["background"].as_bool().unwrap_or(false) {
+            #[cfg(target_os = "windows")]
+            let (prog, args): (&str, Vec<&str>) = (
+                "powershell.exe",
+                vec!["-NoProfile", "-NonInteractive", "-Command"],
+            );
+            #[cfg(not(target_os = "windows"))]
+            let (prog, args): (&str, Vec<&str>) = {
+                if which::which("pwsh").is_err() {
+                    return ToolOutput::error(
+                        "PowerShell is not available on this platform. Install PowerShell Core \
+                         (pwsh) or use the 'bash' tool with background: true instead.",
+                    );
+                }
+                ("pwsh", vec!["-NoProfile", "-NonInteractive", "-Command"])
+            };
+            let mut cmd = Command::new(prog);
+            cmd.args(&args).arg(command);
+            return super::process::start_and_describe_cmd(
+                command.to_string(),
+                cmd,
+                ctx.working_dir.clone(),
+            );
         }
 
         let timeout = input["timeout_seconds"]

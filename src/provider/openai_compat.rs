@@ -657,12 +657,32 @@ impl Provider for OpenAICompatProvider {
                                             name: name.to_string(),
                                         });
                                     }
-                                    if let Some(args) = func["arguments"].as_str() {
-                                        entry.2.push_str(args);
-                                        let _ = tx.send(StreamEvent::ToolCallDelta {
-                                            id: entry.0.clone(),
-                                            arguments_delta: args.to_string(),
-                                        });
+                                    // The OpenAI spec says `arguments` is a JSON
+                                    // *string* streamed in deltas, so we append.
+                                    // But several models via OpenRouter (notably
+                                    // DeepSeek V4) emit `arguments` as a JSON
+                                    // *object* delivered whole. If we only handled
+                                    // the string case, object args were dropped and
+                                    // the tool received `{}` → "path is a required
+                                    // property". Handle both: append strings,
+                                    // replace-with-serialized for objects.
+                                    match func.get("arguments") {
+                                        Some(Value::String(args)) => {
+                                            entry.2.push_str(args);
+                                            let _ = tx.send(StreamEvent::ToolCallDelta {
+                                                id: entry.0.clone(),
+                                                arguments_delta: args.clone(),
+                                            });
+                                        }
+                                        Some(other) if !other.is_null() => {
+                                            let serialized = other.to_string();
+                                            entry.2 = serialized.clone();
+                                            let _ = tx.send(StreamEvent::ToolCallDelta {
+                                                id: entry.0.clone(),
+                                                arguments_delta: serialized,
+                                            });
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }

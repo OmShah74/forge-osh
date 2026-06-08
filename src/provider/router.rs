@@ -240,24 +240,42 @@ impl ProviderRouter {
     }
 
     /// Metadata for the selected provider/model pair.
+    ///
+    /// Resolution order:
+    ///   1. Exact provider+id match in the built-in catalog (the common case).
+    ///   2. Id-only match anywhere in the catalog (e.g. an id whose provider
+    ///      prefix differs, like `deepseek/...` selected under openrouter).
+    ///   3. Unknown/custom model: build NEUTRAL metadata. We deliberately do
+    ///      NOT inherit the provider's construction-time model_info here — doing
+    ///      so made a custom model silently adopt the *previously selected*
+    ///      model's context window (the "200k by default" bug) and its pricing
+    ///      (the "assumed cost" bug). Cloud custom models therefore report a
+    ///      conservative context and ZERO cost (an honest "unknown" rather than
+    ///      a fabricated dollar figure). Local providers (ollama/custom base
+    ///      URL) keep their per-connection context, which is genuinely theirs.
     pub fn active_model_info(&self) -> Option<ModelInfo> {
-        models::models_for_provider(&self.active_provider)
-            .into_iter()
-            .find(|m| m.id == self.active_model)
-            .or_else(|| {
-                self.providers
-                    .get(&self.active_provider)
-                    .map(|p| ModelInfo {
-                        id: self.active_model.clone(),
-                        name: self.active_model.clone(),
-                        context_window: p.context_window(),
-                        supports_tools: p.supports_tools(),
-                        supports_vision: p.supports_vision(),
-                        input_cost_per_million: p.input_cost_per_million(),
-                        output_cost_per_million: p.output_cost_per_million(),
-                        provider_id: self.active_provider.clone(),
-                    })
-            })
+        let catalog = models::builtin_model_catalog();
+        if let Some(found) = catalog
+            .iter()
+            .find(|m| m.provider_id == self.active_provider && m.id == self.active_model)
+            .or_else(|| catalog.iter().find(|m| m.id == self.active_model))
+        {
+            return Some(found.clone());
+        }
+
+        self.providers.get(&self.active_provider).map(|p| {
+            let local = matches!(self.active_provider.as_str(), "ollama" | "custom");
+            ModelInfo {
+                id: self.active_model.clone(),
+                name: self.active_model.clone(),
+                context_window: if local { p.context_window() } else { 128_000 },
+                supports_tools: p.supports_tools(),
+                supports_vision: false,
+                input_cost_per_million: 0.0,
+                output_cost_per_million: 0.0,
+                provider_id: self.active_provider.clone(),
+            }
+        })
     }
 
     /// Context window for the selected model, falling back to provider metadata.
