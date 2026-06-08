@@ -8,6 +8,82 @@ use super::ToolRegistry;
 use crate::agent::permissions::{effective_permission, EffectivePermission, PermissionStore};
 use crate::types::*;
 
+/// Common tool-name hallucinations / synonyms → canonical forge-osh tool names.
+/// Weaker models frequently invent plausible-but-wrong names (e.g. DeepSeek
+/// calling `search_content` instead of `search_files`). Mapping these instead
+/// of hard-failing keeps the agent productive and avoids the 3-strike circuit
+/// breaker firing on a recoverable naming mistake.
+const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
+    // search / grep family
+    ("search_content", "search_files"),
+    ("grep", "search_files"),
+    ("grep_files", "search_files"),
+    ("grep_search", "search_files"),
+    ("ripgrep", "search_files"),
+    ("rg", "search_files"),
+    ("code_search", "search_files"),
+    ("text_search", "search_files"),
+    ("search", "search_files"),
+    ("search_code", "search_files"),
+    // file finding / glob
+    ("glob", "find_files"),
+    ("glob_files", "find_files"),
+    ("find_file", "find_files"),
+    ("file_search", "find_files"),
+    ("fd", "find_files"),
+    // reads / writes / edits
+    ("read", "read_file"),
+    ("cat", "read_file"),
+    ("view_file", "read_file"),
+    ("open_file", "read_file"),
+    ("write", "write_file"),
+    ("edit", "edit_file"),
+    ("str_replace", "edit_file"),
+    ("str_replace_editor", "edit_file"),
+    ("apply_patch", "edit_file"),
+    ("list_dir", "list_directory"),
+    ("ls", "list_directory"),
+    ("list_files", "list_directory"),
+    // shell
+    ("shell", "bash"),
+    ("run_command", "bash"),
+    ("execute_command", "bash"),
+    ("terminal", "bash"),
+    // localization
+    ("find_symbol", "locate"),
+    ("where", "locate"),
+];
+
+/// Resolve a (possibly hallucinated) tool name to a registered tool.
+///
+/// Order: exact match → known alias → close fuzzy match (Jaro-Winkler ≥ 0.92)
+/// against the registered names. Returns the canonical name actually found, so
+/// the caller can run the right tool even when the model mislabeled it.
+fn resolve_tool_name(registry: &ToolRegistry, requested: &str) -> Option<String> {
+    if registry.get(requested).is_some() {
+        return Some(requested.to_string());
+    }
+    let lname = requested.trim().to_ascii_lowercase();
+    if let Some((_, canonical)) = TOOL_NAME_ALIASES.iter().find(|(k, _)| *k == lname) {
+        if registry.get(canonical).is_some() {
+            return Some((*canonical).to_string());
+        }
+    }
+    // Fuzzy: pick the closest registered name if it is very close (typo-level).
+    let names = registry.tool_names();
+    let mut best: Option<(f64, String)> = None;
+    for name in names {
+        let score = strsim::jaro_winkler(&lname, &name.to_ascii_lowercase());
+        if best.as_ref().map(|(b, _)| score > *b).unwrap_or(true) {
+            best = Some((score, name));
+        }
+    }
+    match best {
+        Some((score, name)) if score >= 0.92 => Some(name),
+        _ => None,
+    }
+}
+
 /// Executes tool calls with permission checking, schema validation, and
 /// cancellation support.
 pub struct ToolExecutor {
@@ -59,11 +135,26 @@ impl ToolExecutor {
         F: FnOnce(String, String, PermissionLevel) -> Fut,
         Fut: std::future::Future<Output = PermissionResponse>,
     {
-        let tool = match registry.get(&tool_call.name) {
-            Some(t) => t,
+        // Resolve the requested name (handles synonyms / typos like
+        // `search_content` → `search_files`) so a recoverable naming mistake
+        // doesn't dead-end the turn.
+        let resolved_name = match resolve_tool_name(registry, &tool_call.name) {
+            Some(n) => n,
             None => {
-                return ToolOutput::error(format!("Unknown tool: {}", tool_call.name));
+                let mut names = registry.tool_names();
+                names.sort();
+                return ToolOutput::error(format!(
+                    "Unknown tool: '{}'. This tool does not exist — do not invent tool names. \
+                     Use one of the available tools exactly as named: {}. \
+                     For searching code use `search_files` or `locate`; to find files use `find_files`.",
+                    tool_call.name,
+                    names.join(", ")
+                ));
             }
+        };
+        let tool = match registry.get(&resolved_name) {
+            Some(t) => t,
+            None => return ToolOutput::error(format!("Unknown tool: {}", tool_call.name)),
         };
 
         // ── Input validation against parameters_schema ───────────────────────

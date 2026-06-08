@@ -59,12 +59,17 @@ impl Tool for GraphQueryTool {
     }
 
     fn description(&self) -> &str {
-        "Query the semantic code graph built by /forge-graph. Provides deterministic, \
-        token-efficient codebase navigation without reading files. \
+        "Query the semantic code graph built by /forge-graph. Provides token-efficient codebase \
+        navigation without reading files. \
         Operations: find (search by name), context_pack (full context for a symbol), \
         blast_radius (what depends on a symbol), file_graph (all symbols in a file), \
         callers (find all direct callers of a function/method), \
-        mutations (all mutation points of a variable), stats (graph statistics)."
+        mutations (all mutation points of a variable), stats (graph statistics). \
+        NOTE: definitions (find, context_pack, file_graph) are reliable, but relationship edges \
+        (callers, blast_radius, mutations) are HEURISTIC — the graph is built by a fast regex \
+        parser, not a full compiler frontend, so call/mutation edges can be incomplete or \
+        approximate. Confirm critical relationship findings with lsp_references or search_files \
+        before relying on them for behavior-changing edits."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -225,7 +230,7 @@ impl Tool for GraphQueryTool {
                         ToolOutput::success(format!("No callers found for `{fqdn}`. \
                             Either it is never called, or the call pattern wasn't captured during graph build."))
                     } else {
-                        let mut out = format!("## Callers of `{fqdn}` ({} total)\n\n", callers.len());
+                        let mut out = format!("## Callers of `{fqdn}` ({} total, heuristic — verify with lsp_references)\n\n", callers.len());
                         for node in &callers {
                             out.push_str(&format!("- [{kind}] `{fqdn}` ({file}:{line})\n  {sig}\n",
                                 kind = node.kind.label(), fqdn = node.fqdn,
@@ -262,7 +267,7 @@ impl Tool for GraphQueryTool {
                         ToolOutput::success(format!("No MutatesState edges found for `{fqdn}`. \
                             Either it is never mutated, or this pattern wasn't captured during graph build."))
                     } else {
-                        let mut out = format!("## Mutation sources for `{fqdn}`\n\n");
+                        let mut out = format!("## Mutation sources for `{fqdn}` (heuristic — verify with lsp_references)\n\n");
                         for node in &sources {
                             out.push_str(&format!("- [{kind}] `{fqdn}` ({file}:{line})\n",
                                 kind = node.kind.label(), fqdn = node.fqdn,

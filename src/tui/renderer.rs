@@ -12,8 +12,8 @@ use ratatui::{
 use super::themes::Theme;
 use super::{
     AppState, DetailViewerState, GeneratedSkillPreviewState, HelpState, KeyManagerState,
-    McpCustomForm, McpManagerState, McpView, MessageRole, Modal, SessionBrowserState,
-    SkillBrowserState, MCP_CUSTOM_FIELD_COUNT,
+    McpCustomForm, McpManagerState, McpView, MentionKind, MentionState, MessageRole, Modal,
+    SessionBrowserState, SkillBrowserState, MCP_CUSTOM_FIELD_COUNT,
 };
 
 /// Render the entire TUI
@@ -65,6 +65,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     render_conversation(frame, chunks[1], state, &theme);
     render_input(frame, chunks[2], state, &theme);
     render_status_bar(frame, chunks[3], state, &theme);
+
+    // Inline @-mention autocomplete popup, floating above the input box.
+    if let Some(m) = &state.mention {
+        render_mention_popup(frame, chunks[2], m, &theme);
+    }
 
     // Render modal overlays on top
     if let Some(modal) = &state.modal {
@@ -269,6 +274,79 @@ fn render_context_info(frame: &mut Frame, r: &super::ContextReport, theme: &Them
     ) {
         lines.push(l);
     }
+    lines.push(Line::from(""));
+
+    // ── Session usage (cumulative across the whole session). ──
+    let big = |n: u64| -> String {
+        if n >= 1_000_000 {
+            format!("{:.2}M", n as f64 / 1_000_000.0)
+        } else if n >= 1_000 {
+            format!("{:.1}K", n as f64 / 1_000.0)
+        } else {
+            n.to_string()
+        }
+    };
+    lines.push(Line::from(Span::styled(
+        "Session usage (cumulative)",
+        Style::default()
+            .fg(theme.muted_fg)
+            .add_modifier(Modifier::ITALIC),
+    )));
+    let kv = |label: &str, value: String| -> Line {
+        Line::from(vec![
+            Span::styled(
+                format!("  {label:<16}: "),
+                Style::default().fg(theme.fg),
+            ),
+            Span::styled(value, Style::default().fg(theme.accent_bright)),
+        ])
+    };
+    lines.push(kv(
+        "Model",
+        format!("{} · {}", r.model_id, r.provider_id),
+    ));
+    lines.push(kv(
+        "Session",
+        if r.session_name.is_empty() {
+            "(unnamed)".to_string()
+        } else {
+            r.session_name.clone()
+        },
+    ));
+    lines.push(kv("Working dir", r.working_dir.clone()));
+    lines.push(kv(
+        "Current context",
+        format!(
+            "{} tokens ({:.0}% of {})",
+            big(r.current_context_tokens),
+            (r.current_context_tokens as f64 * 100.0 / limit as f64).min(100.0),
+            fmt(limit)
+        ),
+    ));
+    lines.push(kv(
+        "Messages",
+        format!(
+            "{} ({} user · {} assistant · {} tool)",
+            r.message_count, r.user_msgs, r.assistant_msgs, r.tool_msgs
+        ),
+    ));
+    lines.push(kv("API calls", r.api_calls.to_string()));
+    lines.push(kv("Input tokens", big(r.total_input_tokens)));
+    lines.push(kv("Output tokens", big(r.total_output_tokens)));
+    lines.push(kv("Cache read", big(r.total_cache_read_tokens)));
+    lines.push(kv("Cache write", big(r.total_cache_write_tokens)));
+    lines.push(kv(
+        "Cache hit rate",
+        format!("{:.1}%", r.cache_hit_rate),
+    ));
+    lines.push(kv(
+        "Cache savings",
+        format!("${:.4}", r.cache_savings_usd),
+    ));
+    lines.push(kv(
+        "Total cost",
+        crate::session::tokens::CostTracker::format_cost_total(r.total_cost_usd),
+    ));
     lines.push(Line::from(""));
 
     // ── Suggestion when messages dominate. ──
@@ -2767,6 +2845,17 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         }
     };
 
+    // Background process indicator (P1.4): show how many detached processes the
+    // agent has running so the user can see dev servers / watchers at a glance.
+    let proc_indicator = {
+        let running = crate::tools::process::registry().lock().running_count();
+        if running > 0 {
+            format!("  ⚙ {running} bg")
+        } else {
+            String::new()
+        }
+    };
+
     let bg = theme.status_bg;
     let base = Style::default().bg(bg);
     let keycap = base.fg(theme.accent).add_modifier(Modifier::BOLD);
@@ -2805,6 +2894,12 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
     if !goal_indicator.is_empty() {
         spans.push(Span::styled(goal_indicator, base.fg(theme.accent_bright)));
     }
+    if !proc_indicator.is_empty() {
+        spans.push(Span::styled(
+            proc_indicator,
+            base.fg(theme.ok_fg).add_modifier(Modifier::BOLD),
+        ));
+    }
     if !scroll_info.is_empty() {
         spans.push(Span::styled(scroll_info, base.fg(theme.faint_fg)));
     }
@@ -2829,7 +2924,8 @@ fn themed_modal_block<'a>(theme: &Theme) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent_dim))
+        // Brighter accent edge gives the floating panel a vivid "glass rim".
+        .border_style(Style::default().fg(theme.accent))
         .style(Style::default().bg(theme.modal_bg))
 }
 
@@ -2961,31 +3057,53 @@ fn render_help(frame: &mut Frame, theme: &Theme, h: &HelpState) {
     let area = centered_rect(82, 85, frame.area());
     frame.render_widget(Clear, area);
 
-    // Clamp scroll to the visible body height so scrolling past the end just
-    // pins the bottom of the text in view.
+    // Outer frame + title, then carve the interior into a scrollable body and a
+    // one-row search bar pinned to the bottom.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent_dim))
+        .style(Style::default().bg(theme.modal_bg))
+        .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+        .title(" Help  ↑↓/jk scroll · / search · n/N next/prev · Esc close ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    let body_area = chunks[0];
+    let search_area = chunks[1];
+
     let body_text = super::help::help_text();
-    let total_lines = body_text.lines().count() as u16;
-    let inner_h = area.height.saturating_sub(2); // borders
-    let max_scroll = total_lines.saturating_sub(inner_h);
+    let q = h.query.trim().to_lowercase();
+    let current_line = h.matches.get(h.current_match).copied();
+
+    // Build styled lines, highlighting query matches (current match strongest).
+    let mut lines: Vec<Line> = Vec::with_capacity(body_text.lines().count());
+    for (i, raw) in body_text.lines().enumerate() {
+        if q.is_empty() {
+            lines.push(Line::from(Span::styled(
+                raw.to_string(),
+                Style::default().fg(theme.fg),
+            )));
+        } else {
+            let is_current = Some(i as u16) == current_line;
+            lines.push(highlight_line(raw, &q, is_current, theme));
+        }
+    }
+
+    let total_lines = lines.len() as u16;
+    let max_scroll = total_lines.saturating_sub(body_area.height);
     let scroll = h.scroll.min(max_scroll);
 
-    let help = Paragraph::new(body_text)
+    let help = Paragraph::new(lines)
         .style(Style::default().fg(theme.fg))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.accent_dim))
-                .style(Style::default().bg(theme.modal_bg))
-                .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
-                .title(" Help  ↑↓/jk scroll · PgUp/PgDn page · g/G top/bottom · Esc close "),
-        )
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
+    frame.render_widget(help, body_area);
 
-    frame.render_widget(help, area);
-
-    // Scrollbar column on the right edge.
     if max_scroll > 0 {
         let mut sb_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -2993,8 +3111,193 @@ fn render_help(frame: &mut Frame, theme: &Theme, h: &HelpState) {
             .end_symbol(Some("▼"))
             .thumb_style(Style::default().fg(theme.accent))
             .track_style(Style::default().fg(theme.scrollbar_fg));
-        frame.render_stateful_widget(sb, area, &mut sb_state);
+        frame.render_stateful_widget(sb, body_area, &mut sb_state);
     }
+
+    // ── Search bar ────────────────────────────────────────────────────────
+    let count = if h.query.trim().is_empty() {
+        String::new()
+    } else if h.matches.is_empty() {
+        "  (no matches)".to_string()
+    } else {
+        format!("  ({}/{})", h.current_match + 1, h.matches.len())
+    };
+    let icon_style = if h.search_active {
+        Style::default()
+            .fg(theme.accent_bright)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.faint_fg)
+    };
+    let query_text = if h.query.is_empty() && !h.search_active {
+        "Press / to search".to_string()
+    } else if h.search_active {
+        format!("{}\u{2588}", h.query) // block cursor while focused
+    } else {
+        h.query.clone()
+    };
+    let hint = if h.search_active {
+        "   ↑↓ prev/next · Enter next · Esc done"
+    } else {
+        "   / search · n/N jump"
+    };
+    let bar = Line::from(vec![
+        Span::styled(" search ", icon_style),
+        Span::styled(query_text, Style::default().fg(theme.fg)),
+        Span::styled(count, Style::default().fg(theme.accent)),
+        Span::styled(hint, Style::default().fg(theme.faint_fg)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(bar).style(Style::default().bg(theme.modal_bg)),
+        search_area,
+    );
+}
+
+/// Build a styled help line, highlighting every (case-insensitive) occurrence
+/// of `q_lower`. The current match line uses a filled highlight; other match
+/// lines use a bright accent. Falls back to whole-line highlight for non-ASCII
+/// lines so byte-offset slicing can never panic on multi-byte characters.
+fn highlight_line(raw: &str, q_lower: &str, is_current: bool, theme: &Theme) -> Line<'static> {
+    let base = Style::default().fg(theme.fg);
+    let hl = if is_current {
+        Style::default()
+            .fg(theme.modal_bg)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.accent_bright)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    if q_lower.is_empty() {
+        return Line::from(Span::styled(raw.to_string(), base));
+    }
+
+    // Non-ASCII: avoid byte-offset slicing across multi-byte chars.
+    if !raw.is_ascii() || !q_lower.is_ascii() {
+        if raw.to_lowercase().contains(q_lower) {
+            return Line::from(Span::styled(raw.to_string(), hl));
+        }
+        return Line::from(Span::styled(raw.to_string(), base));
+    }
+
+    // ASCII fast path: to_lowercase preserves byte length, so offsets into the
+    // lowercased copy map 1:1 onto `raw` and always land on char boundaries.
+    let lower = raw.to_ascii_lowercase();
+    let qlen = q_lower.len();
+    let mut spans: Vec<Span> = Vec::new();
+    let mut start = 0usize;
+    while let Some(rel) = lower[start..].find(q_lower) {
+        let m = start + rel;
+        if m > start {
+            spans.push(Span::styled(raw[start..m].to_string(), base));
+        }
+        let end = m + qlen;
+        spans.push(Span::styled(raw[m..end].to_string(), hl));
+        start = end;
+    }
+    if start < raw.len() {
+        spans.push(Span::styled(raw[start..].to_string(), base));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(raw.to_string(), base));
+    }
+    Line::from(spans)
+}
+
+/// Inline `@`-mention picker, floating directly above the input box (P0.2).
+fn render_mention_popup(frame: &mut Frame, input_area: Rect, m: &MentionState, theme: &Theme) {
+    let screen = frame.area();
+    let max_rows = 10u16;
+    let list_h = (m.candidates.len() as u16).min(max_rows).max(1);
+    let height = list_h + 2; // borders
+    let width = 72u16.min(screen.width.saturating_sub(4)).max(24);
+    let x = input_area
+        .x
+        .saturating_add(1)
+        .min(screen.width.saturating_sub(width));
+    let y = input_area.y.saturating_sub(height);
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+
+    let title = format!(" @{}  ↑↓ select · Enter/Tab insert · Esc cancel ", m.query);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.modal_bg))
+        .title_style(
+            Style::default()
+                .fg(theme.accent_bright)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(title);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if m.candidates.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "  no matches",
+                Style::default().fg(theme.faint_fg),
+            ))
+            .style(Style::default().bg(theme.modal_bg)),
+            inner,
+        );
+        return;
+    }
+
+    let visible = inner.height as usize;
+    let start = if m.selected >= visible {
+        m.selected - visible + 1
+    } else {
+        0
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, c) in m.candidates.iter().enumerate().skip(start).take(visible) {
+        let is_sel = i == m.selected;
+        let icon = match c.kind {
+            MentionKind::Dir => "▸ ",
+            MentionKind::File => "· ",
+            MentionKind::Symbol => "ƒ ",
+            MentionKind::Special => "* ",
+        };
+        let row_style = if is_sel {
+            Style::default()
+                .fg(theme.modal_bg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        let hint_style = if is_sel {
+            Style::default().fg(theme.modal_bg).bg(theme.accent)
+        } else {
+            Style::default().fg(theme.faint_fg)
+        };
+        let mut spans = vec![
+            Span::styled(
+                format!("{}{}", if is_sel { "> " } else { "  " }, icon),
+                row_style,
+            ),
+            Span::styled(c.label.clone(), row_style),
+        ];
+        if !c.hint.is_empty() {
+            spans.push(Span::styled(format!("  {}", c.hint), hint_style));
+        }
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.modal_bg)),
+        inner,
+    );
 }
 
 fn render_detail_viewer(frame: &mut Frame, dv: &DetailViewerState, theme: &Theme) {

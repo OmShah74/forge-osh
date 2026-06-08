@@ -3,8 +3,10 @@ pub mod code;
 pub mod executor;
 pub mod fs;
 pub mod git;
+pub mod locate;
 pub mod notebook;
 pub mod powershell;
+pub mod process;
 pub mod search;
 pub mod shell;
 pub mod skills;
@@ -98,6 +100,11 @@ impl ToolRegistry {
             Box::new(shell::BashTool::from_config(&config.tools.bash)),
         );
         registry.register_enabled(config, Box::new(powershell::PowerShellTool::default()));
+
+        // ── Background process management ────────────────────────────────────
+        registry.register_enabled(config, Box::new(process::ProcessStatusTool));
+        registry.register_enabled(config, Box::new(process::ProcessLogsTool));
+        registry.register_enabled(config, Box::new(process::ProcessStopTool));
 
         // ── Git ────────────────────────────────────────────────────────────
         registry.register_enabled(config, Box::new(git::GitStatusTool));

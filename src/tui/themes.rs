@@ -7,6 +7,20 @@ const fn rgb(hex: u32) -> Color {
     Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
+/// Lighten a packed `0xRRGGBB` colour by adding `amt` to each channel
+/// (saturating). Used to push the accent ramp brighter and to lift panel
+/// surfaces above the canvas for a layered, glass-like sense of depth —
+/// uniformly across every theme.
+const fn lighten(hex: u32, amt: u8) -> u32 {
+    let r = (hex >> 16) as u8;
+    let g = (hex >> 8) as u8;
+    let b = hex as u8;
+    let r = r.saturating_add(amt) as u32;
+    let g = g.saturating_add(amt) as u32;
+    let b = b.saturating_add(amt) as u32;
+    (r << 16) | (g << 8) | b
+}
+
 /// A forge-osh theme.
 ///
 /// The colour system is the "Molten Rust" design language (see
@@ -118,19 +132,22 @@ fn build(p: Palette) -> Theme {
         header_fg: rgb(p.fg_bright),
         status_bg: rgb(p.raised),
         status_fg: rgb(p.fg_faint),
-        modal_bg: rgb(p.overlay),
-        highlight_bg: rgb(p.sel),
-        spinner_fg: rgb(p.warning),
+        // Lift the modal/overlay surface so panels read as a brighter pane of
+        // "glass" floating above the canvas.
+        modal_bg: rgb(lighten(p.overlay, 6)),
+        highlight_bg: rgb(lighten(p.sel, 4)),
+        spinner_fg: rgb(p.accent_bright),
         error_fg: rgb(p.error),
         warning_fg: rgb(p.warning),
         muted_fg: rgb(p.fg_muted),
-        prompt_fg: rgb(p.accent),
+        prompt_fg: rgb(p.accent_bright),
 
-        accent: rgb(p.accent),
-        accent_bright: rgb(p.accent_bright),
+        // Brighter accent ramp for more vivid gradients/highlights.
+        accent: rgb(lighten(p.accent, 10)),
+        accent_bright: rgb(lighten(p.accent_bright, 26)),
         accent_dim: rgb(p.accent_dim),
-        panel_bg: rgb(p.panel),
-        raised_bg: rgb(p.raised),
+        panel_bg: rgb(lighten(p.panel, 6)),
+        raised_bg: rgb(lighten(p.raised, 9)),
         badge_fg: rgb(p.void),
         selection_fg: rgb(p.fg_bright),
         selection_bg: rgb(p.sel_hot),

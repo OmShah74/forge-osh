@@ -316,25 +316,21 @@ impl CostTracker {
         }
     }
 
-    /// Get formatted cost string
-    pub fn format_cost(&self) -> String {
-        if self.total_cost_usd == 0.0 {
+    /// Format an arbitrary cost figure with the same rules as [`Self::format_cost`].
+    /// Exposed so the TUI can render a LIVE (base + in-flight estimate) cost
+    /// during streaming without mutating the tracker.
+    pub fn format_cost_total(cost: f64) -> String {
+        if cost == 0.0 {
             "Free".to_string()
-        } else if self.total_cost_usd < 0.01 {
-            format!("${:.4}", self.total_cost_usd)
+        } else if cost < 0.01 {
+            format!("${cost:.4}")
         } else {
-            format!("${:.3}", self.total_cost_usd)
+            format!("${cost:.3}")
         }
     }
 
-    /// Get formatted token usage string. Includes cached tokens because they
-    /// still occupy context window space and contribute to the bill (even
-    /// if at a discounted rate).
-    pub fn format_tokens(&self) -> String {
-        let total = self.total_input_tokens
-            + self.total_output_tokens
-            + self.total_cache_read_tokens
-            + self.total_cache_write_tokens;
+    /// Format an arbitrary token total with the same rules as [`Self::format_tokens`].
+    pub fn format_tokens_total(total: u64) -> String {
         if total > 1_000_000 {
             format!("{:.1}M tokens", total as f64 / 1_000_000.0)
         } else if total > 1_000 {
@@ -342,6 +338,26 @@ impl CostTracker {
         } else {
             format!("{total} tokens")
         }
+    }
+
+    /// Total tokens accounted so far (input + output + cache read/write).
+    pub fn total_tokens_all(&self) -> u64 {
+        self.total_input_tokens
+            + self.total_output_tokens
+            + self.total_cache_read_tokens
+            + self.total_cache_write_tokens
+    }
+
+    /// Get formatted cost string
+    pub fn format_cost(&self) -> String {
+        Self::format_cost_total(self.total_cost_usd)
+    }
+
+    /// Get formatted token usage string. Includes cached tokens because they
+    /// still occupy context window space and contribute to the bill (even
+    /// if at a discounted rate).
+    pub fn format_tokens(&self) -> String {
+        Self::format_tokens_total(self.total_tokens_all())
     }
 
     /// One-line cache summary suitable for the /cost modal:

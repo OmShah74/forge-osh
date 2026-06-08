@@ -342,7 +342,12 @@ impl Tool for BashTool {
         "Execute a bash/shell command. Returns combined stdout and stderr. \
         Commands run in the current working directory. \
         Large outputs are truncated from the front (tail is preserved). \
-        Use timeout_seconds to override the per-command timeout (max 300s)."
+        Use timeout_seconds to override the per-command timeout (max 300s). \
+        Set background: true for long-running processes (dev servers, watchers, \
+        file-system observers) that should keep running across turns — the call \
+        returns immediately with a process id you can poll with process_status / \
+        process_logs and terminate with process_stop. Never use background for \
+        commands you need the output of right now."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -360,6 +365,10 @@ impl Tool for BashTool {
                 "working_dir": {
                     "type": "string",
                     "description": "Override the working directory for this command (optional)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run detached as a long-running background process and return immediately with a process id (default: false). Use for dev servers / watchers."
                 }
             },
             "required": ["command"]
@@ -416,6 +425,13 @@ impl Tool for BashTool {
                 }
             })
             .unwrap_or_else(|| ctx.working_dir.clone());
+
+        // Background mode: hand the command off to the session process registry
+        // and return immediately. The process keeps running across turns and is
+        // controlled via process_status / process_logs / process_stop.
+        if input["background"].as_bool().unwrap_or(false) {
+            return super::process::start_and_describe(command, work_dir);
+        }
 
         // Choose shell based on OS
         let (shell, flag) = if cfg!(target_os = "windows") {

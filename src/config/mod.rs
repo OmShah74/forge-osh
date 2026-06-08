@@ -357,6 +357,13 @@ pub struct UiConfig {
     pub compact_tool_output: bool,
     #[serde(default = "default_max_conversation_lines")]
     pub max_conversation_lines: usize,
+    /// When true, the TUI captures the mouse for wheel-scroll. This DISABLES the
+    /// terminal's native click-drag text selection (you cannot select chat or
+    /// input text with the mouse). Default is false so text selection works like
+    /// Claude Code; toggle live with `/mouse`. Keyboard scroll (↑/↓/PgUp/PgDn)
+    /// always works regardless.
+    #[serde(default)]
+    pub mouse_capture: bool,
 }
 
 impl Default for UiConfig {
@@ -370,6 +377,7 @@ impl Default for UiConfig {
             timestamp_messages: false,
             compact_tool_output: true,
             max_conversation_lines: default_max_conversation_lines(),
+            mouse_capture: false,
         }
     }
 }
@@ -486,6 +494,7 @@ fn default_tools() -> Vec<String> {
         "git_pull",
         "powershell",
         "graph_query",
+        "locate",
         "lsp_diagnostics",
         "lsp_definition",
         "lsp_references",
@@ -493,6 +502,16 @@ fn default_tools() -> Vec<String> {
         "lsp_document_symbols",
         "lsp_workspace_symbols",
         "lsp_rename",
+        // Live task planner + team coordination + background processes. These
+        // are registered via register_enabled; they must be listed here or the
+        // non-empty allowlist would silently disable them.
+        "update_plan",
+        "team_post",
+        "team_read",
+        "spawn_team",
+        "process_status",
+        "process_logs",
+        "process_stop",
     ]
     .into_iter()
     .map(String::from)
